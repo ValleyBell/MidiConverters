@@ -1,15 +1,20 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 #include <math.h>
 
 typedef unsigned char	bool;
 typedef unsigned char	UINT8;
 typedef unsigned short	UINT16;
+typedef signed short	INT16;
 typedef unsigned long	UINT32;
 
 #define false	0x00
 #define true	0x01
+
+#define SHOW_DEBUG_MESSAGES
+
 
 bool LetterInArgument(char* Arg, char Letter);
 
@@ -19,6 +24,7 @@ void WriteBigEndianL(UINT8* Buffer, UINT32 Value);
 void WriteBigEndianS(UINT8* Buffer, UINT16 Value);
 float OPN2DB(UINT8 TL);
 UINT8 DB2Mid(float DB);
+
 
 static bool OldDriver;
 static bool InsLimit;
@@ -214,7 +220,19 @@ UINT8 DataEast2Mid(UINT32 InLen, UINT8* InData, UINT32 InAddr, UINT32* OutLen, U
 	UINT32 LoopAddr[0x10];
 	UINT8 LoopCur[0x10];
 	UINT32 TempLng;
+	INT16 TempSSht;
 	UINT8 TempByt;
+	UINT8 CurNote;
+	UINT8 LastNote;
+	UINT8 NoteDiff;
+	UINT32 CurDly;
+	UINT8 PitchToNote;
+	INT16 PitchRange;
+	UINT8 PbStpCnt;
+	UINT8 LastPbRPN;
+	UINT8 NoAtk;
+	
+	UINT8 MsgMask;
 	
 	*OutLen = 0x10000;	// 64 KB should be enough
 	*OutData = (UINT8*)malloc(*OutLen);
@@ -256,45 +274,203 @@ UINT8 DataEast2Mid(UINT32 InLen, UINT8* InData, UINT32 InAddr, UINT32* OutLen, U
 			if (InData[InAddr + 0x06 * 0x04 + CurTrk] == 0xFF)
 				TrkEnd = true;
 		}
+		PitchToNote = 0xFF;
+		LastNote = 0xFF;
+		NoAtk = 0x00;
+		LastPbRPN = 0x00;
+		MsgMask = 0x00;
 		while(! TrkEnd)
 		{
 			if (! (InData[InPos] & 0x80))
 			{
-				TempByt = InData[InPos + 0x00];
-				if (OldDriver)
+				CurNote = InData[InPos + 0x00];
+				if (CurTrk < 0x05)
 				{
-					if (CurTrk < 0x05 && TempByt < 0x7F)
+					if (OldDriver)
 					{
-						if ((TempByt & 0x0F) >= 0x0C)
-							printf("Invalid Note %02X on track %X\n", TempByt, CurTrk);
-						TempByt = (1 + (TempByt & 0xF0) / 0x10) * 12 + (TempByt & 0x0F);
+						// Note BCD-Code as used in Side Pocket
+						if (CurNote < 0x7F)
+						{
+							if ((CurNote & 0x0F) >= 0x0C)
+								printf("Invalid Note %02X on track %X\n", CurNote, CurTrk);
+							CurNote = (1 + (CurNote & 0xF0) / 0x10) * 12 + (CurNote & 0x0F);
+						}
+						if (PitchToNote != 0xFF)
+						{
+							if ((PitchToNote & 0x0F) >= 0x0C)
+								printf("Invalid Pitch-Note %02X on track %X\n", PitchToNote, CurTrk);
+							PitchToNote = (1 + (PitchToNote & 0xF0) / 0x10) * 12 + (PitchToNote & 0x0F);
+						}
+					}
+					else
+					{
+						if (CurNote < 0x7F)
+							CurNote += 11;
+						if (PitchToNote != 0xFF)
+							PitchToNote += 11;
 					}
 				}
-				DstData[DstPos + 0x00] = 0x90 | MidChn;
-				DstData[DstPos + 0x01] = TempByt;
-				DstData[DstPos + 0x02] = (TempByt == 0x7F) ? 0x00 : 0x7F;
-				DstPos += 0x03;
 				
-				if (InData[InPos + 0x01] & 0x80)
+				// Check for Pitch Bend or NoAttack flag
+				// and prepare inserting Pitch Bends
+				if ((PitchToNote != 0xFF || (NoAtk & 0x01)) && CurNote < 0x7F)
 				{
-					DstData[DstPos + 0x00] = 0x81;
-					DstData[DstPos + 0x01] = InData[InPos + 0x01] & 0x7F;
-					DstPos += 0x02;
+					NoteDiff = 0x00;
+					if (PitchToNote != 0xFF)
+					{
+						TempByt = abs(PitchToNote - CurNote);
+						if (NoteDiff < TempByt)
+							NoteDiff = TempByt;
+					}
+					if ((NoAtk & 0x01) && LastNote != 0xFF)
+					{
+						TempByt = abs(CurNote - LastNote);
+						if (NoteDiff < TempByt)
+							NoteDiff = TempByt;
+					}
+					
+					// (re-)write Pitch Bend Range RPN
+					if (NoteDiff > LastPbRPN)
+					{
+						if (NoteDiff < 0x02)
+							NoteDiff = 0x02;
+						DstData[DstPos + 0x00] = 0xB0 | MidChn;
+						DstPos += 0x01;
+						if (! LastPbRPN)
+						{
+							DstData[DstPos + 0x00] = 0x65;	// RPN MSB
+							DstData[DstPos + 0x01] = 0x00;
+							DstData[DstPos + 0x02] = 0x00;
+							DstData[DstPos + 0x03] = 0x64;	// RPN LSB
+							DstData[DstPos + 0x04] = 0x00;
+							DstData[DstPos + 0x05] = 0x00;
+							DstPos += 0x06;
+						}
+						DstData[DstPos + 0x00] = 0x06;	// Data MSB
+						DstData[DstPos + 0x01] = NoteDiff;
+						DstData[DstPos + 0x02] = 0x00;
+						DstPos += 0x03;
+						LastPbRPN = NoteDiff;
+					}
+				}
+				
+				if (! (NoAtk & 0x01))
+				{
+					// simply write the current Note
+					DstData[DstPos + 0x00] = 0x90 | MidChn;
+					DstData[DstPos + 0x01] = CurNote;
+					DstData[DstPos + 0x02] = (CurNote == 0x7F) ? 0x00 : 0x7F;
+					DstPos += 0x03;
 				}
 				else
 				{
-					DstData[DstPos + 0x00] = InData[InPos + 0x01];
-					DstPos += 0x01;
+					// write Pitch Bend to current Note
+					if (CurNote < 0x7F)
+					{
+						if (LastNote < 0x7F && CurNote != LastNote)
+						{
+							PitchRange = 0x2000 * (CurNote - LastNote) / LastPbRPN;
+							if (PitchRange >= 0x2000)
+								PitchRange = 0x1FFF;
+							else if (PitchRange < -0x2000)
+								PitchRange = -0x2000;
+						}
+						else
+						{
+							PitchRange = 0x0000;
+						}
+						PitchRange += 0x2000;
+					}
+					else if (CurNote == 0x7F)
+					{
+						// Note: a delay causes the note to be held endlessly
+					}
+					
+					DstData[DstPos + 0x00] = 0xE0 | MidChn;
+					DstData[DstPos + 0x01] = (PitchRange >> 0) & 0x7F;
+					DstData[DstPos + 0x02] = (PitchRange >> 7) & 0x7F;
+					DstPos += 0x03;
+					
+					if (LastNote < 0x7F)
+						CurNote = LastNote;
+				}
+				if (PitchToNote != 0xFF && CurNote == 0x7F)
+				{
+					// disable PitchBend for delays
+					PitchToNote = 0xFF;
 				}
 				
-				if (TempByt < 0x7F)
+				if (PitchToNote == 0xFF)
 				{
-					DstData[DstPos + 0x00] = 0x90 | MidChn;
-					DstData[DstPos + 0x01] = TempByt;
-					DstData[DstPos + 0x02] = 0x00;
-					DstData[DstPos + 0x03] = 0x00;
-					DstPos += 0x04;
+					// write normal delay
+					if (InData[InPos + 0x01] & 0x80)
+					{
+						DstData[DstPos + 0x00] = 0x81;
+						DstData[DstPos + 0x01] = InData[InPos + 0x01] & 0x7F;
+						DstPos += 0x02;
+					}
+					else
+					{
+						DstData[DstPos + 0x00] = InData[InPos + 0x01];
+						DstPos += 0x01;
+					}
 				}
+				else
+				{
+					// write Pitch Bends over (delay) ticks
+					PitchRange = 0x2000 * (PitchToNote - CurNote) / LastPbRPN;
+					
+					DstData[DstPos + 0x00] = 0x00;
+					DstData[DstPos + 0x01] = 0xE0 | MidChn;
+					DstPos += 0x02;
+					
+					PbStpCnt = InData[InPos + 0x01];
+					while(PbStpCnt > 0x0C)
+						PbStpCnt >>= 1;
+					CurDly = 0x00;
+					for (TempByt = 0x00; TempByt < PbStpCnt; TempByt ++)
+					{
+						TempLng = InData[InPos + 0x01] * (TempByt + 0x01) / PbStpCnt;
+						TempSSht = PitchRange * TempByt / PbStpCnt;
+						if (TempSSht >= 0x2000)
+							TempSSht = 0x1FFF;
+						else if (TempSSht < -0x2000)
+							TempSSht = -0x2000;
+						TempSSht += 0x2000;
+						
+						DstData[DstPos + 0x00] = (TempSSht >> 0) & 0x7F;
+						DstData[DstPos + 0x01] = (TempSSht >> 7) & 0x7F;
+						DstData[DstPos + 0x02] = (UINT8)(TempLng - CurDly);
+						DstPos += 0x03;
+						
+						CurDly = TempLng;
+					}
+				}
+				
+				if (! (NoAtk & 0x02))
+				{
+					// turn Note off / reset Pitch Bend
+					if (CurNote < 0x7F)
+					{
+						DstData[DstPos + 0x00] = 0x90 | MidChn;
+						DstData[DstPos + 0x01] = CurNote;
+						DstData[DstPos + 0x02] = 0x00;
+						DstData[DstPos + 0x03] = 0x00;
+						DstPos += 0x04;
+					}
+					if ((NoAtk & 0x01) || PitchToNote != 0xFF)
+					{
+						TempSSht = 0x2000;
+						DstData[DstPos + 0x00] = 0xE0 | MidChn;
+						DstData[DstPos + 0x01] = (TempSSht >> 0) & 0x7F;
+						DstData[DstPos + 0x02] = (TempSSht >> 7) & 0x7F;
+						DstData[DstPos + 0x03] = 0x00;
+						DstPos += 0x04;
+					}
+				}
+				LastNote = CurNote;
+				NoAtk >>= 1;
+				PitchToNote = 0xFF;
 				InPos += 0x02;
 			}
 			else
@@ -341,12 +517,15 @@ UINT8 DataEast2Mid(UINT32 InLen, UINT8* InData, UINT32 InAddr, UINT32* OutLen, U
 					DstPos += 0x04;
 					InPos += 0x02;
 					break;
-				case 0x87:	// ??
-					DstData[DstPos + 0x00] = 0xB0 | MidChn;
-					DstData[DstPos + 0x01] = 0x6D;
-					DstData[DstPos + 0x02] = InData[InPos + 0x00] & 0x7F;
-					DstData[DstPos + 0x03] = 0x00;
-					DstPos += 0x04;
+				case 0x87:	// no-attack for the note AFTER the next one
+#ifdef SHOW_DEBUG_MESSAGES
+					if (! (MsgMask & 0x01))
+					{
+						printf("Channel %u: No Attack\n", CurTrk);
+						MsgMask |= 0x01;
+					}
+#endif
+					NoAtk |= 0x02;	// queue no-attack
 					InPos += 0x01;
 					break;
 				case 0x88:	// Loop Start
@@ -394,12 +573,16 @@ UINT8 DataEast2Mid(UINT32 InLen, UINT8* InData, UINT32 InAddr, UINT32* OutLen, U
 						InPos += 0x01;
 					}
 					break;
-				case 0x8D:	// ??
-					DstData[DstPos + 0x00] = 0xB0 | MidChn;
-					DstData[DstPos + 0x01] = 0x6D;
-					DstData[DstPos + 0x02] = InData[InPos + 0x00] & 0x7F;
-					DstData[DstPos + 0x03] = 0x00;
-					DstPos += 0x04;
+				case 0x8D:	// Portatemento/Pitch Bend
+					// pitch next note to aa
+#ifdef SHOW_DEBUG_MESSAGES
+					if (! (MsgMask & 0x02))
+					{
+						printf("Channel %u: Pitch Bend\n", CurTrk);
+						MsgMask |= 0x02;
+					}
+#endif
+					PitchToNote = InData[InPos + 0x01];
 					InPos += 0x02;
 					break;
 				case 0x8E:	// set LFO register (022)
@@ -411,6 +594,11 @@ UINT8 DataEast2Mid(UINT32 InLen, UINT8* InData, UINT32 InAddr, UINT32* OutLen, U
 					InPos += 0x02;
 					break;
 				case 0x8F:	// ??
+					if (! (MsgMask & 0x01))
+					{
+						printf("Channel %u: Command %02X\n", CurTrk, InData[InPos + 0x00]);
+						MsgMask |= 0x01;
+					}
 					DstData[DstPos + 0x00] = 0xB0 | MidChn;
 					DstData[DstPos + 0x01] = 0x6D;
 					DstData[DstPos + 0x02] = InData[InPos + 0x00] & 0x7F;
@@ -419,6 +607,11 @@ UINT8 DataEast2Mid(UINT32 InLen, UINT8* InData, UINT32 InAddr, UINT32* OutLen, U
 					InPos += 0x01;
 					break;
 				case 0x90:	// ??
+					if (! (MsgMask & 0x02))
+					{
+						printf("Channel %u: Command %02X\n", CurTrk, InData[InPos + 0x00]);
+						MsgMask |= 0x02;
+					}
 					DstData[DstPos + 0x00] = 0xB0 | MidChn;
 					DstData[DstPos + 0x01] = 0x6D;
 					DstData[DstPos + 0x02] = InData[InPos + 0x00] & 0x7F;
@@ -427,6 +620,11 @@ UINT8 DataEast2Mid(UINT32 InLen, UINT8* InData, UINT32 InAddr, UINT32* OutLen, U
 					InPos += 0x03;
 					break;
 				case 0x91:	// ??
+					if (! (MsgMask & 0x04))
+					{
+						printf("Channel %u: Command %02X\n", CurTrk, InData[InPos + 0x00]);
+						MsgMask |= 0x04;
+					}
 					DstData[DstPos + 0x00] = 0xB0 | MidChn;
 					DstData[DstPos + 0x01] = 0x6D;
 					DstData[DstPos + 0x02] = InData[InPos + 0x00] & 0x7F;
@@ -455,6 +653,11 @@ UINT8 DataEast2Mid(UINT32 InLen, UINT8* InData, UINT32 InAddr, UINT32* OutLen, U
 					InPos += 0x02;
 					break;
 				case 0x93:	// ??
+					if (! (MsgMask & 0x08))
+					{
+						printf("Channel %u: Command %02X\n", CurTrk, InData[InPos + 0x00]);
+						MsgMask |= 0x08;
+					}
 					DstData[DstPos + 0x00] = 0xB0 | MidChn;
 					DstData[DstPos + 0x01] = 0x6D;
 					DstData[DstPos + 0x02] = InData[InPos + 0x00] & 0x7F;
@@ -462,7 +665,12 @@ UINT8 DataEast2Mid(UINT32 InLen, UINT8* InData, UINT32 InAddr, UINT32* OutLen, U
 					DstPos += 0x04;
 					InPos += 0x02;
 					break;
-				case 0x94:	// ??
+				case 0x94:	// Frequency Displacement
+					if (! (MsgMask & 0x10))
+					{
+						printf("Channel %u: Command %02X\n", CurTrk, InData[InPos + 0x00]);
+						MsgMask |= 0x10;
+					}
 					DstData[DstPos + 0x00] = 0xB0 | MidChn;
 					DstData[DstPos + 0x01] = 0x6D;
 					DstData[DstPos + 0x02] = InData[InPos + 0x00] & 0x7F;
@@ -477,11 +685,18 @@ UINT8 DataEast2Mid(UINT32 InLen, UINT8* InData, UINT32 InAddr, UINT32* OutLen, U
 				case 0x96:	// DAC Volume
 					DstData[DstPos + 0x00] = 0xB0 | MidChn;
 					DstData[DstPos + 0x01] = 0x07;
-#if 1
-					DstData[DstPos + 0x02] = 0x7F - InData[InPos + 0x01] * 0x20;
+#if 0
+					TempSSht = 0x7F - InData[InPos + 0x01] * 0x20;
 #else
-					DstData[DstPos + 0x02] = DB2Mid(-6.0f * InData[InPos + 0x01]);
+					// The volume parameter is a Bit-Shift value.
+					// 1x BitShift Right means half volume, i.e. -6 db.
+					TempSSht = DB2Mid(-6.0f * InData[InPos + 0x01]);
 #endif
+					if (TempSSht < 0x00)
+						TempSSht = 0x00;
+					else if (TempSSht > 0x7F)
+						TempSSht = 0x7F;
+					DstData[DstPos + 0x02] = (UINT8)TempSSht;
 					DstData[DstPos + 0x03] = 0x00;
 					DstPos += 0x04;
 					InPos += 0x02;
@@ -497,6 +712,14 @@ UINT8 DataEast2Mid(UINT32 InLen, UINT8* InData, UINT32 InAddr, UINT32* OutLen, U
 					break;
 				}
 			}
+		}
+		if (NoAtk & 0x01)
+		{
+			DstData[DstPos + 0x00] = 0x90 | MidChn;
+			DstData[DstPos + 0x01] = LastNote;
+			DstData[DstPos + 0x02] = 0x00;
+			DstData[DstPos + 0x03] = 0x00;
+			DstPos += 0x04;
 		}
 		DstData[DstPos + 0x00] = 0xFF;
 		DstData[DstPos + 0x01] = 0x2F;
