@@ -1,0 +1,81 @@
+SBM5 Sequence Format
+--------------------
+
+RAM Data:
+0200 - Tempo (higher = faster)
+0201-0208 / 0209-0210 - Channel Pointers (get copied to 0004/0005, little endian)
+0211-0218 - current note
+0219-0220 - current octave
+0221-0228 - remaining ticks of current event
+0229-0230 - remaining ticks of current note?
+0273-027A - current Volume setting (ORed with 80)
+027B-0282 - current Pan setting
+
+
+Note: All pointers are Little Endian.
+
+Header:
+2 bytes - unknown pointer (always 3002 - points to next byte)
+2 bytes - unknown pointer (always 3002 - points to actual header data)
+2 bytes - unknown (always 0000 - unused?)
+1 byte  - unknown (always 01)
+1 byte  - Channel Mask (FF)
+? bytes - Channel Pointers (up to 8 2-byte-ptrs)
+? bytes - additional header data (like samples?)
+
+
+Commands:
+D1 aa - Set Tempo to aa
+D2 aa - Set Octave
+D3 - Octave up (limited to 5)
+D4 - Octave down (set to 0 on overflow)
+D5 aa - Set Decay Rate (low = fast)
+D6 aa - Set Instrument
+D9 aa - Set Volume (range: 00..4F, 50-7F -> 4F, 80-FF -> 00)
+DA aa - Set Pan (00..0F..1E)
+DC aa - Change Volume (via add/subtract)
+	-> limited to 00..4F
+DD aa - Loop Start (loop aa times)
+DE - Loop End
+DF aa bb - GoSub to bbaa
+E1 aa - ??
+E2 aa bb cc - ??
+E3 aa - ??
+E6 - ??
+E7 aa - Set Key Displacement
+E8 aa - Change Key Displacement (via add/subtract)
+	also applied on drum frequency
+EB - Master Loop Start?
+EC - Master Loop End?
+EF aa bb - Set Portamento (from delta-tone)
+	aa - ??
+	bb - 0 = off, 1 = on
+	Does portamento from (ToneToPlay - DeltaTone) to (ToneToPlay)
+F0 aa - Set Portamento Delta-Tone
+F1 aa bb - Set Portamento (from last tone)
+	aa - Speed, 00 = off
+	bb - ??
+FE aa - Set Mode
+	3 - enables Drum mode (drums have per-drum volume and pan settings)
+	1/4 - unknown
+FF - Return from GoSub / Track End
+
+
+
+< D0: Notes
+Bit Format: nnnnkddd
+n - Note
+	0 - rest
+	1..C - note
+k - keep playing
+	0 - restart next note
+	1 - continue playing this note with the next note command
+d - Delay 
+	0 - use next byte for delay (in 1/24 steps)
+	1 - 1/1
+	2 - 1/2
+	3 - 1/4
+	4 - 1/8
+	5 - 1/16
+	6 - 1/32
+	7 - 1/64 (verified with "Space Station")
