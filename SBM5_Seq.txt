@@ -19,7 +19,8 @@ Header:
 2 bytes - unknown pointer (always 3002 - points to actual header data)
 2 bytes - unknown (always 0000 - unused?)
 1 byte  - unknown (always 01)
-1 byte  - Channel Mask (FF)
+1 byte  - Channel Bitmask (usually FF for music tracks)
+	The lowest bit (01) is channel 1, the highest bit (80) is channel 8.
 ? bytes - Channel Pointers (up to 8 2-byte-ptrs)
 ? bytes - additional header data (like samples?)
 

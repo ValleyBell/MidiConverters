@@ -1,0 +1,68 @@
+FFMQ Sequence Format
+--------------------
+[see also
+http://wiki.superfamicom.org/snes/show/Final+Fantasy+-+Mystic+Quest
+http://wiki.superfamicom.org/snes/show/Final+Fantasy+5
+]
+
+Channel Pointers:
+2-byte Offsets, located at 000E-001D
+
+Commands:
+00-D1		(Value / 15) = Note (12 - hold note, 13 - rest)
+		(Value % 15) = Delay (higher - shorter)
+D2 xx		Volume? (00 min .. FF max)
+D3 xx yy	?? [Volume Slide? ; xx = Length, yy = Dest?]	[ffmq-17/27]
+D4 xx		Panorama? (00 min .. 80 centre .. FF max)
+D6 nn xx	Note Slide (nn - note, xx - ??) [xx = Delay, yy = Length, zz = Key?]
+[D7 xx xx xx xx	Set Modulation Data]
+D7 ss tt dd	Set Modulation Data
+	ss - Speed
+	tt - Delay Time (1/4 = 48 ticks)
+	dd - Depth
+D8		Modulation Off
+DB xx xx	??
+DC		??
+E2		??
+E3		??
+E4 oo		Set Octave?
+E5		Octave Up
+E6		Octave Down
+E7 xx		??
+E8 xx		??	[ffmq-11]
+E9 xx		??	[ffmq-11/21/23]
+EA ii		Set Instrument ii
+EB xx		??
+EC xx		??
+EE rr		Set Decay Rate (00 - min, used for Open Hi-Hat)
+EF		Reset Decay Rate (
+F0 tt		Loop Start (loop tt+1 times)
+F1		Loop End (nested loops are possible)
+F2		Track End?	[ffmq-15/23/27]
+F3 xx		Tempo in BPM? ["about 24/60 of beat per minutes" ?]
+F4 xx		[Tempo Slide?]
+F5 xx		?? [Set echo]
+F7 xx xx	??
+F8 xx		?? [Set global volume]
+F9 cc aaaa	Conditional Jump / Loop Exit
+FA aaaa		Jump (aa - absolute address)
+FB ??		
+FC ??		
+FF		Track End?
+
+
+1/1	00, 1E, 69, 87
+3/2	01
+1/2	02, 6B
+1/3	03
+3/8	04, 6D
+1/4	05, 23
+1/6	06
+3/16	07
+1/8	08, 26, 53, CB
+1/12	09
+1/16	0A, 28, 73
+1/24	0B
+1/32	0C
+1/48	0D
+	0E
