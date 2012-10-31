@@ -1,23 +1,33 @@
+// Lemmings 3D MIDI Converter
+// --------------------------
+// Programmed by Valley Bell
+// Ported from VB6 to C in February 2012
+
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
 #include "stdtype.h"
 #include "stdbool.h"
+
 
 int main(int argc, char* argv[]);
 void NiceFileNameCase(char* Str, char* StrEnd);
 UINT8 ConvertL3DtoMID(char* InFile, char* OutFile);
+
 
 int main(int argc, char* argv[])
 {
 	char* FileName;
 	char* MidName;
 	char* TempPnt;
+	UINT8 RetVal;
 	
 	if (argc <= 1)
 	{
 		printf("Lemmings 3D MIDI Converter\n");
 		printf("--------------------------\n");
-		printf("Usage: Lem3DMid.exe input.snd [output.snd]\n");
+		printf("Usage: Lem3DMid.exe input.snd [output.mid]\n");
 		return 0;
 	}
 	
@@ -38,7 +48,10 @@ int main(int argc, char* argv[])
 		MidName = argv[2];
 	}
 	
-	RetVal = ConvertL3DtoMID(FileName, MidFile);
+	printf("%s -> %s ...", FileName, MidName);
+	RetVal = ConvertL3DtoMID(FileName, MidName);
+	if (! RetVal)
+		printf("Done.\n");
 	RetVal |= (RetVal >> 4) | (RetVal >> 3);	// 0x80 -> 0x08, 0x10 -> 0x02
 	RetVal &= 0x0F;
 	
@@ -54,7 +67,7 @@ void NiceFileNameCase(char* Str, char* StrEnd)
 	{
 		if (Str < StrEnd)
 		{
-			if (islower(Str))
+			if (islower(*Str))
 			{
 				IsUpperCase = false;
 				break;
@@ -82,7 +95,7 @@ UINT8 ConvertL3DtoMID(char* InFile, char* OutFile)
 	UINT32 InPos;
 	UINT32 OutPos;
 	
-	UINT16 TrkCount;
+	UINT8 TrkCount;
 	UINT32* TrkTOC;
 	UINT8 Tempo;
 	bool TrkEnd;
@@ -99,7 +112,7 @@ UINT8 ConvertL3DtoMID(char* InFile, char* OutFile)
 	hFile = fopen(InFile, "rb");
 	if (hFile == NULL)
 	{
-		printf("Error opening file!\n");
+		printf("Error opening input file!\n");
 		return 0x80;
 	}
 	
@@ -110,7 +123,7 @@ UINT8 ConvertL3DtoMID(char* InFile, char* OutFile)
 	
 	fseek(hFile, 0, SEEK_SET);
 	InData = (UINT8*)malloc(InSize);
-	fread(InData, 0x01, InData, hFile);
+	fread(InData, 0x01, InSize, hFile);
 	
 	fclose(hFile);
 	
@@ -140,6 +153,7 @@ UINT8 ConvertL3DtoMID(char* InFile, char* OutFile)
 		printf("Invalid file!\n");
 		return 0x10;
 	}
+	InPos = (InData[InPos + 0x01] << 8) | (InData[InPos + 0x00] << 0);
 	
 	// Read Footer
 	OutData[0x0C] = 0x00;
@@ -199,7 +213,7 @@ UINT8 ConvertL3DtoMID(char* InFile, char* OutFile)
 			
 			if (! (InData[InPos + 0x00] & 0x80))
 			{
-				if (LastNote == InData[InPos + 0x00])
+				if (LastNote == InData[InPos + 0x00] && IsSBL)
 				{
 					OutData[OutPos + 0x00] = 0x90 | SelChn;
 					OutData[OutPos + 0x01] = LastNote;
@@ -214,19 +228,20 @@ UINT8 ConvertL3DtoMID(char* InFile, char* OutFile)
 				InPos += 0x02;
 				OutPos += 0x03;
 			}
+			else if ((InData[InPos + 0x00] & 0xF0) == 0x80)
+			{
+				SelChn = InData[InPos + 0x00] & 0x0F;
+				OutData[OutPos + 0x00] = 0xFF;
+				OutData[OutPos + 0x01] = 0x20;
+				OutData[OutPos + 0x02] = 0x01;
+				OutData[OutPos + 0x03] = SelChn;
+				InPos += 0x01;
+				OutPos += 0x04;
+			}
 			else
 			{
 				switch(InData[InPos + 0x00])
 				{
-				case 0x80 To 0x8F:	// Select Channel
-					SelChn = InData[InPos + 0x00] & 0x0F;
-					OutData[OutPos + 0x00] = 0xFF;
-					OutData[OutPos + 0x01] = 0x20;
-					OutData[OutPos + 0x02] = 0x01;
-					OutData[OutPos + 0x03] = SelChn;
-					InPos += 0x01;
-					OutPos += 0x04;
-					break;
 				case 0x97:	// Drum Select (only present in Sound Blaster files)
 					IsSBL = true;
 					OutData[OutPos + 0x00] = 0xB0 | SelChn;
