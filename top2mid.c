@@ -1,3 +1,7 @@
+// Tales of Phantasia SPC -> Midi Converter
+// ----------------------------------------
+// Written by Valley Bell, 2012
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -14,7 +18,7 @@ typedef unsigned long	UINT32;
 #define false	0x00
 #define true	0x01
 
-#define CONVERT_VOL
+//#define CONVERT_VOL
 
 
 //bool LetterInArgument(char* Arg, char Letter);
@@ -42,10 +46,13 @@ UINT32 MidLen;
 UINT8* MidData;
 UINT8 RunNoteCnt;
 RUN_NOTE RunNotes[0x100];
+bool FixInsSet;
+bool FixVolume;
 
 int main(int argc, char* argv[])
 {
 	FILE* hFile;
+	char* StrPtr;
 	/*UINT8 PLMode;
 	UINT32 SongPos;
 	char OutFileBase[0x100];
@@ -60,9 +67,13 @@ int main(int argc, char* argv[])
 	UINT32 TempLng;*/
 	
 	printf("ToP SPC -> Midi Converter\n-------------------------\n");
-	if (argc < 2)
+	if (argc < 4)
 	{
-		printf("Usage: top2mid.exe Song.spc Song.mid\n");
+		printf("Usage: top2mid.exe Options Song.spc Song.mid\n");
+		printf("Options: (options can be combined)\n");
+		printf("    r   Raw conversion (other options are ignored)\n");
+		printf("    i   fix Instruments\n");
+		printf("    v   fix Volume (convert linear SNES to logarithmic MIDI)\n");
 		printf("Supported games: Tales Of Phantasia SFC and Star Ocean.\n");
 		/*printf("Usage: de2mid.exe ROM.bin Options Address(hex) [Song Count]\n");
 		printf("\n");
@@ -79,18 +90,28 @@ int main(int argc, char* argv[])
 		return 0;
 	}
 	
-	/*TempLng = strlen(argv[2]);
-	PLMode = LetterInArgument(argv[2], 'L') && ! LetterInArgument(argv[2], 'S');
-	OldDriver = LetterInArgument(argv[2], 'E');
-	InsLimit = LetterInArgument(argv[2], 'I');*/
+	FixInsSet = false;
+	FixVolume = false;
+	StrPtr = argv[1];
+	while(*StrPtr != '\0')
+	{
+		switch(toupper(*StrPtr))
+		{
+		case 'R':
+			FixInsSet = false;
+			FixVolume = false;
+			break;
+		case 'I':
+			FixInsSet = true;
+			break;
+		case 'V':
+			FixVolume = true;
+			break;
+		}
+		StrPtr ++;
+	}
 	
-/*	strcpy(OutFileBase, argv[1]);
-	TempPnt = strrchr(OutFileBase, '.');
-	if (TempPnt == NULL)
-		TempPnt = OutFileBase + strlen(OutFileBase);
-	*TempPnt = 0x00;*/
-	
-	hFile = fopen(argv[1], "rb");
+	hFile = fopen(argv[2], "rb");
 	if (hFile == NULL)
 	{
 		printf("Error opening file!\n");
@@ -117,7 +138,7 @@ int main(int argc, char* argv[])
 	if (RetVal)
 		return 3;
 	
-	hFile = fopen(argv[2], "wb");
+	hFile = fopen(argv[3], "wb");
 	if (hFile == NULL)
 	{
 		printf("Error opening file!\n");
@@ -176,7 +197,7 @@ UINT8 ToP2Mid(void)
 	UINT16 LoopPos[0x10];
 	UINT16 LoopSeg[0x10];
 	UINT32 TempLng;
-	UINT16 TempSht;
+	//UINT16 TempSht;
 	UINT8 TempByt;
 	UINT8 CurNote;
 	UINT8 LastChn;
@@ -277,12 +298,11 @@ UINT8 ToP2Mid(void)
 			CurCmd = SpcData[InPos];
 			if (CurCmd < 0x90)
 			{
-				CurNote = CurCmd;
-#ifndef CONVERT_VOL
-				NoteVol = SpcData[InPos + 0x03] >> 1;
-#else
-				NoteVol = DB2Mid(Lin2DB(SpcData[InPos + 0x03]));
-#endif
+				CurNote = CurCmd + NoteMove;
+				if (FixVolume)
+					NoteVol = DB2Mid(Lin2DB(SpcData[InPos + 0x03]));
+				else
+					NoteVol = SpcData[InPos + 0x03] >> 1;
 				
 				if (DrmNote)
 					CurNote = DrmNote;
@@ -293,7 +313,7 @@ UINT8 ToP2Mid(void)
 				{
 					if (RunNotes[TempByt].Note == CurNote)
 					{
-						RunNotes[TempByt].RemLen = CurDly + SpcData[InPos + 0x02];
+						RunNotes[TempByt].RemLen = (UINT16)CurDly + SpcData[InPos + 0x02];
 						break;
 					}
 				}
@@ -355,8 +375,7 @@ UINT8 ToP2Mid(void)
 					}
 					
 					break;
-				case 0x94:	// Coarse Pitch Bend
-				//case 0x95:	// Fine Pitch Bend
+				case 0x94:	// Pitch Bend
 					TempByt = (CurCmd == 0x94) ? 12 : 2;
 					if (PBRange != TempByt)
 					{
@@ -389,61 +408,97 @@ UINT8 ToP2Mid(void)
 					break;
 				case 0x96:	// Set Instrument
 					TempByt = SpcData[InPos + 0x01];
-					switch(TempByt)
+					if (FixInsSet)
 					{
-					case 32-1:	// Cymbal
-						DrmNote = 0x39;
-						break;
-					case 44-1:	// Shaker
-						DrmNote = 0x39+12;
-						break;
-					case 30-1:	// Hi-Hat
-						DrmNote = 0x2E;
-						break;
-					case 29-1:	// Hi-Hat
-						DrmNote = 0x2A;
-						break;
-					case 28-1:	// Snare Drum
-						DrmNote = 0x26;
-						break;
-					case 27-1:	// Snare Drum
-						DrmNote = 0x28;
-						break;
-					case 26-1:	// Bass Drum
-						DrmNote = 0x24;
-						break;
-					case 67-1:	// Snare Drum
-						DrmNote = 0x41;
-						break;
-					case 38-1:	// Wood Block H
-						DrmNote = 0x4D;
-						break;
-					case 39-1:	// Wood Block L
-						DrmNote = 0x4C;
-						break;
-						TempByt = 118-1;
-					case 33-1:	// Tom Tom
-						TempByt = 118-1;
-						NoteMove = -12;
-						DrmNote = 0x00;
-						break;
-					case 65-1:	// Jingle Bell
-						DrmNote = 0x53;
-						break;
-					default:
-						NoteMove = 0;
-						DrmNote = 0x00;
-						break;
-					}
-					if (DrmNote)
-					{
-						MidChn = 0x09;
-						//NoteVol = ChnVol ? ChnVol : 0x01;
-					}
-					else if (MidChn == 0x09)
-					{
-						MidChn = CurTrk + (CurTrk + 6) / 15;
-						//NoteVol = 0x7F;
+						switch(TempByt)
+						{
+						case 32-1:	// Cymbal
+							DrmNote = 0x39;
+							break;
+						case 44-1:	// Shaker
+							DrmNote = 0x39+12;
+							break;
+						case 30-1:	// Hi-Hat
+							DrmNote = 0x2E;
+							break;
+						case 29-1:	// Hi-Hat
+							DrmNote = 0x2A;
+							break;
+						case 28-1:	// Snare Drum
+							DrmNote = 0x26;
+							break;
+						case 27-1:	// Snare Drum
+							DrmNote = 0x28;
+							break;
+						case 26-1:	// Bass Drum
+							DrmNote = 0x24;
+							break;
+						case 67-1:	// Snare Drum (Clap?)
+							DrmNote = 0x27;
+							break;
+						case 38-1:	// Wood Block H
+							DrmNote = 0x4D;
+							break;
+						case 39-1:	// Wood Block L
+							DrmNote = 0x4C;
+							break;
+						case 33-1:	// Tom Tom
+							TempByt = 118-1;
+							NoteMove = -12;
+							DrmNote = 0x00;
+							break;
+						case 65-1:	// Jingle Bell
+							DrmNote = 0x53;
+							break;
+						case 21-1:	// Cuica
+							//DrmNote = 0x4F;
+							TempByt = 114-1;	// Agogo
+							NoteMove = 0;
+							DrmNote = 0x00;
+							break;
+						case 22-1:	// Conga?
+							DrmNote = 0x40;
+							break;
+						case 41-1:	// Long Whistle
+							DrmNote = 0x48;
+							break;
+						case 42-1:	// Timbale
+							DrmNote = 0x41;
+							break;
+						case 56-1:	// French Horn
+							TempByt = 61-1;
+							break;
+						case 61-1:
+							DrmNote = 56-1;
+							break;
+						case 34-1:	// Triangle?
+							DrmNote = 0x51;
+							break;
+						case 5-1:	// Sawtooth Lead
+							TempByt = 0x51;
+							NoteMove = -12;
+							DrmNote = 0x00;
+							break;
+						case 9-1:	// Square Lead
+							TempByt = 0x50;
+							NoteMove = 0;
+							DrmNote = 0x00;
+							break;
+						default:
+							NoteMove = 0;
+							DrmNote = 0x00;
+							break;
+						}
+						if (DrmNote)
+						{
+							MidChn = 0x09;
+							//NoteVol = ChnVol ? ChnVol : 0x01;
+						}
+						else if (MidChn == 0x09)
+						{
+							MidChn = CurTrk + (CurTrk + 6) / 15;
+							//NoteVol = 0x7F;
+						}
 					}
 					
 					if (! DrmNote)
@@ -452,21 +507,19 @@ UINT8 ToP2Mid(void)
 					InPos += 0x02;
 					break;
 				case 0x97:	// another Volume setting?
-#ifndef CONVERT_VOL
-					TempByt = SpcData[InPos + 0x02] >> 1;
-#else
-					TempByt = DB2Mid(Lin2DB(SpcData[InPos + 0x02]));
-#endif
+					if (FixVolume)
+						TempByt = DB2Mid(Lin2DB(SpcData[InPos + 0x02]));
+					else
+						TempByt = SpcData[InPos + 0x02] >> 1;
 					WriteEvent(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x07, TempByt);
 					InPos += 0x03;
 					break;
 				case 0x98:	// Set Volume
-#ifndef CONVERT_VOL
-					TempByt = SpcData[InPos + 0x02] >> 1;
-#else
-					TempByt = DB2Mid(Lin2DB(SpcData[InPos + 0x02]));
-#endif
+					if (FixVolume)
+						TempByt = DB2Mid(Lin2DB(SpcData[InPos + 0x02]));
+					else
+						TempByt = SpcData[InPos + 0x02] >> 1;
 					WriteEvent(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x0B, TempByt);
 					CurDly += SpcData[InPos + 0x01];
@@ -650,7 +703,7 @@ static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UIN
 		TempNote = RunNotes;
 		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++, TempNote ++)
 		{
-			TempNote->RemLen -= TempDly;
+			TempNote->RemLen -= (UINT16)TempDly;
 			if (! TempNote->RemLen)
 			{
 				if (! MoreNotes)
