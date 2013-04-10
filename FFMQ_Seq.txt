@@ -8,61 +8,135 @@ http://wiki.superfamicom.org/snes/show/Final+Fantasy+5
 Channel Pointers:
 2-byte Offsets, located at 000E-001D
 
+
+Sequence data is stored at 1C00.
+
+Sequence Header: (Final Fantasy Mystic Quest)
+09*2 bytes - Pointers
+	The first 8 pointers are the channel pointers.
+	The 9th pointer is the End-Of-Sequence offset.
+	The 1st pointer is also the ROM Base Offset.
+	RAM Base Offset is 1C12.
+
+Sequence Header: (Final Fantasy 5)
+0A*2 bytes - Pointers
+	The 1st pointer is the ROM Base Offset.
+	The next 8 pointers are the channel pointers.
+	The 10th pointer is the End-Of-Sequence offset.
+	RAM Base Offset is 1C14.
+
+Sequence Header: (Live-A-Live) [late version]
+12*2 bytes - Pointers
+	The 1st pointer is the ROM Base Offset.
+	The 2nd pointer is the End-Of-Sequence offset.
+	The next 8 pointers are the channel pointers.
+	The next 8 pointers are the channel pointers repeated.
+	RAM Base Offset is 1C24.
+
+Base Offset:
+All sequence data is copied to 1C00 of the SPU's RAM. All offsets are ROM-bank offsets though, so the sound driver needs to translate them into RAM offsets.
+
+
 Commands:
 00-D1		(Value / 15) = Note (12 - hold note, 13 - rest)
-		(Value % 15) = Delay (higher - shorter)
-D2 xx		Volume? (00 min .. FF max)
-D3 xx yy	?? [Volume Slide? ; xx = Length, yy = Dest?]	[ffmq-17/27]
-D4 xx		Panorama? (00 min .. 80 centre .. FF max)
-D6 nn xx	Note Slide (nn - note, xx - ??) [xx = Delay, yy = Length, zz = Key?]
-[D7 xx xx xx xx	Set Modulation Data]
-D7 ss tt dd	Set Modulation Data
-	ss - Speed
-	tt - Delay Time (1/4 = 48 ticks)
-	dd - Depth
+		(Value % 15) = Length (higher - shorter, see below)
+		-> Late versions have only 14 length values, so the notes are (Value / 14) and the Length is (Value % 14).
+D2 xx		Volume (00 min .. FF max)
+D3 dd vv	Volume Slide
+		dd = Duration in Ticks
+		vv = Destination Volume	[ffmq-17/27]
+D4 xx		Panorama (00 min .. 80 centre .. FF max)
+D5 xx yy?	Panorama Slide??
+D6 dd nn	Pitch Slide
+		dd = Duration in Ticks
+		nn - Destination Note (relative to current note)	
+D7 tt pp dd	Set Modulation Data
+		tt - Delay Time (1/4 = 48 ticks)
+		pp - Period in Ticks
+		dd - Depth
+			Bits 0-5 (3F): Vibrato depth (40 would be one semitone)
+			Bits 6-7 (C0): Vibrato Type
+				00 - note -1..0..-1
+				40 - note +1..0..+1
+				80 - note -1..0..-1 (same as 00)
+				C0 - note +1..-1..+1
 D8		Modulation Off
-DB xx xx	??
-DC		??
-E2		??
-E3		??
-E4 oo		Set Octave?
+D9 xx yy zz??	Tremolo On?
+DA?		Tremolo Off?
+DB xx xx	Pan Loop On?
+DC		Pan Loop Off?
+DD xx?		Noise Clock [00 low .. 1F high]?
+DE?		Noise On?
+DF?		Noise Off?
+E0?		Pitch Bend On?
+E1?		Pitch Bend Off?
+E2		Echo On?
+E3		Echo Off?
+E4 oo		Set Octave to oo (usually between 00 and 07)
 E5		Octave Up
 E6		Octave Down
-E7 xx		??
-E8 xx		??	[ffmq-11]
-E9 xx		??	[ffmq-11/21/23]
+E7 xx		Transpose?
+E8 xx		Transpose relative?	[ffmq-11]
+E9 xx		Finetune?	[ffmq-11/21/23]
 EA ii		Set Instrument ii
-EB xx		??
-EC xx		??
-EE rr		Set Decay Rate (00 - min, used for Open Hi-Hat)
-EF		Reset Decay Rate (
+EB xx		Set Attack Rate [00..0F]?
+EC xx		Set Decay Rate [00..07]?
+ED xx		Set Sustain Level [00..07]?
+EE rr		Set Sustain Rate [00..1F] (00 - min, used for Open Hi-Hat in FFMQ)
+EF		Reset ADSR (used for Closed Hi-Hat in FFMQ)
 F0 tt		Loop Start (loop tt+1 times)
+		-> loop tt+1 times (0 loops 257 times)
 F1		Loop End (nested loops are possible)
-F2		Track End?	[ffmq-15/23/27]
+		-> F1 without F0 seems to be silently ignored
+F2		Track End	[ffmq-15/23/27]
 F3 xx		Tempo in BPM? ["about 24/60 of beat per minutes" ?]
-F4 xx		[Tempo Slide?]
-F5 xx		?? [Set echo]
-F7 xx xx	??
+F4 xx yy?	Tempo Slide?
+F5 xx		Echo Volume?
+F6 xx yy?	Echo Volume Slide?
+F7 xx yy	Echo Properties?
+		xx = Echo Feedback [00..7F]
+		yy = Echo Filter [00..03]
 F8 xx		?? [Set global volume]
 F9 cc aaaa	Conditional Jump / Loop Exit
-FA aaaa		Jump (aa - absolute address)
-FB ??		
+		cc - jump if (loop count == cc)
+		aaaa - ROM address
+		-> [early versions] Does NOT pop from the loop stack. (FF5 and FFMQ)
+		-> [late versions] DOES pop from the loop stack. (Live-A-Live)
+FA aaaa		Jump (aaaa - ROM address)
+		-> often used for Master Loop
+FB aaaa?	Jump if ($BF & $D1) != 0
 FC ??		
 FF		Track End?
 
 
-1/1	00, 1E, 69, 87
-3/2	01
-1/2	02, 6B
-1/3	03
-3/8	04, 6D
-1/4	05, 23
-1/6	06
-3/16	07
-1/8	08, 26, 53, CB
-1/12	09
-1/16	0A, 28, 73
-1/24	0B
-1/32	0C
-1/48	0D
-	0E
+Note Length Table:
+Early	Late	Durat.	Ticks
+ 0	 0	1/ 1	192
+ 1	 -	3/ 2	160
+ 2	 1	1/ 2	 96
+ 3	 2	1/ 3	 64
+ 4	 3	3/ 8	 72
+ 5	 4	1/ 4	 48
+ 6	 5	1/ 6	 32
+ 7	 6	3/16	 36
+ 8	 7	1/ 8	 24
+ 9	 8	1/12	 16
+10	 9	1/16	 12
+11	10	1/24	  8
+12	11	1/32	  6
+13	12	1/48	  4
+14	13	1/64	  3
+
+In FFMQ, the table is stored at RAM address 188E.
+In FF5, the table is stored at RAM address 192F.
+In LAL, the table is stored at RAM address 1846.
+
+Commands and descriptions with a single ? come from http://www9.atwiki.jp/ffbin/pages/34.html and need verification.
+
+
+
+General note about late versions:
+Notes are 00-C3, because the note length table has only 14 entries.
+Commands C4..E3 are equal to the commands D2..F1 of early versions.
+Commands F0..F8 are equal to the commands F3..FB of early versions.
+Nothing is know about the commands E4..EF and FC..FF.

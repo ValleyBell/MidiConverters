@@ -15,6 +15,8 @@ typedef unsigned long	UINT32;
 #define true	0x01
 
 #define SHOW_DEBUG_MESSAGES
+#define WRITE_DEBUG_CTRLS
+#define USE_VOL_CTRLS
 
 
 //bool LetterInArgument(char* Arg, char Letter);
@@ -31,10 +33,17 @@ static UINT8 DB2Mid(double DB);
 //static bool OldDriver;
 //static bool InsLimit;
 
+#ifdef WRITE_DEBUG_CTRLS
+#define WriteDgbEvt	WriteEvent
+#else
+#define WriteDgbEvt
+#endif
+
 UINT32 SpcLen;
 UINT8* SpcData;
 UINT32 MidLen;
 UINT8* MidData;
+UINT8 FileVer = 0x00;
 
 int main(int argc, char* argv[])
 {
@@ -55,7 +64,7 @@ int main(int argc, char* argv[])
 	printf("FFMQ SPC -> Midi Converter\n--------------------------\n");
 	if (argc < 2)
 	{
-		printf("Usage: de2mid.exe Song.spc Song.mid\n");
+		printf("Usage: ffmq2mid.exe Song.spc Song.mid\n");
 		/*printf("Usage: de2mid.exe ROM.bin Options Address(hex) [Song Count]\n");
 		printf("\n");
 		printf("The 'Options' argument is a collection of one or more of the following letters.\n");
@@ -146,11 +155,17 @@ int main(int argc, char* argv[])
 UINT8 FFMQ2Mid(void)
 {
 	const UINT32 DELAY_TABLE[0x0F] =
-	{//	  0     1     2     3     4     5     6     7     8     9    10     11    12    13    14
+	{//	  0     1     2     3     4     5     6     7     8     9    10    11    12    13    14
 	//	 1/1   3/2   1/2   1/3   3/8   1/4   1/6  3/16   1/8  1/12  1/16  1/24  1/32  1/48  1/64
 		0xC0, 0x90, 0x60, 0x40, 0x48, 0x30, 0x20, 0x24, 0x18, 0x10, 0x0C, 0x08, 0x06, 0x04, 0x03};
+	const UINT32 DELAY_TABLE_L[0x0E] =
+	{//	  0           1     2     3     4     5     6     7     8     9    10    11    12    13
+	//	 1/1         1/2   1/3   3/8   1/4   1/6  3/16   1/8  1/12  1/16  1/24  1/32  1/48  1/64
+		0xC0,       0x60, 0x40, 0x48, 0x30, 0x20, 0x24, 0x18, 0x10, 0x0C, 0x08, 0x06, 0x04, 0x03};
 	UINT16 BasePtr;
 	UINT16 ChnPtrList[0x08];
+	UINT8 FILE_FMT;
+	UINT8 CMD_BASE;
 	UINT8 CurTrk;
 	UINT16 InPos;
 	UINT32 DstPos;
@@ -180,6 +195,8 @@ UINT8 FFMQ2Mid(void)
 //	UINT8 LastPbRPN;
 //	UINT8 NoAtk;
 	UINT8 DrmNote;
+	UINT8 PortamntOn;
+	INT8 PortamntNote;
 	
 	UINT8 MsgMask;
 	
@@ -196,8 +213,54 @@ UINT8 FFMQ2Mid(void)
 	WriteBigEndianS(&MidData[DstPos + 0x04], 0x0030);	// Ticks per Quarter: 48
 	DstPos += 0x06;
 	
-	memcpy(ChnPtrList, &SpcData[0x1C00], 0x02 * 0x08);
-	BasePtr = 0x1C12 - ChnPtrList[0];
+	if (! FileVer)
+	{
+		memcpy(ChnPtrList, &SpcData[0x1C00], 0x02 * 0x03);
+		if (ChnPtrList[0] == ChnPtrList[1])
+			FileVer = 0x11;
+		else if (ChnPtrList[0] < ChnPtrList[1] && ChnPtrList[2] < ChnPtrList[1])
+			FileVer = 0x20;
+		else
+			FileVer = 0x10;
+	}
+	
+	if (FileVer == 0x10 || ! FileVer)
+	{
+		memcpy(ChnPtrList, &SpcData[0x1C00], 0x02 * 0x08);
+		BasePtr = 0x1C12 - ChnPtrList[0];
+		FILE_FMT = 0x10;
+	}
+	else if (FileVer == 0x11)
+	{
+		memcpy(&TempSht, &SpcData[0x1C00], 0x02);
+		memcpy(ChnPtrList, &SpcData[0x1C02], 0x02 * 0x08);
+		BasePtr = 0x1C14 - TempSht;
+		FILE_FMT = 0x11;
+	}
+	else if (FileVer == 0x20)
+	{
+		memcpy(&TempSht, &SpcData[0x1C00], 0x02);
+		memcpy(ChnPtrList, &SpcData[0x1C04], 0x02 * 0x08);
+		BasePtr = 0x1C24 - TempSht;
+		FILE_FMT = 0x20;
+	}
+	else
+	{
+		FILE_FMT = 0x00;
+	}
+	
+	switch(FILE_FMT >> 4)
+	{
+	case 0x01:
+		CMD_BASE = 0xD2;
+		break;
+	case 0x02:
+		CMD_BASE = 0xC4;
+		break;
+	default:
+		printf("Invalid format!\n");
+		return 0xFF;
+	}
 	
 	for (CurTrk = 0x00; CurTrk < 0x08; CurTrk ++)
 	{
@@ -223,14 +286,18 @@ UINT8 FFMQ2Mid(void)
 //		LastNote = 0xFF;
 //		NoAtk = 0x00;
 //		LastPbRPN = 0x00;
+		PortamntOn = 0x00;
 		CurOct = 0x04;
 		MsgMask = 0x00;
 		while(! TrkEnd)
 		{
 			CurCmd = SpcData[InPos];
-			if (CurCmd < 0xD2)
+			if (CurCmd < CMD_BASE)
 			{
-				TempByt = CurCmd / 15;
+				if ((FILE_FMT >> 4) == 0x01)
+					TempByt = CurCmd / 15;
+				else
+					TempByt = CurCmd / 14;
 				if (TempByt < 12)
 				{
 					// Normal Note
@@ -256,6 +323,23 @@ UINT8 FFMQ2Mid(void)
 					WriteEvent(MidData, &DstPos, &CurDly,
 								0x90 | LastChn, LastNote, 0x00);
 				
+				if (PortamntOn == 0x01)
+				{
+					PortamntOn ++;
+					if (CurNote < 0x80 && LastNote != 0x80)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x54, CurNote);	// write Portamento Control
+						LastNote = 0x80;
+					}
+				}
+				else if (PortamntOn == 0x02)
+				{
+					WriteEvent(MidData, &DstPos, &CurDly,	// Portamento Off
+								0xB0 | MidChn, 0x41, 0x00);
+					PortamntOn = 0x00;
+				}
+				
 				// write the current Note
 				if (CurNote < 0x80 && LastNote != 0x80)
 					WriteEvent(MidData, &DstPos, &CurDly,
@@ -264,14 +348,34 @@ UINT8 FFMQ2Mid(void)
 				LastNote = CurNote;
 				LastChn = MidChn;
 				
-				TempByt = CurCmd % 15;
-				if (DELAY_TABLE[TempByt] == 0x00)
+				if (PortamntOn == 0x02 && CurNote < 0x80)
 				{
-					//*(char*)NULL = 0;
-					printf("Unknown Delay %u used in Track %u!\n", TempByt, CurTrk);
-					//break;
+					WriteEvent(MidData, &DstPos, &CurDly,
+								0x90 | LastChn, LastNote, 0x00);	// Turn old note off
+					
+					if ((INT16)CurNote + PortamntNote < 0x00)
+						CurNote = 0x00;
+					else if ((INT16)CurNote + PortamntNote > 0x7F)
+						CurNote = 0x7F;
+					else
+						CurNote += PortamntNote;
+					PortamntNote = 0x00;
+					
+					WriteEvent(MidData, &DstPos, &CurDly,
+								0x90 | MidChn, CurNote, /*0x7F*/NoteVol);
+					LastNote = CurNote;
 				}
-				CurDly += DELAY_TABLE[TempByt];
+				
+				if ((FILE_FMT >> 4) == 0x01)
+				{
+					TempByt = CurCmd % 15;
+					CurDly += DELAY_TABLE[TempByt];
+				}
+				else
+				{
+					TempByt = CurCmd % 14;
+					CurDly += DELAY_TABLE_L[TempByt];
+				}
 				
 			//	NoAtk >>= 1;
 			//	PitchToNote = 0xFF;
@@ -279,86 +383,106 @@ UINT8 FFMQ2Mid(void)
 			}
 			else
 			{
+				if ((FILE_FMT >> 4) == 0x02)
+				{
+					// convert old commands values to new ones
+					if (CurCmd < 0xE4)
+						CurCmd += 14;	// C4..E3 -> D2...F1
+					else if (CurCmd >= 0xF0 && CurCmd <= 0xF8)
+						CurCmd += 3;	// F0..F8 -> F3..FB
+					else
+					{
+						printf("Unknown event %02X on track %X\n", SpcData[InPos + 0x00], CurTrk);
+						break;
+					}
+				}
+				
 				switch(CurCmd)
 				{
-				case 0xD2:	// Volume?
+				case 0xD2:	// Volume
 					ChnVol = DB2Mid(Lin2DB(SpcData[InPos + 0x01]));
-					//if (! DrmNote)
-					//	WriteEvent(MidData, &DstPos, &CurDly,
-					//				0xB0 | MidChn, 0x07, ChnVol);
-					//else
+#ifdef USE_VOL_CTRLS
+					if (! DrmNote)
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x07, ChnVol);
+					else
+#endif
 						NoteVol = ChnVol ? ChnVol : 0x01;
 					InPos += 0x02;
 					break;
-				case 0xD3:
-					WriteEvent(MidData, &DstPos, &CurDly,
+				case 0xD3:	// Volume Slide
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
+								0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
+					ChnVol = DB2Mid(Lin2DB(SpcData[InPos + 0x02]));
+					NoteVol = ChnVol ? ChnVol : 0x01;
 					InPos += 0x03;
 					break;
-				case 0xD4:	// Panorama?
+				case 0xD4:	// Panorama
 					TempByt = SpcData[InPos + 0x01] >> 1;	// change range from 00.80.FF to 00.40.7F
 					WriteEvent(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x0A, TempByt);
 					InPos += 0x02;
 					break;
 				case 0xD6:	// Note Slide
-					if (LastNote < 0x80)
-					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | MidChn, LastNote, 0x00);
-						
-						WriteEvent(MidData, &DstPos, &CurDly,	// Portamento On
-									0xB0 | MidChn, 0x41, 0x7F);
-						
-						CurNote = SpcData[InPos + 0x01];
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | MidChn, CurNote, /*0x7F*/NoteVol);
-						LastNote = CurNote;
-						
-						WriteEvent(MidData, &DstPos, &CurDly,	// Portamento On
-									0xB0 | MidChn, 0x41, 0x00);
-					}
+					WriteEvent(MidData, &DstPos, &CurDly,
+								0x90 | MidChn, LastNote, 0x00);
+					
+					TempByt = SpcData[InPos + 0x01];
+					//TempByt = (UINT8)(0x60 * (1.0 - pow(1 - TempByt / 256.0, 4.0)));
+					TempByt = (UINT8)(0x20 + 0x60 * (TempByt / 256.0));
+					WriteEvent(MidData, &DstPos, &CurDly,	// Portamento Time
+								0xB0 | MidChn, 0x05, TempByt);
+					WriteEvent(MidData, &DstPos, &CurDly,	// Portamento On
+								0xB0 | MidChn, 0x41, 0x7F);
+					PortamntOn = 0x01;
+					
+					PortamntNote = SpcData[InPos + 0x02];
 					InPos += 0x03;
 					break;
-				case 0xD7:
-					WriteEvent(MidData, &DstPos, &CurDly,
+				case 0xD7:	// Modulation
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x03]);
+					TempByt = SpcData[InPos + 0x03] & 0x3F;
+					WriteEvent(MidData, &DstPos, &CurDly,
+								0xB0 | MidChn, 0x01, TempByt * 2);
 					InPos += 0x04;
 					break;
-				case 0xD8:
+				case 0xD8:	// Modulation Off
 					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+								0xB0 | MidChn, 0x01, 0x00);
 					InPos += 0x01;
 					break;
 				case 0xDB:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
 					InPos += 0x03;
 					break;
 				case 0xDC:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
 					InPos += 0x01;
 					break;
 				case 0xE2:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
 					InPos += 0x01;
 					break;
 				case 0xE3:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
 					InPos += 0x01;
 					break;
@@ -375,28 +499,79 @@ UINT8 FFMQ2Mid(void)
 					InPos += 0x01;
 					break;
 				case 0xE7:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
 					InPos += 0x02;
 					break;
 				case 0xE8:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
 					InPos += 0x02;
 					break;
 				case 0xE9:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
 					InPos += 0x02;
 					break;
 				case 0xEA:	// Instrument Change
 					TempByt = SpcData[InPos + 0x01];
+					if (FileVer == 0x20)
+					{
+					switch(TempByt)	// Live-A-Live
+					{
+					case 37-1:
+						TempByt = 62-1;
+						NoteMove = +12;
+						DrmNote = 0x00;
+						break;
+					case 38-1:
+						TempByt = 35-1;
+						NoteMove = -12;
+						DrmNote = 0x00;
+						break;
+					case 41-1:
+						TempByt = 20-1;
+						NoteMove = +12;
+						DrmNote = 0x00;
+						break;
+					case 39-1:
+						TempByt = 31-1;
+						NoteMove = 0;
+						DrmNote = 0x00;
+						break;
+					case 40-1:
+						TempByt = 30-1;
+						NoteMove = 0;
+						DrmNote = 0x00;
+						break;
+					case 35-1:	// Tambourine
+						DrmNote = 0x36;
+						break;
+					case 34-1:	// Hi-Hat
+						DrmNote = 0x2A;
+						break;
+					case 36-1:	// Snare Drum
+						DrmNote = 0x26;
+						break;
+					case 33-1:	// Tom Tom
+						TempByt = 118-1;
+						NoteMove = -12;
+						DrmNote = 0x00;
+						break;
+					default:
+						NoteMove = 0;
+						DrmNote = 0x00;
+						break;
+					}
+					}
+					else if (FileVer == 0x11)
+					{
 					switch(TempByt)
 					{
 					case 0x20:
@@ -440,7 +615,10 @@ UINT8 FFMQ2Mid(void)
 						DrmNote = 0x00;
 						break;
 					}
-					/*switch(TempByt)
+					}
+					else if (FileVer == 0x10)
+					{
+					switch(TempByt)	// FF Mystic Quest
 					{
 					case 0x20:	// Bass Drum
 						DrmNote = 0x24;
@@ -518,16 +696,21 @@ UINT8 FFMQ2Mid(void)
 							break;
 						}
 						break;
-					}*/
+					}
+					}
 					if (DrmNote)
 					{
 						MidChn = 0x09;
-						//NoteVol = ChnVol ? ChnVol : 0x01;
+#ifdef USE_VOL_CTRLS
+						NoteVol = ChnVol ? ChnVol : 0x01;
+#endif
 					}
 					else if (MidChn == 0x09)
 					{
 						MidChn = CurTrk;
-						//NoteVol = 0x7F;
+#ifdef USE_VOL_CTRLS
+						NoteVol = 0x7F;
+#endif
 					}
 					
 					if (! DrmNote)
@@ -537,37 +720,42 @@ UINT8 FFMQ2Mid(void)
 					InPos += 0x02;
 					break;
 				case 0xEB:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
 					InPos += 0x02;
 					break;
 				case 0xEC:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
 					InPos += 0x02;
 					break;
 				case 0xED:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
 					InPos += 0x02;
 					break;
 				case 0xEE:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
-					if (DrmNote == 0x2A)
-						DrmNote = 0x2E;
+					if (DrmNote == 0x2A || DrmNote == 0x2E)
+					{
+						if (SpcData[InPos + 0x01] < 0x04)
+							DrmNote = 0x2E;
+						else
+							DrmNote = 0x2A;
+					}
 					InPos += 0x02;
 					break;
 				case 0xEF:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
 					if (DrmNote == 0x2E)
 						DrmNote = 0x2A;
@@ -584,7 +772,11 @@ UINT8 FFMQ2Mid(void)
 					if (LoopID == 0xFF)
 					{
 						InPos += 0x01;
-						printf("Warning! Invalid Loop End found!\n");
+						printf("Warning! Invalid Loop End found in Track %X!\n", CurTrk);
+						WriteDgbEvt(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6F, 0x7F);
+						// The sound driver seems to ignore invalid Loop End commands.
+						// This way, Final Fantasy Mystic Quest, Song 27 (Ending) behaves correctly.
 						break;
 					}
 					
@@ -595,6 +787,11 @@ UINT8 FFMQ2Mid(void)
 					}
 					else
 					{
+						if (LoopCount[LoopID] == 0x00)
+						{
+							printf("Warning! 1x-Loop found in Track %X, forcing track end!\n", CurTrk);
+							TrkEnd = true;
+						}
 						LoopID --;
 						InPos += 0x01;
 					}
@@ -604,9 +801,9 @@ UINT8 FFMQ2Mid(void)
 					InPos += 0x01;
 					break;
 				case 0xF3:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
 					
 					WriteEvent(MidData, &DstPos, &CurDly,
@@ -620,44 +817,48 @@ UINT8 FFMQ2Mid(void)
 					InPos += 0x02;
 					break;
 				case 0xF5:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
 					InPos += 0x02;
 					break;
 				case 0xF7:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
 					InPos += 0x03;
 					break;
 				case 0xF8:
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
 					InPos += 0x02;
 					break;
 				case 0xF9:	// Loop Exit
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					//WriteEvent(MidData, &DstPos, &CurDly,
+					//WriteDgbEvt(MidData, &DstPos, &CurDly,
 					//			0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
 					if (LoopCur[LoopID] < SpcData[InPos + 0x01])
 					{
 						InPos += 0x04;
-						WriteEvent(MidData, &DstPos, &CurDly,
+						WriteDgbEvt(MidData, &DstPos, &CurDly,
 									0xB0 | MidChn, 0x26, 0x00);
 					}
 					else
 					{
+						// Note: In the old format, this jumps TO the Loop End command.
+						//       In the new format, this jumps AFTER the Loop End command. (and pops the loop stack)
+						if ((FILE_FMT >> 4) == 0x02)
+							LoopID --;
 						memcpy(&TempSht, &SpcData[InPos + 0x02], 0x02);
 						InPos = BasePtr + TempSht;
-						WriteEvent(MidData, &DstPos, &CurDly,
+						WriteDgbEvt(MidData, &DstPos, &CurDly,
 									0xB0 | MidChn, 0x26, 0x7F);
 					}
 					break;
@@ -707,7 +908,7 @@ UINT8 FFMQ2Mid(void)
 					break;*/
 				default:
 					printf("Unknown event %02X on track %X\n", SpcData[InPos + 0x00], CurTrk);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteDgbEvt(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x6E, CurCmd & 0x7F);
 					InPos += 0x02;
 					TrkEnd = true;
