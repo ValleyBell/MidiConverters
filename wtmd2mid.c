@@ -1,6 +1,7 @@
 // Wolf Team MegaDrive -> Midi Converter
 // -------------------------------------
-// Written by Valley Bell, 2014
+// Written by Valley Bell, 16 July 2014
+// Last Update: 18 July 2014
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -206,10 +207,50 @@ void ConvertAllSongs(UINT16 MusBankList)
 	return;
 }
 
+typedef struct
+{
+	UINT8 Ins;
+	UINT8 Transp;
+} INS_TABLE;
 UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 {
 	const UINT8 DAC_MAP[] = {0x00, 0x24, 0x26, 0x29, 0x2D, 0x30, 0x25, 0x27, 0x2A, 0x00, 0x31};	// X68000 Drum Set
 	//const UINT8 DAC_MAP[] = {0x00, 0x24, 0x26, 0x29, 0x2D, 0x30, 0x00, 0x27};	// MegaDrive Drum Set
+	const INS_TABLE INS_MAP[] =
+	{	{0x21,   0},	// 00 E.Bass
+		{0x37,   0},	// 01 Shio.B - El Viento: Orch. Hit
+		{0x1E,   0},	// 02 Hard.R
+		{0x3D,   0},	// 03 NewBrs [verify]
+		{0xFF,   0},	// 04 KAZAN
+		{0x0C, +24},	// 05 Marimb
+		{0x05, +12},	// 06 EPian3
+		{0x2E,   0},	// 07 Hrap [verify]
+		{0x31,   0},	// 08 Str2 [verify]
+		{0x06, +12},	// 09 Cemba1
+		{0x3E, +12},	// 0A NewBrs
+		{0x26,   0},	// 0B DnaBas
+		{0x07,   0},	// 0C CLAVI [verify]
+		{0x3C, +12},	// 0D NewHrn
+		{0xFF,   0},	// 0E NOBISI
+		{0x01, +12},	// 0F APiano
+		{0x08, +12},	// 10 TubBel
+		{0x10,   0},	// 11 EOrg1 [verify]
+		{0xFF,   0},	// 12 BiYoon
+		{0x34, +12},	// 13 Chorus
+		{0xFF,   0},	// 14 KARAN
+		{0x23, +12},	// 15 Paon (&#xFF8A;&#xFF9F;&#xFF75;&#xFF70;&#xFF9D;)
+		{0x49, +12},	// 16 FLUTE
+		{0xFF,   0},	// 17 N.Bass
+		{0x22,   0},	// 18 H.EBas
+		{0x46,   0},	// 19 Basson
+		{0x16, +12},	// 1A Uno Harm (&#xFF73;&#xFF89;Harm)
+		{0x33,   0},	// 1B SynStr [verify]
+		{0x47, +12},	// 1C Clarin
+		{0x20,   0},	// 1D KBASS1 [verify]
+		{0x27,   0},	// 1E SBASS2 [verify]
+		{0x1D,   0},	// 1F DGUITA [verify]
+		{0x25,   0},	// 20 SBASS [verify]
+	};
 	UINT16 SongLen;
 	const UINT8* SongData;
 	
@@ -221,6 +262,7 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 	} ChnList[0x10];
 	
 	UINT16 TickpQrt;
+	UINT8 LoopCnt;
 	UINT8 TrkCnt;
 	UINT8 CurTrk;
 	UINT16 SegBase;
@@ -260,6 +302,11 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 	SongLen = ReadLE16(&SongData[0x02]);
 	TrkCnt = 0x09;
 	TickpQrt = 48;
+	TempSht = ReadLE16(&SongData[0x04]);
+	if (TempSht <= 0x10)
+		LoopCnt = 1;
+	else
+		LoopCnt = 2;
 	
 	MidLen = 0x20000;	// 128 KB should be enough
 	MidData = (UINT8*)malloc(MidLen);
@@ -380,8 +427,9 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 					if (LoopSeg >= SegIdx)
 						break;
 					LoopCount ++;
-					if (LoopCount >= 0x02-1)
+					if (LoopCount >= LoopCnt)
 					{
+						if (LoopCnt > 1)
 						WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x6F, LoopCount);
 						break;
 					}
@@ -390,7 +438,7 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 					InPos = 0x00;
 					continue;
 				}
-				if (SegIdx == LoopSeg)
+				if (SegIdx == LoopSeg && LoopCnt > 1)
 					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x6F, LoopCount);
 				SegIdx ++;
 			}
@@ -520,14 +568,35 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 				switch(CurCmd)
 				{
 				case 0xEC:	// Set Instrument
-					TempByt = SongData[InPos + 0x02];
+					CurCmd = SongData[InPos + 0x02];
+					if (1)
+					{
+						if (CurCmd < (sizeof(INS_MAP) / sizeof(INS_TABLE)))
+						{
+							TempByt = INS_MAP[CurCmd].Ins;
+							NoteMove = INS_MAP[CurCmd].Transp;
+						}
+						else
+						{
+							TempByt = 0xFF;
+						}
+						if (TempByt == 0xFF)
+						{
+							printf("Warning! Unmapped instrument %02X! (Chn %u)\n", CurCmd, 1 + MidChn);
+							TempByt = CurCmd;
+							NoteMove = 0;
+						//	WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x20, 0x01);
+						}
+						//else
+						//	WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x20, 0x00);
+					}
 					WriteEvent(MidData, &DstPos, &CurDly, 0xC0 | MidChn, TempByt, 0x00);
 					CurDly += SongData[InPos + 0x01];
 					InPos += 0x03;
 					break;
 				case 0xED:	// Set Volume
 					if (FixVolume)
-						TempByt = DB2Mid(Lin2DB(SongData[InPos + 0x02]));
+						TempByt = DB2Mid(Lin2DB(SongData[InPos + 0x02]) * 0.5);
 					else
 						TempByt = SongData[InPos + 0x02];
 					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x07, TempByt);
