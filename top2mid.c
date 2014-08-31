@@ -21,11 +21,50 @@ typedef unsigned long	UINT32;
 //#define CONVERT_VOL
 
 
-//bool LetterInArgument(char* Arg, char Letter);
+#define INS_MAX_INSTRUMENTS	0x100
+#define INS_DATA_BLK_LINES	1
+#define INS_LINE_CNT		(INS_MAX_INSTRUMENTS * INS_DATA_BLK_LINES)
 
+typedef struct instrument_setup
+{
+	UINT8 MidiIns;
+	INT8 NoteMove;
+	UINT8 DrumBase;
+} INS_SETUP;
+
+typedef struct channel_data_seq
+{
+	UINT8 Ins;
+	INT8 Move;
+	UINT8 DrmNote;
+	UINT8 DefaultChn;
+} CHN_DATA_SEQ;
+
+typedef struct channel_data_midi
+{
+	UINT8 Vol;
+	UINT8 Pan;
+	UINT8 Expr;
+	//UINT16 Pitch;
+	UINT8 PBRange;
+	UINT8 RPN_MSB;
+	UINT8 RPN_LSB;
+} CHN_DATA_MID;
+typedef struct channel_data_drums
+{
+	UINT8 Pitch;
+	UINT8 Volume;
+	UINT8 Pan;
+} CHN_DATA_DRM;
+
+
+void ReadConvData(const char* FileName);
+INS_SETUP* GetInsSetupData(UINT8 Ins, UINT8 Note);
+void WriteRPN(UINT8* MidFile, UINT32* MidPos, UINT32* Delay, UINT8 Chn,
+			  UINT8 RpnMSB, UINT8 RpnLSB, UINT8 RpnData, CHN_DATA_MID* MidChnData);
 UINT8 ToP2Mid(void);
-static void WriteBigEndianL(UINT8* Buffer, UINT32 Value);
-static void WriteBigEndianS(UINT8* Buffer, UINT16 Value);
+static void WriteBE32(UINT8* Buffer, UINT32 Value);
+static void WriteBE16(UINT8* Buffer, UINT16 Value);
 static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UINT8 Val1, UINT8 Val2);
 static void WriteMidiValue(UINT8* Buffer, UINT32* Pos, UINT32 Value);
 static double Lin2DB(UINT8 LinVol);
@@ -35,7 +74,8 @@ static UINT8 DB2Mid(double DB);
 typedef struct running_note
 {
 	UINT8 MidChn;
-	UINT8 Note;
+	UINT8 Note;	// orignal Note value - used to extend notes
+	UINT8 MidiNote;
 	UINT16 RemLen;
 } RUN_NOTE;
 
@@ -46,19 +86,16 @@ UINT32 MidLen;
 UINT8* MidData;
 UINT8 RunNoteCnt;
 RUN_NOTE RunNotes[0x100];
+INS_SETUP InsSetup[INS_LINE_CNT];
 bool FixInsSet;
 bool FixVolume;
+bool WriteDbgCtrls;
 
 int main(int argc, char* argv[])
 {
 	FILE* hFile;
 	char* StrPtr;
-	/*UINT8 PLMode;
-	UINT32 SongPos;
-	char OutFileBase[0x100];
-	char OutFile[0x100];*/
 	char TempArr[0x08];
-	//char* TempPnt;
 	int RetVal;
 	
 	/*UINT16 FileCount;
@@ -69,29 +106,19 @@ int main(int argc, char* argv[])
 	printf("ToP SPC -> Midi Converter\n-------------------------\n");
 	if (argc < 4)
 	{
-		printf("Usage: top2mid.exe Options Song.spc Song.mid\n");
+		printf("Usage: top2mid.exe Options Song.spc Song.mid [InsMap.ini]\n");
 		printf("Options: (options can be combined)\n");
 		printf("    r   Raw conversion (other options are ignored)\n");
-		printf("    i   fix Instruments\n");
+		printf("    i   fix Instruments (needs InsMap.ini)\n");
 		printf("    v   fix Volume (convert linear SNES to logarithmic MIDI)\n");
+		printf("    d   write Debug Controllers (for unknown events)\n");
 		printf("Supported games: Tales Of Phantasia SFC and Star Ocean.\n");
-		/*printf("Usage: de2mid.exe ROM.bin Options Address(hex) [Song Count]\n");
-		printf("\n");
-		printf("The 'Options' argument is a collection of one or more of the following letters.\n");
-		printf("They mustn't be seperated by space or tab.\n");
-		printf("\n");
-		printf("Modes:\ts - single file (Address is pointer to song data)\n");
-		printf("\tl - music list (Address is pointer to music list)\n");
-		printf("e - early driver (as used in Side Pocket)\n");
-		printf("i - limit MIDI instrument numbers to 0..15 (may sound better)\n");
-		printf("\n");
-		printf("Song Count is an optional argument for Music List mode.\n");
-		printf("Use it if the song autodetection fails.\n");*/
 		return 0;
 	}
 	
 	FixInsSet = false;
 	FixVolume = false;
+	WriteDbgCtrls = false;
 	StrPtr = argv[1];
 	while(*StrPtr != '\0')
 	{
@@ -107,8 +134,22 @@ int main(int argc, char* argv[])
 		case 'V':
 			FixVolume = true;
 			break;
+		case 'D':
+			WriteDbgCtrls = true;
+			break;
 		}
 		StrPtr ++;
+	}
+	
+	if (FixInsSet)
+	{
+		if (argc <= 4)
+		{
+			printf("Insufficient arguments!\n");
+			return 9;
+		}
+		
+		ReadConvData(argv[4]);
 	}
 	
 	hFile = fopen(argv[2], "rb");
@@ -157,20 +198,152 @@ int main(int argc, char* argv[])
 	return 0;
 }
 
-/*bool LetterInArgument(char* Arg, char Letter)
+void ReadConvData(const char* FileName)
 {
-	Letter = toupper(Letter);
+	FILE* hFile;
+	char TempStr[0x100];
+	char* TempPnt;
+	char* EndPnt;
+	UINT16 InsNum;
+	UINT8 InsLine;
+	INS_SETUP* TempIns;
 	
-	while(*Arg != '\0')
+	hFile = fopen(FileName, "rt");
+	if (hFile == NULL)
 	{
-		if (toupper(*Arg) == Letter)
-			return true;
-		
-		Arg ++;
+		printf("Error opening %s\n", FileName);
+		return;
 	}
 	
-	return false;
-}*/
+	TempIns = InsSetup;
+	for (InsNum = 0x00; InsNum < INS_MAX_INSTRUMENTS; InsNum ++)
+	{
+		for (InsLine = 0x00; InsLine < INS_DATA_BLK_LINES; InsLine ++, TempIns ++)
+		{
+			TempIns->MidiIns = 0xFF/*InsNum*/;
+			TempIns->NoteMove = 0x00;
+			TempIns->DrumBase = 0xFF;
+		}
+	}
+	
+	while(! feof(hFile))
+	{
+		TempPnt = fgets(TempStr, 0x100, hFile);
+		if (TempPnt == NULL)
+			break;
+		if (TempStr[0x00] == '\n' || TempStr[0x00] == '\0')
+			continue;
+		if (TempStr[0x00] == ';')
+		{
+			// skip comment lines
+			// fgets has set a null-terminator at char 0xFF
+			while(TempStr[strlen(TempStr) - 1] != '\n')
+			{
+				fgets(TempStr, 0x100, hFile);
+				if (TempStr[0x00] == '\0')
+					break;
+			}
+			continue;
+		}
+		
+		TempPnt = strchr(TempStr, '\t');
+		if (TempPnt == NULL || TempPnt == TempStr)
+			continue;	// invalid line
+		
+		InsNum = (UINT8)strtoul(TempStr, &EndPnt, 0x10);
+		if (EndPnt == TempStr || InsNum >= INS_MAX_INSTRUMENTS)
+			continue;
+		
+		if (EndPnt != NULL && *EndPnt == '-')
+			InsLine = (UINT8)strtoul(EndPnt + 1, NULL, 0x10);
+		else
+			InsLine = 0x00;
+		//InsLine &= 0x0F;
+		
+		//TempIns = &InsSetup[(InsNum << 4) | InsLine];
+		TempIns = &InsSetup[InsNum];
+		TempPnt ++;
+		if (*TempPnt != 'D')
+		{
+			TempIns->MidiIns = (UINT8)strtoul(TempPnt, NULL, 0x10);
+			TempPnt = strchr(TempPnt, '\t');
+			if (TempPnt != NULL)
+			{
+				TempPnt ++;
+				TempIns->NoteMove = (UINT8)strtoul(TempPnt, NULL, 10);
+			}
+			else
+			{
+				TempIns->NoteMove = 0x00;
+			}
+			TempIns->DrumBase = 0xFF;
+		}
+		else
+		{
+			TempPnt ++;
+			TempIns->MidiIns = 0x80;
+			TempIns->NoteMove = (UINT8)strtoul(TempPnt, NULL, 0x10);
+			TempPnt = strchr(TempPnt, '\t');
+			if (TempPnt != NULL)
+			{
+				TempPnt ++;
+				TempIns->DrumBase = (UINT8)strtoul(TempPnt, NULL, 0x10);
+			}
+			else
+			{
+				TempIns->DrumBase = 0x00;
+			}
+			if (! TempIns->DrumBase)
+				TempIns->DrumBase = TempIns->NoteMove;
+		}
+	}
+	
+	fclose(hFile);
+	
+	return;
+}
+
+INS_SETUP* GetInsSetupData(UINT8 Ins, UINT8 Note)
+{
+	INS_SETUP* TempIS;
+	
+	TempIS = &InsSetup[Ins];
+	if (TempIS->MidiIns == 0xFF)
+	{
+		printf("Warning: Unmapped instrument %02X!\n", Ins);
+		TempIS->MidiIns = Ins & 0x7F;
+	}
+	return TempIS;
+}
+
+void WriteRPN(UINT8* MidFile, UINT32* MidPos, UINT32* Delay, UINT8 Chn,
+			  UINT8 RpnMSB, UINT8 RpnLSB, UINT8 RpnData, CHN_DATA_MID* MidChnData)
+{
+	UINT8 RPNMsk;
+	UINT8 RPNCtrl;
+	
+	RPNMsk = RpnMSB & 0x80;
+	if (! RPNMsk)
+		RPNCtrl = 0x64;	// RPN
+	else
+		RPNCtrl = 0x62;	// NRPN
+	RpnMSB &= 0x7F;
+	
+	// sadly, this doesn't work, because I process every track separately
+//	if (MidChnData->RPN_MSB != (RPNMsk | RpnMSB) ||
+//		MidChnData->RPN_LSB != (RPNMsk | RpnLSB))
+	{
+		WriteEvent(MidFile, MidPos, Delay, 0xB0 | Chn, RPNCtrl | 0x01, RpnMSB);
+		WriteEvent(MidFile, MidPos, Delay, 0xB0 | Chn, RPNCtrl | 0x00, RpnLSB);
+		MidChnData->RPN_MSB = RPNMsk | RpnMSB;
+		MidChnData->RPN_LSB = RPNMsk | RpnLSB;
+	}
+	
+	if (! (RpnData & 0x80))
+		WriteEvent(MidFile, MidPos, Delay, 0xB0 | Chn, 0x06, RpnData);
+	
+	return;
+}
 
 
 UINT8 ToP2Mid(void)
@@ -196,17 +369,23 @@ UINT8 ToP2Mid(void)
 	UINT8 LoopCount[0x10];
 	UINT16 LoopPos[0x10];
 	UINT16 LoopSeg[0x10];
+	CHN_DATA_SEQ ChnSeq;
+	CHN_DATA_MID ChnMid;
+	CHN_DATA_DRM ChnDrm[0x80];
+	INS_SETUP* TempIS;
+	CHN_DATA_DRM* TempChD;
 	UINT32 TempLng;
-	//UINT16 TempSht;
+	INT16 TempSSht;
 	UINT8 TempByt;
 	UINT8 CurNote;
 	UINT8 LastChn;
 	UINT32 CurDly;
 	UINT8 NoteVol;
 	UINT8 ChnVol;
-	INT8 NoteMove;
-	UINT8 DrmNote;
-	UINT8 PBRange;
+	//INT8 NoteMove;
+	//UINT8 DrmNote;
+	//UINT8 PBRange;
+	UINT8 CurDrmPtch;
 	
 	UINT8 MsgMask;
 	UINT8 InitTempo;
@@ -222,18 +401,18 @@ UINT8 ToP2Mid(void)
 	MidData = (UINT8*)malloc(MidLen);
 	
 	DstPos = 0x00;
-	WriteBigEndianL(&MidData[DstPos + 0x00], 0x4D546864);	// write 'MThd'
-	WriteBigEndianL(&MidData[DstPos + 0x04], 0x00000006);
+	WriteBE32(&MidData[DstPos + 0x00], 0x4D546864);	// write 'MThd'
+	WriteBE32(&MidData[DstPos + 0x04], 0x00000006);
 	DstPos += 0x08;
 	
-	WriteBigEndianS(&MidData[DstPos + 0x00], 0x0001);	// Format 1
-	WriteBigEndianS(&MidData[DstPos + 0x02], 0x0010);	// Tracks: 16
-	WriteBigEndianS(&MidData[DstPos + 0x04], 0x0018);	// Ticks per Quarter: 48
+	WriteBE16(&MidData[DstPos + 0x00], 0x0001);		// Format 1
+	WriteBE16(&MidData[DstPos + 0x02], 0x0010);		// Tracks: 16
+	WriteBE16(&MidData[DstPos + 0x04], 0x0018);		// Ticks per Quarter: 48
 	DstPos += 0x06;
 	
 	InPos = BasePtr + 0x0020;
 	
-	WriteBigEndianL(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
+	WriteBE32(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
 	DstPos += 0x08;
 	TrkBase = DstPos;
 	CurDly = 0x00;
@@ -243,13 +422,14 @@ UINT8 ToP2Mid(void)
 	InitTempo = SpcData[InPos];
 	WriteEvent(MidData, &DstPos, &CurDly, 0xFF, 0x51, 0x00);
 	TempLng = 60000000 / (InitTempo * 2);	// base guessed
-	WriteBigEndianL(&MidData[DstPos - 0x01], TempLng);
+	WriteBE32(&MidData[DstPos - 0x01], TempLng);
 	MidData[DstPos - 0x01] = 0x03;
 	DstPos += 0x03;
 	InPos ++;
 	
+	WriteEvent(MidData, &DstPos, &CurDly, 0xC9, 0x00, 0x00);	// make sure that the drum settings are reset
 	WriteEvent(MidData, &DstPos, &CurDly, 0xFF, 0x2F, 0x00);
-	WriteBigEndianL(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
+	WriteBE32(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
 	
 	for (CurTrk = 0x00; CurTrk < 0x0F; CurTrk ++)
 	{
@@ -263,7 +443,7 @@ UINT8 ToP2Mid(void)
 	{
 		SegBase = BasePtr + ChnPtrList[CurTrk];
 		
-		WriteBigEndianL(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
+		WriteBE32(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
 		DstPos += 0x08;
 		
 		TrkBase = DstPos;
@@ -275,13 +455,31 @@ UINT8 ToP2Mid(void)
 		LastChn = MidChn;
 		NoteVol = 0x7F;
 		ChnVol = 0x64;
-		DrmNote = 0x00;
-		NoteMove = 0x00;
+		//DrmNote = 0x00;
+		//NoteMove = 0x00;
 		RunNoteCnt = 0x00;
 		MsgMask = 0x00;
 		SegIdx = 0x00;
 		InPos = 0x0000;
-		PBRange = 0x00;
+		//PBRange = 0x00;
+		
+		ChnSeq.Ins = 0xFF;
+		ChnSeq.Move = 0;
+		ChnSeq.DrmNote = 0xFF;
+		ChnSeq.DefaultChn = MidChn;
+		CurDrmPtch = 0xFF;
+		//ChnMid.Pitch = 0x4000;
+		ChnMid.PBRange = 0x00;
+		ChnMid.RPN_MSB = 0x7F;	// RPN Null
+		ChnMid.RPN_LSB = 0x7F;
+		for (TempByt = 0x00; TempByt < 0x80; TempByt ++)
+		{
+			TempChD = &ChnDrm[TempByt];
+			TempChD->Pitch = 0x40;
+			TempChD->Volume = 0x7F;
+			TempChD->Pan = 0x40;
+		}
+		
 		while(! TrkEnd)
 		{
 			if (InPos == 0x0000)
@@ -298,20 +496,64 @@ UINT8 ToP2Mid(void)
 			CurCmd = SpcData[InPos];
 			if (CurCmd < 0x90)
 			{
-				CurNote = CurCmd + NoteMove;
+				if (ChnSeq.DrmNote == 0xFF)
+				{
+					// normal Melody instrument note
+					CurNote = CurCmd + ChnSeq.Move;
+					TempSSht = (INT16)CurCmd + ChnSeq.Move;
+					if (TempSSht < 0x00)
+						CurNote = 0x00;
+					else if (TempSSht > 0x7F)
+						CurNote = 0x7F;
+					else
+						CurNote = (UINT8)TempSSht;
+				}
+				else
+				{
+					TempIS = GetInsSetupData(ChnSeq.Ins, CurCmd);
+					if (TempIS->DrumBase != 0xFF)
+					{
+						// single Drum instrument with varying pitch
+						// -> convert to NRPN: Drum Pitch + Drum Note
+						TempChD = &ChnDrm[ChnSeq.DrmNote];
+						// The "default" pitch is 0x40. 00..3F is lower, 41..7F is higher.
+						TempSSht = (INT16)CurCmd - TempIS->DrumBase + 0x40;
+						if (TempSSht < 0x00)
+							TempByt = 0x00;
+						else if (TempSSht > 0x7F)
+							TempByt = 0x7F;
+						else
+							TempByt = (UINT8)TempSSht;
+						
+						if (TempChD->Pitch != TempByt)
+						{
+							// NRPN: Drum Note Pitch
+							WriteRPN(MidData, &DstPos, &CurDly, MidChn, 0x98, ChnSeq.DrmNote, TempByt, &ChnMid);
+							TempChD->Pitch = TempByt;
+						}
+						
+						//CurNote = ChnSeq.DrmNote;
+						CurNote = TempIS->NoteMove;
+					}
+					else
+					{
+						// instrument with multiple drums
+						// This would need a lookup table.
+						CurNote = TempIS->NoteMove;
+					}
+					CurNote |= 0x80;
+				}
+				
 				if (FixVolume)
 					NoteVol = DB2Mid(Lin2DB(SpcData[InPos + 0x03]));
 				else
 					NoteVol = SpcData[InPos + 0x03] >> 1;
 				
-				if (DrmNote)
-					CurNote = DrmNote;
-				
 				WriteEvent(MidData, &DstPos, &CurDly, 0x00, 0x00, 0x00);
 				
 				for (TempByt = 0x00; TempByt < RunNoteCnt; TempByt ++)
 				{
-					if (RunNotes[TempByt].Note == CurNote)
+					if (RunNotes[TempByt].Note == CurCmd)
 					{
 						RunNotes[TempByt].RemLen = (UINT16)CurDly + SpcData[InPos + 0x02];
 						break;
@@ -320,11 +562,12 @@ UINT8 ToP2Mid(void)
 				if (TempByt >= RunNoteCnt)
 				{
 					WriteEvent(MidData, &DstPos, &CurDly,
-								0x90 | MidChn, CurNote, NoteVol);
+								0x90 | MidChn, CurNote & 0x7F, NoteVol);
 					if (RunNoteCnt < 0x80)
 					{
 						RunNotes[RunNoteCnt].MidChn = MidChn;
-						RunNotes[RunNoteCnt].Note = CurNote;
+						RunNotes[RunNoteCnt].Note = CurCmd;
+						RunNotes[RunNoteCnt].MidiNote = CurNote;
 						RunNotes[RunNoteCnt].RemLen = SpcData[InPos + 0x02];
 						RunNoteCnt ++;
 					}
@@ -377,16 +620,12 @@ UINT8 ToP2Mid(void)
 					break;
 				case 0x94:	// Pitch Bend
 					TempByt = (CurCmd == 0x94) ? 12 : 2;
-					if (PBRange != TempByt)
+					if (ChnMid.PBRange != TempByt)
 					{
-						PBRange = TempByt;
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x65, 0x00);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x64, 0x00);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x06, PBRange);
+						WriteRPN(MidData, &DstPos, &CurDly, MidChn, 0x00, 0x00, TempByt, &ChnMid);
+						ChnMid.PBRange = TempByt;
 					}
+					
 					WriteEvent(MidData, &DstPos, &CurDly,
 								0xE0 | MidChn, 0x00, SpcData[InPos + 0x02]);
 					CurDly += SpcData[InPos + 0x01];
@@ -397,113 +636,81 @@ UINT8 ToP2Mid(void)
 					TempByt = SpcData[InPos + 0x02];
 					//TempLng = 60000000 / (InitTempo * 2 * TempByt / 0x40);	// guessed
 					TempLng = 0x40 * 30000000 / (InitTempo * TempByt);
-					WriteBigEndianL(&MidData[DstPos - 0x01], TempLng);
+					WriteBE32(&MidData[DstPos - 0x01], TempLng);
 					MidData[DstPos - 0x01] = 0x03;
 					DstPos += 0x03;
-					//WriteEvent(MidData, &DstPos, &CurDly,
-					//			0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
+					
+					if (WriteDbgCtrls)
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
 					
 					CurDly += SpcData[InPos + 0x01];
 					InPos += 0x03;
 					break;
 				case 0x96:	// Set Instrument
 					TempByt = SpcData[InPos + 0x01];
+					ChnSeq.Ins = TempByt;
 					if (FixInsSet)
 					{
-						switch(TempByt)
+						TempIS = GetInsSetupData(ChnSeq.Ins, 0xFF);
+						TempByt = TempIS->MidiIns & 0x7F;
+						
+						// MidiIns 80..FF -> Drum Note
+						if ((TempIS->MidiIns & 0x80) && TempIS->DrumBase != 0xFF)
 						{
-						case 32-1:	// Cymbal
-							DrmNote = 0x39;
-							break;
-						case 44-1:	// Shaker
-							DrmNote = 0x39+12;
-							break;
-						case 30-1:	// Hi-Hat
-							DrmNote = 0x2E;
-							break;
-						case 29-1:	// Hi-Hat
-							DrmNote = 0x2A;
-							break;
-						case 28-1:	// Snare Drum
-							DrmNote = 0x26;
-							break;
-						case 27-1:	// Snare Drum
-							DrmNote = 0x28;
-							break;
-						case 26-1:	// Bass Drum
-							DrmNote = 0x24;
-							break;
-						case 67-1:	// Snare Drum (Clap?)
-							DrmNote = 0x27;
-							break;
-						case 38-1:	// Wood Block H
-							DrmNote = 0x4D;
-							break;
-						case 39-1:	// Wood Block L
-							DrmNote = 0x4C;
-							break;
-						case 33-1:	// Tom Tom
-							TempByt = 118-1;
-							NoteMove = -12;
-							DrmNote = 0x00;
-							break;
-						case 65-1:	// Jingle Bell
-							DrmNote = 0x53;
-							break;
-						case 21-1:	// Cuica
-							//DrmNote = 0x4F;
-							TempByt = 114-1;	// Agogo
-							NoteMove = 0;
-							DrmNote = 0x00;
-							break;
-						case 22-1:	// Conga?
-							DrmNote = 0x40;
-							break;
-						case 41-1:	// Long Whistle
-							DrmNote = 0x48;
-							break;
-						case 42-1:	// Timbale
-							DrmNote = 0x41;
-							break;
-						case 56-1:	// French Horn
-							TempByt = 61-1;
-							break;
-						case 61-1:
-							DrmNote = 56-1;
-							break;
-						case 34-1:	// Triangle?
-							DrmNote = 0x51;
-							break;
-						case 5-1:	// Sawtooth Lead
-							TempByt = 0x51;
-							NoteMove = -12;
-							DrmNote = 0x00;
-							break;
-						case 9-1:	// Square Lead
-							TempByt = 0x50;
-							NoteMove = 0;
-							DrmNote = 0x00;
-							break;
-						default:
-							NoteMove = 0;
-							DrmNote = 0x00;
-							break;
+							// Drum Instrument: one drum with varying pitch
+							ChnSeq.DrmNote = (UINT8)TempIS->NoteMove;
+							
+#if 0
+							if (CurDrmPtch == 0xFF)
+							{
+								WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x00, 0x7F);
+								WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x20, 0x00);
+								WriteEvent(MidData, &DstPos, &CurDly, 0xC0 | MidChn, 0x00, 0x00);
+								
+								WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x07, 0x7F);
+								CurDrmPtch = 0x00;
+							}
+#else
+							if (MidChn != 0x09)
+							{
+								MidChn = 0x09;
+								// copy Volume/Pan to Drum Channel
+								WriteRPN(MidData, &DstPos, &CurDly, 0xB0 | MidChn,
+									0x9A, ChnSeq.DrmNote, ChnMid.Vol, &ChnMid);	// Drum Volume
+								WriteRPN(MidData, &DstPos, &CurDly, 0xB0 | MidChn,
+									0x9C, ChnSeq.DrmNote, ChnMid.Pan, &ChnMid);	// Drum Panorama
+							}
+#endif
 						}
-						if (DrmNote)
+						else
 						{
-							MidChn = 0x09;
-							//NoteVol = ChnVol ? ChnVol : 0x01;
-						}
-						else if (MidChn == 0x09)
-						{
-							MidChn = CurTrk + (CurTrk + 6) / 15;
-							//NoteVol = 0x7F;
+							if ((TempIS->MidiIns & 0x80) && TempIS->DrumBase == 0xFF)
+							{
+								// generic Drum Channel
+								MidChn = 0x09;
+								ChnSeq.Move = 0;
+								ChnSeq.DrmNote = (UINT8)TempIS->NoteMove;
+							}
+							else
+							{
+								// normal Instrument
+								if (MidChn == 0x09)
+								{
+									// copy Volume/Pan back to Normal Channel
+									MidChn = ChnSeq.DefaultChn;
+									WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x07, ChnMid.Vol);	// Volume
+									WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0A, ChnMid.Pan);	// Panorama
+								}
+								MidChn = ChnSeq.DefaultChn;
+								ChnSeq.Move = TempIS->NoteMove;
+								ChnSeq.DrmNote = 0xFF;
+							}
 						}
 					}
 					
-					if (! DrmNote)
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xC0 | MidChn, TempByt, 0x00);
+					if (ChnSeq.DrmNote == 0xFF)
+						WriteEvent(MidData, &DstPos, &CurDly, 0xC0 | MidChn, TempByt, 0x00);
 					InPos += 0x02;
 					break;
 				case 0x97:	// another Volume setting?
@@ -511,8 +718,11 @@ UINT8 ToP2Mid(void)
 						TempByt = DB2Mid(Lin2DB(SpcData[InPos + 0x02]));
 					else
 						TempByt = SpcData[InPos + 0x02] >> 1;
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x07, TempByt);
+					ChnMid.Vol = TempByt;
+					if (ChnSeq.DrmNote == 0xFF)
+						WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x07, ChnMid.Vol);
+					else
+						WriteRPN(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x9A, ChnSeq.DrmNote, ChnMid.Vol, &ChnMid);
 					InPos += 0x03;
 					break;
 				case 0x98:	// Set Volume
@@ -520,40 +730,54 @@ UINT8 ToP2Mid(void)
 						TempByt = DB2Mid(Lin2DB(SpcData[InPos + 0x02]));
 					else
 						TempByt = SpcData[InPos + 0x02] >> 1;
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x0B, TempByt);
+					ChnMid.Expr = TempByt;
+					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0B, ChnMid.Expr);
 					CurDly += SpcData[InPos + 0x01];
 					InPos += 0x03;
 					break;
 				case 0x99:	// Set Pan
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x0A, SpcData[InPos + 0x02]);
+					ChnMid.Pan = 0x80 - SpcData[InPos + 0x02];
+					if (ChnMid.Pan >= 0x80)
+						ChnMid.Pan = 0x7F;
+					if (ChnSeq.DrmNote == 0xFF)
+						WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0A, ChnMid.Pan);
+					else
+						WriteRPN(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x9C, ChnSeq.DrmNote, ChnMid.Pan, &ChnMid);
 					CurDly += SpcData[InPos + 0x01];
 					InPos += 0x03;
 					break;
 				case 0x9B:
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+					if (WriteDbgCtrls)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+					}
 					InPos += 0x02;
 					break;
 				case 0x9C:
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, SpcData[InPos + 0x03]);
+					if (WriteDbgCtrls)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x26, SpcData[InPos + 0x03]);
+					}
 					InPos += 0x04;
 					break;
-				case 0xA2:
-					/*WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);*/
+				case 0xA2:	// Detune
+					if (WriteDbgCtrls)
+					{
+						/*WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);*/
+					}
 					WriteEvent(MidData, &DstPos, &CurDly,
 								0xB0 | MidChn, 0x65, 0x00);
 					WriteEvent(MidData, &DstPos, &CurDly,
@@ -565,59 +789,87 @@ UINT8 ToP2Mid(void)
 					InPos += 0x02;
 					break;
 				case 0xA3:
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+					if (WriteDbgCtrls)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+					}
 					InPos += 0x02;
 					break;
-				case 0xAA:
+				case 0xAA:	// set Reverb/Chorus
 					//WriteEvent(MidData, &DstPos, &CurDly,
 					//			0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x5B, SpcData[InPos + 0x01]);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x5D, SpcData[InPos + 0x02]);
+					if (0 || WriteDbgCtrls)
+					{
+						// These are global settings, so I write them to all channels.
+						for (TempByt = 0x00; TempByt < 0x10; TempByt ++)
+						{
+							WriteEvent(MidData, &DstPos, &CurDly,
+										0xB0 | TempByt, 0x5B, SpcData[InPos + 0x01]);
+							WriteEvent(MidData, &DstPos, &CurDly,
+										0xB0 | TempByt, 0x5D, SpcData[InPos + 0x02]);
+						}
+					}
 					InPos += 0x03;
 					break;
 				case 0xAD:
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+					if (WriteDbgCtrls)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+					}
 					InPos += 0x02;
 					break;
 				case 0xAE:
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+					if (WriteDbgCtrls)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+					}
 					InPos += 0x02;
 					break;
 				case 0xAF:
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
+					if (WriteDbgCtrls)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
+					}
 					InPos += 0x03;
 					break;
 				case 0xB2:
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+					if (WriteDbgCtrls)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+					}
 					InPos += 0x02;
 					break;
 				case 0xC8:
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+					if (WriteDbgCtrls)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+					}
 					InPos += 0x01;
 					break;
 				case 0xF0:
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+					if (WriteDbgCtrls)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+					}
 					InPos += 0x01;
 					break;
 				case 0xFD:	// Segment Return
@@ -625,8 +877,11 @@ UINT8 ToP2Mid(void)
 					InPos = 0x0000;
 					break;
 				case 0xFE:
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+					if (WriteDbgCtrls)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+					}
 					InPos += 0x01;
 					break;
 				case 0xFF:
@@ -635,8 +890,11 @@ UINT8 ToP2Mid(void)
 					break;
 				default:
 					printf("Unknown event %02X on track %X at %04X\n", SpcData[InPos + 0x00], CurTrk, InPos);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6E, CurCmd & 0x7F);
+					if (WriteDbgCtrls)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x6E, CurCmd & 0x7F);
+					}
 					InPos += 0x01;
 					TrkEnd = true;
 					break;
@@ -652,14 +910,14 @@ UINT8 ToP2Mid(void)
 		WriteEvent(MidData, &DstPos, &CurDly,
 					0xFF, 0x2F, 0x00);
 		
-		WriteBigEndianL(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
+		WriteBE32(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
 	}
 	MidLen = DstPos;
 	
 	return 0x00;
 }
 
-static void WriteBigEndianL(UINT8* Buffer, UINT32 Value)
+static void WriteBE32(UINT8* Buffer, UINT32 Value)
 {
 	Buffer[0x00] = (Value & 0xFF000000) >> 24;
 	Buffer[0x01] = (Value & 0x00FF0000) >> 16;
@@ -669,7 +927,7 @@ static void WriteBigEndianL(UINT8* Buffer, UINT32 Value)
 	return;
 }
 
-static void WriteBigEndianS(UINT8* Buffer, UINT16 Value)
+static void WriteBE16(UINT8* Buffer, UINT16 Value)
 {
 	Buffer[0x00] = (Value & 0xFF00) >> 8;
 	Buffer[0x01] = (Value & 0x00FF) >> 0;
@@ -711,11 +969,11 @@ static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UIN
 				else
 					WriteMidiValue(Buffer, Pos, 0);
 				MidData[*Pos + 0x00] = 0x90 | TempNote->MidChn;
-				MidData[*Pos + 0x01] = TempNote->Note;
+				MidData[*Pos + 0x01] = TempNote->MidiNote & 0x7F;
 				MidData[*Pos + 0x02] = 0x00;
 				*Pos += 0x03;
 				
-				if (TempNote->MidChn == 0x09 && TempNote->Note == 0x2E)
+				if (TempNote->MidiNote == (0x80 | 0x2E))
 				{
 					WriteMidiValue(Buffer, Pos, 0);
 					MidData[*Pos + 0x00] = 0x2C;
