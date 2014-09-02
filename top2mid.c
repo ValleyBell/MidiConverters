@@ -1,6 +1,6 @@
 // Tales of Phantasia SPC -> Midi Converter
 // ----------------------------------------
-// Written by Valley Bell, 2012
+// Written by Valley Bell, 2012, 2014
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -8,15 +8,9 @@
 #include <ctype.h>
 #include <math.h>
 
-typedef unsigned char	bool;
-typedef signed char		INT8;
-typedef unsigned char	UINT8;
-typedef unsigned short	UINT16;
-typedef signed short	INT16;
-typedef unsigned long	UINT32;
+#include "stdtype.h"
+#include "stdbool.h"
 
-#define false	0x00
-#define true	0x01
 
 //#define CONVERT_VOL
 
@@ -97,11 +91,6 @@ int main(int argc, char* argv[])
 	char* StrPtr;
 	char TempArr[0x08];
 	int RetVal;
-	
-	/*UINT16 FileCount;
-	UINT16 CurFile;
-	UINT32 CurPos;
-	UINT32 TempLng;*/
 	
 	printf("ToP SPC -> Midi Converter\n-------------------------\n");
 	if (argc < 4)
@@ -906,9 +895,9 @@ UINT8 ToP2Mid(void)
 			if (RunNotes[TempByt].RemLen > CurDly)
 				CurDly = RunNotes[TempByt].RemLen;
 		}
+		WriteEvent(MidData, &DstPos, &CurDly, 0x7F, 0x00, 0x00);	// flush all notes
 		
-		WriteEvent(MidData, &DstPos, &CurDly,
-					0xFF, 0x2F, 0x00);
+		WriteEvent(MidData, &DstPos, &CurDly, 0xFF, 0x2F, 0x00);
 		
 		WriteBE32(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
 	}
@@ -940,34 +929,43 @@ static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UIN
 	UINT8 CurNote;
 	UINT32 TempDly;
 	RUN_NOTE* TempNote;
-	bool MoreNotes;
 	
-	do
+	while(RunNoteCnt)
 	{
-		MoreNotes = false;
-		TempNote = RunNotes;
-		if (! Evt)
-			TempDly = *Delay + 1;
-		else
-			TempDly = *Delay;
-		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++, TempNote ++)
+		// 1. Check if we're going beyond a note's timeout.
+		TempDly = *Delay + 1;
+		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
 		{
+			TempNote = &RunNotes[CurNote];
 			if (TempNote->RemLen < TempDly)
 				TempDly = TempNote->RemLen;
 		}
-		if (! Evt && TempDly >= *Delay + 1)
-			break;
-		
-		TempNote = RunNotes;
-		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++, TempNote ++)
+		if (Evt != 0x7F)
 		{
-			TempNote->RemLen -= (UINT16)TempDly;
-			if (! TempNote->RemLen)
+			if (TempDly >= *Delay)
+				break;	// not beyond the timeout - do the event
+		}
+		else
+		{
+			// 7F is the 'flush all' command
+			if (TempDly > *Delay)
+				break;
+		}
+		
+		// 2. advance all notes by X ticks
+		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
+			RunNotes[CurNote].RemLen -= (UINT16)TempDly;
+		(*Delay) -= TempDly;
+		
+		// 3. send NoteOff for expired notes
+		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
+		{
+			TempNote = &RunNotes[CurNote];
+			if (! TempNote->RemLen)	// turn note off, it going beyond the Timeout
 			{
-				if (! MoreNotes)
-					WriteMidiValue(Buffer, Pos, TempDly);
-				else
-					WriteMidiValue(Buffer, Pos, 0);
+				WriteMidiValue(Buffer, Pos, TempDly);
+				TempDly = 0;
+				
 				MidData[*Pos + 0x00] = 0x90 | TempNote->MidChn;
 				MidData[*Pos + 0x01] = TempNote->MidiNote & 0x7F;
 				MidData[*Pos + 0x02] = 0x00;
@@ -985,22 +983,23 @@ static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UIN
 					*Pos += 0x02;
 				}
 				
-				MoreNotes = true;
-				
 				RunNoteCnt --;
 				if (RunNoteCnt)
 					*TempNote = RunNotes[RunNoteCnt];
-				CurNote --;	TempNote --;
+				CurNote --;
 			}
 		}
-		if (MoreNotes)
-			(*Delay) -= TempDly;
-	} while(MoreNotes);
-	if (! Evt)
+	}
+	if (! (Evt & 0x80))
 		return;
 	
 	WriteMidiValue(Buffer, Pos, *Delay);
-	*Delay = 0x00;
+	if (*Delay)
+	{
+		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
+			RunNotes[CurNote].RemLen -= (UINT16)*Delay;
+		*Delay = 0x00;
+	}
 	
 	switch(Evt & 0xF0)
 	{
