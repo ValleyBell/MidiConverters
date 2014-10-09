@@ -1,0 +1,19 @@
+SPC	Songs	same	1stPtr	Title
+01	02	--	D21A	Introduction
+02	07	--	8F1B	Title Screen
+03	07	02	8F1B	Map
+04	07	--	F51A	Sleepy Rock
+05	07	02	8F1B	Level Complete
+06	02	--	421B	Surely Wood
+07	02	06	421B	El Gato Battle 1
+08	02	--	111B	Fiesta City
+09	01	--	261B	Ancient Keep
+10	01	--	EE1A	Snowy Cabin
+11	02	--	5E1B	Galactical Galaxies
+12	02	11	5E1B	El Gato Battle 2
+13	02	--	501B	Ye Olde Bounty
+14	02	13	501B	Battle with Pirate Gato
+15	07	02	8F1B	The Mice Have Been Rescued
+16	07	02	8F1B	Staff Roll
+17	07	02	8F1B	Continue?
+18	07	02	8F1B	Game Over

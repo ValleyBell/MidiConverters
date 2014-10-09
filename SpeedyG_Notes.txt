@@ -1,0 +1,117 @@
+Commands:
+
+00-7F ii dd ss	Play Note
+		-> command = Note Height
+		-> ii = Instrument [Note: The instrument also stores the Pan settings.]
+		-> dd = Duration [Note: MIDI-like variable length value]
+		-> ss = Note Stop value (stop after Duration - ss ticks)
+80		Track End [Music]
+81 tt ll pppp	GoSub to pppp (absolute) and loop ll times, all notes within the subroutine are played transposed by tt
+		-> writes tt ll pppp to Track RAM 09-0C
+82		Return from GoSub
+83 pppp		GoTo to pppp (absolute)
+84 ss nn	Portamento On
+		-> ss - Portamento Speed (low = fast, high = slow, unaffected by portamento range)
+		-> nn - Source Note
+			The portamento calculated this way: [final note] = [last played note] + ([destination note] - [portamento source note])
+			So this MUST be equal to last played note to avoid weird effects.
+85		Portamento Off
+88 ii dd ss	Rest (commands see Note)
+89 aa		??
+8A tt		Set Tempo to aa [sets Timer 0 value]
+8B ee		Modulation On (use Modulation Evelope ee)
+8C		Modulation Off
+8E ll		Loop Start (loop section 8E..8F ll times)
+8F		Loop End
+FF		Track End [SFX]
+
+
+
+
+RAM values:
+0000-007F - Track RAM
+00-01 - Data Pointer
+02 - ??
+03-04 - remaining Duration
+05-06 - Note Stop value (note is stopped when "remaining Duration" reached this value)
+07 - some flags
+08 - Transpose
+09 - ??
+0A - some Loop Counter
+0B-0C - some address
+0D-0E - another address
+0F - remaining Portamento Ticks
+
+
+00FA - current Tempo (low value = fast, high value = slow)
+1300-14FF - Music Channel Pointers
+	-> 16 bytes per track (8 channels, 2-byte pointers)
+1500-15FF - SFX Track Pointers [SFX track headers are terminated with FF instead of 80]
+1600-167F - Music Instrument Pointers [points to 7-byte arrays at 1A00]
+1680-16FF - SFX Instrument Pointers
+1700-18FF - Sample Pointers
+1900-191F - Modulation Pointers
+
+Instrument Format:
+1 byte  - Sample ID
+1 byte  - Volume Left (8-bit signed, so 81 is the same as 7F but with inverted waveform)
+1 byte  - Volume Right
+4 bytes - ADSR Data
+
+SFX Header Format:
+1 byte  - SFX Priority?
+? bytes - Track Data
+1 byte  - Terminator (byte FF)
+
+Modulation Format:
+1 byte  - Duration (00-FE, number of Ticks?)
+1 byte  - frequency delta
+    alternative:
+1 byte  - value FF (jump/loop)
+2 bytes - destination offset (absolute)
+
+
+ROM Offsets:
+Data for Music Set (song 09): 0B1D46 [CPU addr: 169D46]
+	-> in ROM at 0B1D07
+Data for Music Set (song 03/04): 0B68D0 [CPU addr: 16E8D0]
+	-> in ROM at 0B688E
+Data for Music Set (song 02): 0D66F2 [CPU addr: 1AE6F2]
+	-> in ROM at 0D66B1
+
+Set	FileOrd	Offset	CPU
+00	00	0B1D07	169D07
+03	01	0B3B27	16BB27
+06	02	0B4D78	16CD78
+08	03	0B688E	16E88E
+01	04	0CF09B	19F09B
+02	05	0D0000	1A8000
+05	06	0D17B5	1A97B5
+04	07	0D50C2	1AD0C2
+07	08	0D66B1	1AE6B1
+--	End	0D7F4D	1AFF4D
+
+There is some ASM code that loads all these offsets at 0B006F and 0B00B2, 0B00E2, ..., 0B0202.
+
+Format is:
+08 C2 30 20 7B 83 20 97 83 A9 ll ll 8D 03 00 E2 20 A9 hh 8D 05 00
+ll ll - lower 16 bit (Little Endian)
+hh - higher 8 bit
+
+hhllll results in a CPU space pointer.
+	
+
+Set Format:
+Pos	Len	Description
+00	07	Music Track Pointers (-> 1300, sound block pointer format)
+07	07	SFX Track Pointers (-> 1500)
+0E	07	Music Instrument Pointers (-> 1600)
+15	07	SFX Instrument Pointers (-> 1680)
+1C	07	Instrument/Music/SFX Data (-> 1A00)
+23	02	Sample Data Destination Offset
+25	??	List of required Samples (terminated by an FF byte)
+
+Sound Block Pointer Format:
+3 bytes - Data Start [CPU space pointer]
+2 bytes - Data Length
+2 bytes - APU destination address
