@@ -1,0 +1,57 @@
+Ys 2
+----
+2 bytes - Track Header List Offset
+2 bytes - EOF Offset
+2 bytes - FM Instrument Data Offset (1Ah bytes per instrument)
+2 bytes - SSG Instruent Data Offset (07h bytes per instrument)
+
+FM Instrument Register List:
+?? 30 34 38 3C 40 ... 88 8C B0
+-> 1Ah bytes
+
+Track Header List
+-----------------
+4 bytes - FM 1 channel header
+4 bytes - FM 2 channel header
+4 bytes - FM 3 channel header
+4 bytes - SSG 1 channel header
+4 bytes - SSG 2 channel header
+4 bytes - SSG 3 channel header
+
+Track Header
+------------
+2 bytes - Track Data Offset
+2 bytes - unknown (always 0000)
+
+The file is stored at Z80 offset 3000h, so a pointer of 3124h equals a file offset of 0124h.
+
+
+Commands
+--------
+00		Track End
+01-7F on	Octave o, Note n, Length xx
+80-EF		Delay (xx & 7F)
+F0 bbaa		Loop Jump (jump when current loop counter == 1)
+F1 tt		early Note Stop (stop note tt ticks earlier)
+F2		Volume Down
+F3		Volume Up
+F4 tt		set Timer B to tt (controls Tempo)
+F5 xx 00	Disable Modulation
+F5 dd pp uutt ss	Set Modulation
+		Delay = dd ticks
+		Speed = pp
+		Delta = ttuu
+		Steps until Delta Inversion = ss
+F6 80 oo	Loop Start Marker (oo = relative offset of Loop End)
+		-> increases Loop Stack pointer
+F6 ii tt bbaa	Loop Index ii, Loop tt times back to bbaa
+		bbaa is relative to the offset after reading the pointer.
+F7 ??		??
+F8 ??		??
+F9		Hold Note
+FA ??		
+FB ??		
+FC aa bb cc dd ee ff	Set SSG Envelope
+FD aa bb		
+FE vv		Set Volume
+FF aa		Set Instrument
