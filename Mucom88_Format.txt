@@ -1,0 +1,97 @@
+Mucom88/PC88 (OPNA)
+------------
+Main Header
+-----------
+1 byte  - unknown (always 00)
+2 bytes - FM Instrument List Offset
+2 bytes - SSG Instrument List Offset? [missing in Misty Blue and other early variants]
+x bytes - Sequence Header
+
+Note: Since the sequence header matches in all variants, its offset can easily detected by
+      searching for "2F 00" (FM1 channel pointer). The sequence header begins 1 byte earlier.
+
+
+FM Instrument List
+------------------
+1 byte  - Instrument Count
+x bytes - FM Instrument Data (19h bytes per instrument)
+
+FM Instrument Register List:
+30 34 38 3C 40 ... 88 8C B0
+
+
+Sequence Header
+---------------
+1 byte  - YM2612 Timer B setting (for Tempo)
+4 bytes - FM 1 channel pointers
+4 bytes - FM 2 channel pointers
+4 bytes - FM 3 channel pointers
+4 bytes - SSG 1 channel pointers
+4 bytes - SSG 2 channel pointers
+4 bytes - SSG 3 channel pointers
+4 bytes - OPNA Rhythm channel pointers
+4 bytes - FM 4 channel pointers
+4 bytes - FM 5 channel pointers
+4 bytes - FM 6 channel pointers
+4 bytes - ADPCM channel pointers
+2 bytes - EOF Pointer
+-> 2Eh bytes
+
+
+Channel Pointers
+----------------
+2 bytes - start pointer
+2 bytes - loop pointer
+
+All pointers are relative to the sequence header, i.e. file offset 0005h.
+
+
+Commands
+--------
+00		Track End
+01-7F on	Octave o, Note n, Length xx
+80-EF		Delay (xx & 7F)
+
+F0 ii		Set Instrument
+F1 vv		Set Volume
+F1 gg c1 c2 c3 c4 c5 c6
+		[OPNA Rhythm] Set volume
+			gg - global rhythm volume
+			c1-c6 - volume of channel 1-6
+F2 xx xx xx	Set Detune
+F3 xx		xx = 00..03: early Note Stop (stop note xx ticks earlier)
+		xx = 04+: Set Echo Volume
+		[Rhythm] Set OPNA Rhythm Channel Mask
+			Bit 0 (01): Bass Drum
+			Bit 1 (02): Snare Drum
+			Bit 2 (04): Top Cymbal
+			Bit 3 (08): Hi-Hat
+			Bit 4 (10): Tom
+			Bit 5 (20): Rom Shot
+F4 00 dd pp uutt ss	Set Modulation
+		Delay = dd ticks
+		Speed = pp
+		Delta = ttuu
+		Steps until Delta Inversion = ss
+F4 01		Disable Modulation
+F5 bbaa		Loop Start Marker (bbaa = pointer to Loop Count, relative to pointer)
+		-> increases Loop Stack pointer
+F6 xx tt bbaa	Loop Exit at xx, Loop tt times back to bbaa
+		bbaa is relative to the offset of the pointer.
+F7 xx
+F8 xx
+F9 pp		Set Pan (OPNA Stereo Bits)
+		pp = 01 - right speaker (OPN setting 40)
+		pp = 02 - left speaker (OPN setting 80)
+		pp = 03 - both speakers (OPN setting C0)
+FA rr dd	FM Register Write (to port of current channel, rr - register, dd - data)
+FA 26 tt	set FM Timer B to tt (controls Tempo)
+FA aa bb cc dd ee ff
+		SSG Register Write?? (could also be envelope setup)
+FB vv		Change Volume by vv
+FC xx xx xx
+FD		Hold Note
+FE bbaa		Loop Exit (bbaa = pointer to Loop Exit Counter, relative to pointer)
+		-> jump to Loop End when current loop counter == first counter
+FF		Master Loop Marker??
+FF bbaa		[this variant can also be seen, though rarely]
