@@ -1,3 +1,8 @@
+// Ys 2 Mucom -> Midi Converter
+// ----------------------------
+// Written by Valley Bell, 28 December 2014
+// Last Update: 10 March 2015
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -7,7 +12,8 @@
 #define INLINE	static __inline
 
 int main(int argc, char* argv[]);
-void ConvertYS2MID(void);
+void ConvertYs2MID(void);
+INLINE UINT8 MucomVol2Mid(UINT8 TrkMode, UINT8 Vol);
 INLINE double FMVol2DB(UINT8 Vol);
 INLINE double PSGVol2DB(UINT8 Vol);
 INLINE UINT8 DB2Mid(double DB);
@@ -61,7 +67,7 @@ int main(int argc, char* argv[])
 	printf("Converting %s ...\n", argv[1]);
 	MidSize = 0x20000;
 	MidData = (UINT8*)malloc(MidSize);
-	ConvertYS2MID();
+	ConvertYs2MID();
 	
 	hFile = fopen(argv[2], "wb");
 	if (hFile == NULL)
@@ -79,7 +85,7 @@ int main(int argc, char* argv[])
 	printf("Done.\n");
 	
 #ifdef _DEBUG
-	//getchar();
+	_getch();
 #endif
 	
 	return 0;
@@ -88,12 +94,11 @@ int main(int argc, char* argv[])
 typedef struct _track_header
 {
 	UINT16 DataPtr;
-	UINT8 Val1;
-	UINT8 Val2;
+	UINT16 LoopPtr;
 } TRK_HDR;
 #define SEQ_BASEOFS	0x3000
 
-void ConvertYS2MID(void)
+void ConvertYs2MID(void)
 {
 	static const UINT8 NOTE_ARRAY[0x10] =
 	//	00  01  02  03  04  05  06  07  08  09  0A  0B  0C  0D  0E  0F
@@ -167,9 +172,12 @@ void ConvertYS2MID(void)
 	SeqPos = TrkHdrPos;
 	for (CurTrk = 0; CurTrk < TrkCnt; CurTrk ++, SeqPos += 0x04)
 	{
-		TrkHdrs[CurTrk].DataPtr = ReadLE16(&SeqData[SeqPos + 0x00]) - SEQ_BASEOFS;
-		TrkHdrs[CurTrk].Val1 = SeqData[SeqPos + 0x02];
-		TrkHdrs[CurTrk].Val2 = SeqData[SeqPos + 0x03];
+		TrkHdrs[CurTrk].DataPtr = ReadLE16(&SeqData[SeqPos + 0x00]);
+		if (TrkHdrs[CurTrk].DataPtr)
+			TrkHdrs[CurTrk].DataPtr -= SEQ_BASEOFS;
+		TrkHdrs[CurTrk].LoopPtr = ReadLE16(&SeqData[SeqPos + 0x02]);
+		if (TrkHdrs[CurTrk].LoopPtr)
+			TrkHdrs[CurTrk].LoopPtr -= SEQ_BASEOFS;
 	}
 	
 	for (CurTrk = 0; CurTrk < TrkCnt; CurTrk ++)
@@ -184,7 +192,7 @@ void ConvertYS2MID(void)
 		printf("Track %u ...\n", CurTrk);
 		
 		CurDly = 0;
-		TrkEnd = 0x00;
+		TrkEnd = (SeqPos == 0x0000);
 		MstLoopCnt = 0;
 		NoteMove = TrkMode ? +12 : 0;
 		//WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x65, 0x00);	// RPN MSB: 0
@@ -202,10 +210,26 @@ void ConvertYS2MID(void)
 		LoopIdx = 0x00;
 		while(! TrkEnd)
 		{
+			if (! MstLoopCnt && SeqPos == TrkHdrs[CurTrk].LoopPtr)
+			{
+				MstLoopCnt ++;
+				WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x6F, 0x00);
+			}
+			
 			CurCmd = SeqData[SeqPos];	SeqPos ++;
 			if (CurCmd == 0x00)
 			{
-				TrkEnd = 0x01;
+				if (TrkHdrs[CurTrk].LoopPtr)
+					WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x6F, MstLoopCnt);
+				if (TrkHdrs[CurTrk].LoopPtr && MstLoopCnt < NUM_LOOPS)
+				{
+					SeqPos = TrkHdrs[CurTrk].LoopPtr;
+					MstLoopCnt ++;
+				}
+				else
+				{
+					TrkEnd = 0x01;
+				}
 			}
 			else if (CurCmd < 0x80)
 			{
@@ -239,11 +263,9 @@ void ConvertYS2MID(void)
 					LastNote = CurNote;
 					
 					if (HoldNote)
-					{
 						WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x41, 0x00);
-						HoldNote = 0x00;
-					}
 				}
+				HoldNote = 0x00;
 				
 				CurDly += CurCmd;
 				if (NoteStop && CurDly > NoteStop && SeqData[SeqPos] != 0xF9)
@@ -259,6 +281,13 @@ void ConvertYS2MID(void)
 			}
 			else if (CurCmd < 0xF0)
 			{
+				if (! HoldNote && LastNote != 0xFF)
+				{
+					WriteEvent(MidData, &MidPos, &CurDly, 0x90 | MidChn, LastNote, 0x00);
+					LastNote = 0xFF;
+				}
+				HoldNote = 0x00;
+				
 				CurDly += CurCmd & 0x7F;
 			}
 			else
@@ -269,7 +298,15 @@ void ConvertYS2MID(void)
 					TempPos = ReadLE16(&SeqData[SeqPos]);
 					SeqPos += 0x02;
 					if (LoopCnt[LoopStkIdx] == 1)
+					{
+#if 1					// both variants seem to work - TODO: find out what the real driver does
 						SeqPos += TempPos - 0x01;
+#else
+						LoopCnt[LoopStkIdx] = 0;
+						LoopStkIdx --;
+						SeqPos += TempPos + 0x04;
+#endif
+					}
 					break;
 				case 0xF1:	// Note Stop
 					NoteStop = SeqData[SeqPos];
@@ -278,16 +315,8 @@ void ConvertYS2MID(void)
 					SeqPos ++;
 					break;
 				case 0xF2:	// Volume Down
-					if (! TrkMode)
-					{
-						CurChnVol += 3;
-						TempByt = DB2Mid(FMVol2DB(CurChnVol));
-					}
-					else
-					{
-						CurChnVol ++;
-						TempByt = DB2Mid(PSGVol2DB(CurChnVol));
-					}
+					CurChnVol --;
+					TempByt = MucomVol2Mid(TrkMode, CurChnVol);
 #ifndef USE_VELOCITY
 					if (SeqData[SeqPos] != 0xF2)
 						WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x07, TempByt);
@@ -296,16 +325,8 @@ void ConvertYS2MID(void)
 #endif
 					break;
 				case 0xF3:	// Volume Up
-					if (! TrkMode)
-					{
-						CurChnVol -= 3;
-						TempByt = DB2Mid(FMVol2DB(CurChnVol));
-					}
-					else
-					{
-						CurChnVol --;
-						TempByt = DB2Mid(PSGVol2DB(CurChnVol));
-					}
+					CurChnVol ++;
+					TempByt = MucomVol2Mid(TrkMode, CurChnVol);
 #ifndef USE_VELOCITY
 					if (SeqData[SeqPos] != 0xF3)
 						WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x07, TempByt);
@@ -359,6 +380,8 @@ void ConvertYS2MID(void)
 					{
 						// Loop Start
 						LoopStkIdx ++;
+						TempPos = ((LoopIdx & 0x7F) << 8) | (TempByt << 0);
+						LoopCnt[LoopStkIdx] = SeqData[SeqPos + TempPos];
 					}
 					else
 					{
@@ -366,8 +389,6 @@ void ConvertYS2MID(void)
 						TempPos = ReadLE16(&SeqData[SeqPos]);
 						SeqPos += 0x02;
 						
-						if (! LoopCnt[LoopStkIdx])
-							LoopCnt[LoopStkIdx] = TempByt;
 						LoopCnt[LoopStkIdx] --;
 						if (LoopCnt[LoopStkIdx])
 							SeqPos += TempPos;
@@ -403,16 +424,8 @@ void ConvertYS2MID(void)
 					SeqPos += 0x02;
 					break;
 				case 0xFE:	// Set Volume
-					CurChnVol = (SeqData[SeqPos] & 0x0F) ^ 0x0F;
-					if (! TrkMode)
-					{
-						CurChnVol = CurChnVol * 8 / 3;
-						TempByt = DB2Mid(FMVol2DB(CurChnVol));
-					}
-					else
-					{
-						TempByt = DB2Mid(PSGVol2DB(CurChnVol));
-					}
+					CurChnVol = SeqData[SeqPos];
+					TempByt = MucomVol2Mid(TrkMode, CurChnVol);
 #ifndef USE_VELOCITY
 					WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x07, TempByt);
 #else
@@ -439,21 +452,53 @@ void ConvertYS2MID(void)
 	return;
 }
 
+INLINE UINT8 MucomVol2Mid(UINT8 TrkMode, UINT8 Vol)
+{
+	double DBVol;
+	
+	if (TrkMode == 0)
+		DBVol = FMVol2DB(Vol);
+	else if (TrkMode == 1)
+		DBVol = PSGVol2DB(Vol);
+	else
+		return Vol;
+	return DB2Mid(DBVol);
+}
+
 INLINE double FMVol2DB(UINT8 Vol)
 {
-	return Vol * -0.75;
+	// Mucom uses a FM volume lookup table to map its volume value to 8/3 FM steps. (2 db steps)
+	// The table contains 20 values and looks like this:
+	// 2A 28 25 22 20 1D 1A 18 15 12 10 0D 0A 08 05 02
+#if 0
+	UINT8 FmVol;
+	
+	if (Vol < 0x10)
+		FmVol = (0x10 - Vol) * 8 / 3;
+	else
+		FmVol = 0;
+	return FmVol * -0.75;
+#else
+	if (Vol < 0x10)
+		return (0x10 - Vol) * -2.0;
+	else
+		return 0;
+#endif
 }
 
 INLINE double PSGVol2DB(UINT8 Vol)
 {
-	if (Vol >= 0x0F)
-		return -999;
+	if (Vol > 0x0F)
+		return 0.0;
+	else if (Vol > 0x00)
+		return (0x0F - Vol) * -3.0;	// AY8910 volume is 3 db per step
 	else
-		return Vol * -2.0;
+		return -999;
 }
 
 INLINE UINT8 DB2Mid(double DB)
 {
+	DB += 6.0;
 	if (DB > 0.0)
 		DB = 0.0;
 	return (UINT8)(pow(10.0, DB / 40.0) * 0x7F + 0.5);
