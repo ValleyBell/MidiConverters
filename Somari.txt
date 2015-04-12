@@ -1,0 +1,125 @@
+Sequence Header
+---------------
+repeat:
+  1 byte  - Channel ID (00-04 for music, 80-84 for SFX tracks)
+  2 bytes - Data Pointer
+1 byte  - Terminator-Byte FF
+
+
+Sequence Format
+---------------
+00-7F	play Note (with set duration)
+	Note 00 is a rest
+80-EF	set Duration to (xx & 7F)
+	-> Note: A duration of 00 is ignored.
+F0-FF	Commands
+
+F0 aa bb	GoSub to offset bbaa (only 1 level supported)
+F1		Return from GoSub
+F2 tt		Loop Start (loop tt times)
+F3		Loop End
+F4 aa bb	Jump to offset bbaa, used for song looping
+F5 mm		set Tick Multiplier (every tick takes mm frames, applied using a separate counter)
+F6 tt		[square 0/1, triangle only] set Track Transpose to tt (value added to each note before frequency lookup)
+F7		[broken] does nothing
+F8 aa		[not DPCM] set Volume Envelope
+F9 aa		[square 0/1 only] set Instrument/Duty Cycle Envelope
+FA aa		[not DPCM] set Modulation Envelope
+FB tt aa bb	alternative Loop (loop tt times back to bbaa)
+FC xx		ignores the parameter and returns from the Track Processing Loop
+		-> effectively causes the current note to be held
+FD xx		[broken] set Duration to (B8 & 7F) = 38
+FE		[broken] does nothing
+FF		Track End
+
+
+Note: Offsets are absolute CPU space addresses.
+
+
+
+
+
+
+Sound RAM
+---------
+0700	Sound Queue Enable
+		00 - ignore the sound queue
+		01-FF - process sound queue (and load enqueued Sound IDs)
+0701-08	Sound Queue
+		00-7F - Sound IDs to play
+		80-FF - free slots (defaults to FF)
+0709	Pause Mode
+		00 - normal (play sound)
+		FF - paused
+		F0 - pause request
+		F1 - resume request
+
+070A	current Track ID (00-04 for music, 10-14 for SFX)
+070B	current Track Offset (00+ for music, 76+ for SFX)
+070C	current Track Pointer Offset (like 070B, but advances by 2 for each track)
+
+070D-82	Music Track Memory
+070D-0F	Track 0-2 Transpose
+
+0710-14	Track 0-4 Loop Counter
+0715-1E	Track 0-4 Loop Offset (for back-jumping)
+071F-28	Track 0-4 Return-from-GoSub Pointer
+0729-2A	Track 0 Pointer
+072B-2C	Track 1 Pointer
+072D-2E	Track 2 Pointer
+072F-30	Track 3 Pointer
+0731-32	Track 4 Pointer
+
+0733	Tick Multiplier
+0734-38	Track 0-4 Note Length
+
+0739/3A	Track 0 Remaining Ticks
+	-> 0739 - Frame Countdown (counts down from Tick Multiplier)
+	-> 073A - Note Ticks
+073B/3C	Track 1 Remaining Ticks
+073D/3E	Track 2 Remaining Ticks
+073F/40	Track 3 Remaining Ticks
+0741/42	Track 4 Remaining Ticks
+
+0743-4C	Track 0-4 Note Frequency
+074D-56	Track 0-4 Final Frequency (after applying modulation)
+
+0757-5B	Track 0-4 Volume Envelope (set by command F8)
+075C-60	Track 0-4 Volume Env. Delay
+0761-6A	Track 0-4 Volume Env. Data Pointer
+
+076B-6C	Track 0-1 Instrument Envelope (set by command F9)
+076D-6E	Track 0-1 Instrument Env. Delay
+076F-72	Track 0-1 Instrument Env. Data Pointer
+
+0773-76	Track 0-3 Modulation Envelope (set by command FA)
+0777-7A	Track 0-3 Modulation Env. Delay
+077B-82	Track 0-3 Modulation Env. Data Pointer
+
+0783-F8	SFX Track Memory
+	-> same layout as Music Track Memory (offsets are Music+$76)
+079F-A0	Track 0 Pointer
+07A1-A2	Track 1 Pointer
+07A3-A4	Track 2 Pointer
+07A5-A6	Track 3 Pointer
+07A7-A8	Track 4 Pointer
+
+
+Envelope Pointers are at 8200, pointing to data at 8300+
+
+Envelope Format
+---------------
+[repeat]
+  1 byte - duration (in frames)
+		0 = skip, 1 = 1 frame etc.
+		FF = Envelope End
+  1 byte - envelope data
+[end]
+
+The Envelope End byte also uses the parameter.
+If the parameter is 00-7F, the envelope is terminated.
+If the parameter is 80-FF, the envelope loops and continues at byte xx (relative to the Envelope End command).
+
+
+The data values of Volume and Instrument (duty cycle) envelopes are added up and sent to the NES sound chip.
+The data values of Modulation envelopes are sign-extented to 16-bit and added to the note frequency.
