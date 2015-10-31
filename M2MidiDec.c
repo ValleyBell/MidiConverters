@@ -72,6 +72,24 @@ static const UINT8 WAVE_Header[0x2C] =
 #define MODE_WAV	0x10	// dump samples to WAV
 #define MODE_SF2	0x11	// dump samples to SF2 soundfonts
 
+#define SONICFIGHTER
+//#define FVIPERS
+
+#ifdef SONICFIGHTER
+#define SND_DRV_FILE	"epr-19021.31"
+#define SMP_ROM_0		"mpr-19022.32"
+#define SMP_ROM_1		"mpr-19023.33"
+#define SMP_ROM_2		"mpr-19024.34"
+#define SMP_ROM_3		"mpr-19025.35"
+#endif
+#ifdef FVIPERS
+#define SND_DRV_FILE	"epr-18628.31"
+#define SMP_ROM_0		"mpr-18629.32"
+#define SMP_ROM_1		"mpr-18630.33"
+#define SMP_ROM_2		"mpr-18631.34"
+#define SMP_ROM_3		"mpr-18632.35"
+#endif
+
 typedef struct _rom_data
 {
 	UINT32 Size;
@@ -98,8 +116,11 @@ static ROM_DATA SmpROM[4];
 static UINT32 MidSize;
 static UINT8* MidData;
 
-static bool FixVolume;
-static bool FixDrumNotes;
+static bool FixVolume;		// convert volume to MIDI scale
+static UINT8 FixDrumNotes;	// turn off endlessly playing drum notes
+							// 01 - end when replaying note of segment ends
+							// 02 - end immediately
+static bool PatchDrumChn;	// swap MIDI channels 0F and 09
 static UINT32 GLOBAL_PTR_OFS = 0x008000;
 static UINT8 Mode;
 
@@ -111,6 +132,8 @@ static UINT8 Mode;
 
 #define PTR_GROUP	0x00
 
+static UINT8 RunningDrmNotes[0x80];
+
 int main(int argc, char* argv[])
 {
 	FILE* hFile;
@@ -121,12 +144,12 @@ int main(int argc, char* argv[])
 	UINT32 CurPos;
 	
 	FixVolume = true;
-	FixDrumNotes = true;
+	FixDrumNotes = 0x01;
+	PatchDrumChn = true;
 	Mode = MODE_SF2;
-	Mode = MODE_MIDI;
+	//Mode = MODE_MIDI;
 	
-	hFile = fopen("epr-19021.31", "rb");
-	//hFile = fopen("epr-18628.31", "rb");
+	hFile = fopen(SND_DRV_FILE, "rb");
 	if (hFile == NULL)
 		return 1;
 	
@@ -141,14 +164,10 @@ int main(int argc, char* argv[])
 	
 	if ((Mode & 0xF0) == 0x10)
 	{
-		LoadROMData("mpr-19022.32", &SmpROM[0], 0x200000);
-		LoadROMData("mpr-19023.33", &SmpROM[1], 0x200000);
-		LoadROMData("mpr-19024.34", &SmpROM[2], 0x200000);
-		LoadROMData("mpr-19025.35", &SmpROM[3], 0x200000);
-		/*LoadROMData("mpr-18629.32", &SmpROM[0], 0x200000);
-		LoadROMData("mpr-18630.33", &SmpROM[1], 0x200000);
-		LoadROMData("mpr-18631.34", &SmpROM[2], 0x200000);
-		LoadROMData("mpr-18632.35", &SmpROM[3], 0x200000);*/
+		LoadROMData(SMP_ROM_0, &SmpROM[0], 0x200000);
+		LoadROMData(SMP_ROM_1, &SmpROM[1], 0x200000);
+		LoadROMData(SMP_ROM_2, &SmpROM[2], 0x200000);
+		LoadROMData(SMP_ROM_3, &SmpROM[3], 0x200000);
 	}
 	else
 	{
@@ -377,6 +396,7 @@ static void DecodeMidiData(UINT32 PtrBase, UINT8 SongID)
 	
 	MidData[MidPos] = 0x00;		MidPos ++;	// Delay
 	
+	memset(RunningDrmNotes, 0x00, 0x80);
 	for (CurSeg = 0x00; ; CurSeg ++, SegPos += 0x04)
 	{
 		sprintf(TempStr, "Segment %hu", CurSeg);
@@ -470,6 +490,7 @@ static UINT32 DecodeMidiSegment(UINT32 ROMStPos, UINT32 MidStPos)
 	UINT8 TrkEnd;
 	UINT8 NoDelay;
 	UINT8 Param1;
+	UINT8 IsDrum;
 	
 	CurPos = ROMStPos;
 	MidPos = MidStPos;
@@ -501,7 +522,11 @@ static UINT32 DecodeMidiSegment(UINT32 ROMStPos, UINT32 MidStPos)
 		TempByt = ROMData[CurPos];
 		if (TempByt & 0x80)
 		{
-			if (TempByt < 0xF0)
+			if (TempByt < 0xF0 && (TempByt & 0x0F) == 0x0F)
+				IsDrum = 0x01;
+			else
+				IsDrum = 0x00;
+			if (TempByt < 0xF0 && PatchDrumChn)
 			{
 				if ((TempByt & 0x0F) == 0x09)
 					TempByt = (TempByt & 0xF0) | 0x0F;
@@ -555,11 +580,26 @@ static UINT32 DecodeMidiSegment(UINT32 ROMStPos, UINT32 MidStPos)
 				TempByt &= 0x7F;
 			}
 			MidData[MidPos] = TempByt;
+			if (IsDrum)
+				RunningDrmNotes[TempByt] = 0x00;
 			CurPos ++;	MidPos ++;
 			MidData[MidPos] = 0x7F;
 			MidPos ++;
 			break;
 		case 0x90:	// loc_603F0C (MidEvt_NoteOn)
+			if (IsDrum)
+			{
+				TempByt = ROMData[CurPos];
+				if (FixDrumNotes == 0x01 && RunningDrmNotes[TempByt])
+				{
+					// Drum notes are never turned off
+					MidData[MidPos] = ROMData[CurPos];	MidPos ++;	// Note
+					MidData[MidPos] = 0x00;				MidPos ++;	// Velocity: 00 (Note Off)
+					MidData[MidPos] = 0x00;				MidPos ++;	// Delay
+				}
+				RunningDrmNotes[TempByt] = 0x01;
+			}
+			
 			MidData[MidPos] = ROMData[CurPos];
 			CurPos ++;	MidPos ++;
 			TempByt = ROMData[CurPos];
@@ -574,7 +614,7 @@ static UINT32 DecodeMidiSegment(UINT32 ROMStPos, UINT32 MidStPos)
 			MidData[MidPos] = TempByt;
 			CurPos ++;	MidPos ++;
 			
-			if (LastCmd == 0x99 && FixDrumNotes)
+			if (IsDrum && FixDrumNotes == 0x02)
 			{
 				// Drum notes are never turned off
 				MidData[MidPos] = 0x00;						MidPos ++;	// Delay
@@ -641,6 +681,22 @@ static UINT32 DecodeMidiSegment(UINT32 ROMStPos, UINT32 MidStPos)
 				break;
 			}
 			break;
+		}
+	}
+	
+	if (FixDrumNotes == 0x01)
+	{
+		LastCmd = PatchDrumChn ? 0x99 : 0x9F;
+		for (TempByt = 0x00; TempByt < 0x80; TempByt ++)
+		{
+			if (RunningDrmNotes[TempByt])
+			{
+				MidData[MidPos] = LastCmd;	MidPos ++;	// Command
+				MidData[MidPos] = TempByt;	MidPos ++;	// Note
+				MidData[MidPos] = 0x00;		MidPos ++;	// Velocity: 00 (Note Off)
+				MidData[MidPos] = 0x00;		MidPos ++;	// Delay
+				RunningDrmNotes[TempByt] = 0x00;
+			}
 		}
 	}
 	
@@ -733,10 +789,13 @@ static UINT32 DoCommandA0(UINT32 MidStPos, UINT8 Command, UINT8 Arg1, UINT8 Arg2
 			//	8000 09FB 0000 6001 52F7 0000 0000 0000
 			
 			MidChn = ROMData[CurPos + 0x01];
-			if (MidChn == 0x09)
-				MidChn = 0x0F;
-			else if (MidChn == 0x0F)
-				MidChn = 0x09;
+			if (PatchDrumChn)
+			{
+				if (MidChn == 0x09)
+					MidChn = 0x0F;
+				else if (MidChn == 0x0F)
+					MidChn = 0x09;
+			}
 			
 			MidData[MidPos] = 0x00;						MidPos ++;
 			MidData[MidPos] = 0xC0 | MidChn;			MidPos ++;
@@ -1096,7 +1155,7 @@ static UINT16 GenerateSampleTable(SF2_DATA* SF2Data, UINT8** RetLoopMsk)
 		if (SmplPtr == NULL || ! SmplLen)
 		{
 			sprintf(TempSHdr->achSampleName, "Sample %03hX (null)", CurSmpl);
-			TempSHdr->dwEnd = SmplDBPos;
+			TempSHdr->dwEnd = SmplDBPos+1;
 			TempSHdr->dwStartloop = SmplDBPos;
 			TempSHdr->dwEndloop = SmplDBPos;
 		}
@@ -1201,10 +1260,10 @@ static UINT16 GenerateInstruments(SF2_DATA* SF2Data, UINT16 SmplCnt, const UINT8
 			RetDrmMask[CurIns >> 3] |= 1 << (CurIns & 0x07);
 			
 			// set Release Rate for drums
-			AddInsBag(&InsBagAlloc, &InsBagCnt, &InsBags, InsGenCnt, 0);
+			//AddInsBag(&InsBagAlloc, &InsBagCnt, &InsBags, InsGenCnt, 0);
 			
 			// 10 seconds, 1200 * Log2(10) = 3986.31
-			AddInsGen_S16(&InsGenAlloc, &InsGenCnt, &InsGen, releaseVolEnv, 3986);
+			//AddInsGen_S16(&InsGenAlloc, &InsGenCnt, &InsGen, releaseVolEnv, 3986);
 			
 			CurNote = ROMData[CurPos + 0x02];
 			MaxNote = ROMData[CurPos + 0x03];
@@ -1222,7 +1281,13 @@ static UINT16 GenerateInstruments(SF2_DATA* SF2Data, UINT16 SmplCnt, const UINT8
 				AddInsGen_S16(&InsGenAlloc, &InsGenCnt, &InsGen, holdVolEnv, SmplDef.SusRate);
 				AddInsGen_S16(&InsGenAlloc, &InsGenCnt, &InsGen, decayVolEnv, SmplDef.DecRate);
 				AddInsGen_S16(&InsGenAlloc, &InsGenCnt, &InsGen, sustainVolEnv, SmplDef.SusLvl);
-				AddInsGen_S16(&InsGenAlloc, &InsGenCnt, &InsGen, releaseVolEnv, SmplDef.RelRate);
+				if (SmplDef.LoopMode)
+					// Note Off goes to Release Phase
+					AddInsGen_S16(&InsGenAlloc, &InsGenCnt, &InsGen, releaseVolEnv, SmplDef.RelRate);
+				else
+					// Note Off is ignored
+					// 100 seconds, 1200 * Log2(100) = 7972.63
+					AddInsGen_S16(&InsGenAlloc, &InsGenCnt, &InsGen, releaseVolEnv, 7973);
 				
 				AddInsGen_U16(&InsGenAlloc, &InsGenCnt, &InsGen, sampleModes, SmplDef.LoopMode);
 				AddInsGen_U16(&InsGenAlloc, &InsGenCnt, &InsGen, sampleID, SmplDef.SmplID);
@@ -1331,13 +1396,15 @@ static void ReadInsData(const UINT8* Data, UINT8 LastNote, UINT8 CurNote, SMPL_D
 		NoteDiff = (INT8)Data[0x02] >> 4;	// get octave
 		NoteDiff *= 12;						// convert into notes
 		NoteDiff += (Data[0x02] & 0x0F);	// add note
+		// I'm not sure if the lower bits aren't actually some flags.
+		
 		// RootKey + NoteDiff (transpose) = RangeKey
 		// We got RangeKey, so we need to go the reverse way.
 		NoteDiff = CurNote - NoteDiff;
 		if (NoteDiff < 0)
 			NoteDiff = 0;
-		else if (NoteDiff > 127)
-			NoteDiff = 127;
+		else if (NoteDiff > 192)
+			NoteDiff = 192;
 		RetSmplDef->RootNote = (UINT8)NoteDiff;
 		
 		ADSRPtr = &Data[0x08];
