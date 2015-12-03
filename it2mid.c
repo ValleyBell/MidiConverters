@@ -1,3 +1,6 @@
+// IT -> MIDI Converter
+// --------------------
+// Valley Bell, 2015-05/2015-06
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -539,8 +542,8 @@ static UINT8 ReadITInstrument_Gen(UINT32 baseOfs, IT_INS_GENERIC* itIns)
 	curPos = baseOfs + 0x40;
 	for (curNote = 0; curNote < 120; curNote ++, curPos += 0x02)
 	{
-		ItIns->noteMap[curNote].note = ItData[curPos + 0x00];
-		ItIns->noteMap[curNote].smplID = ItData[curPos + 0x01];
+		itIns->noteMap[curNote].note = ItData[curPos + 0x00];
+		itIns->noteMap[curNote].smplID = ItData[curPos + 0x01];
 	}
 	
 	return 0x00;
@@ -553,7 +556,7 @@ static UINT8 ReadITInstrument(UINT32 baseOfs, IT_INS* itIns)
 	UINT8 curNode;
 	UINT32 curPos;
 	
-	retVal = ReadITInstrument_Gen(baseOfs, (IT_INS_GENERIC*)ItIns);
+	retVal = ReadITInstrument_Gen(baseOfs, (IT_INS_GENERIC*)itIns);
 	if (retVal)
 		return retVal;
 	
@@ -965,6 +968,8 @@ static void ConvertItRow(IT_PB_INFO* itPbInf, UINT8 chn, IT_ROW* rowState)
 		ConvertItRowFX(itPbInf, chn, 0, (char)(rowState->fxcmd - 1 + 'A'), rowState->fxval);
 	}
 	
+	if (rowState->mask & 0x11)
+		chnInf->note = rowState->note;	// for FX delay detection
 	ConvertFX2Mid(itPbInf, chn);
 	
 	if (rowState->mask & 0x11)
@@ -1025,7 +1030,7 @@ static void ConvertItRow(IT_PB_INFO* itPbInf, UINT8 chn, IT_ROW* rowState)
 
 static void ConvertFX2Mid(IT_PB_INFO* itPbInf, UINT8 chn)
 {
-	static const char FX_LIST[] = {'E', 'F', 'G', 'J'};
+	static const char FX_LIST[] = {'E', 'F', 'G', 'H', 'J'};
 	IT_CHN_INFO* chnInf;
 	UINT8 curFX;
 	UINT8 fxID;
@@ -1036,7 +1041,7 @@ static void ConvertFX2Mid(IT_PB_INFO* itPbInf, UINT8 chn)
 	chnInf = &itPbInf->chns[chn];
 	
 	fxType = 0x00;
-	for (curFX = 0; curFX < 3; curFX ++)
+	for (curFX = 0; curFX < 5; curFX ++)
 	{
 		fxID = FX_LIST[curFX] - 'A';
 		if (chnInf->fx_act[fxID] & 0x01)
@@ -1045,12 +1050,24 @@ static void ConvertFX2Mid(IT_PB_INFO* itPbInf, UINT8 chn)
 			fxParams = chnInf->fx_mem[fxID];
 		}
 	}
-	if (! fxType && ! chnInf->midModFX)
-		return;
+	if (! fxType)
+	{
+		if (! chnInf->midModFX)
+			return;
+		if (chnInf->note >= 0xFE)
+			return;	// ignore 'no effect' if no note is playing
+	}
 	
 	if (fxType != chnInf->midModFX || fxParams != chnInf->midModParam)
 	{
-		if (fxType)
+		if (fxType == 'J' || chnInf->midModFX == 'J')
+		{
+			if (fxType == 'J')
+				AddMidiTrkEvt(chn, itPbInf->tick, 0xB0, 0x21, fxParams);
+			else
+				AddMidiTrkEvt(chn, itPbInf->tick, 0xB0, 0x21, 0x00);
+		}
+		else if (fxType)
 		{
 			if (chnInf->midModFXLast != fxType || fxParams != chnInf->midModParam)
 			{
