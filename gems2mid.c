@@ -1,6 +1,9 @@
 // GEMS -> Midi Converter
 // ----------------------
-// Written by Valley Bell, 2012
+// Written by Valley Bell, 2012, 2015
+
+// Possible improvements:
+//	- new parsing code that emulates all channels and thus integreates other sequences (see X-Men 2)
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -21,12 +24,15 @@ typedef unsigned long	UINT32;
 
 
 //bool LetterInArgument(char* Arg, char Letter);
+static UINT16 DetectSongCount(UINT32 InLen, const UINT8* InData);
+static UINT8 DetectGemsVer(UINT32 InLen, const UINT8* InData);
 UINT8 LoadInsData(const char* FileName);
 
 UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLen, UINT8** OutData*/);
-UINT16 ReadLittleEndianS(UINT8* Buffer);
-static void WriteBigEndianL(UINT8* Buffer, UINT32 Value);
-static void WriteBigEndianS(UINT8* Buffer, UINT16 Value);
+static UINT16 ReadLE16(const UINT8* Buffer);
+static UINT32 ReadLE24(const UINT8* Buffer);
+static void WriteBE32(UINT8* Buffer, UINT32 Value);
+static void WriteBE16(UINT8* Buffer, UINT16 Value);
 static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UINT8 Val1, UINT8 Val2);
 static void WriteMidiValue(UINT8* Buffer, UINT32* Pos, UINT32 Value);
 static float OPN2DB(UINT8 TL);
@@ -75,6 +81,10 @@ typedef struct dac_data
 #pragma pack()
 
 
+#define GEMSVER_20	1
+#define GEMSVER_28	2
+UINT8 GemsVer;
+
 UINT32 MidLen;
 UINT8* MidData;
 UINT8 RunNoteCnt;
@@ -100,19 +110,18 @@ int main(int argc, char* argv[])
 	
 	UINT32 InLen;
 	UINT8* InData;
-	UINT32 OutLen;
+	//UINT32 OutLen;
 	//UINT8* OutData;
 	
 	UINT16 FileCount;
 	UINT16 CurFile;
 	UINT32 CurPos;
-	UINT32 TempLng;
 	UINT16 TempSht;
 	
 	printf("GEMS -> Midi Converter\n----------------------\n");
 	if (argc < 2)
 	{
-		printf("Usage: gems2mid.exe [-mode] Input.bin [SongCount [InsFile.bin]]\n");
+		printf("Usage: gems2mid.exe [-mode] [-v#] Input.bin [SongCount [InsFile.bin]]\n");
 		printf("\n");
 		printf("Modes:\n");
 		printf("    Mus - convert GEMS Music to MIDI (default), Input.bin has sequence data\n");
@@ -122,20 +131,32 @@ int main(int argc, char* argv[])
 		printf("SongCount and InsFile.bin are optional arguments for Music mode.\n");
 		printf("SongCount = 0 means autodetection.\n");
 		printf("InsFile.bin will be used to map DAC and PSG to the correct channels.\n");
+		printf("\n");
+		printf("Versions");
+		printf("    v1 - GEMS 2.0-2.5 (2-byte track pointers)");
+		printf("    v2 - GEMS 2.8 (3-byte track pointers)");
+		printf("\n");
 		return 0;
 	}
 	
 	Mode = MODE_MUS;
+	GemsVer = 0;
 	argbase = 1;
-	if (argc >= argbase + 0x01 && argv[argbase + 0x00][0] == '-')
+	while(argbase < argc && argv[argbase][0] == '-')
 	{
-		TempPnt = argv[argbase + 0x00] + 1;
+		TempPnt = &argv[argbase][1];
 		if (! _stricmp(TempPnt, "Mus"))
 			Mode = MODE_MUS;
 		else if (! _stricmp(TempPnt, "DAC"))
 			Mode = MODE_DAC;
 		else if (! _stricmp(TempPnt, "Ins"))
 			Mode = MODE_INS;
+		else if (tolower(TempPnt[0]) == 'v')
+		{
+			GemsVer = TempPnt[1] - '0';
+			if (GemsVer > 2)
+				GemsVer = 0;
+		}
 		argbase ++;
 	}
 	
@@ -186,28 +207,29 @@ int main(int argc, char* argv[])
 		if (! FileCount)
 		{
 			// Song Count autodetection
-			CurFile = 0x00;
-			CurPos = SongPos;
-			OutLen = ReadLittleEndianS(&InData[SongPos]);
-			while(CurPos < OutLen)
-			{
-				TempLng = ReadLittleEndianS(&InData[CurPos]);
-				if (TempLng < OutLen)
-					OutLen = TempLng;
-				
-				CurPos += 0x02;
-				CurFile ++;
-			}
-			FileCount = CurFile;
+			FileCount = DetectSongCount(InLen - SongPos, &InData[SongPos]);
 			printf("Songs detected: 0x%02X (%u)\n", FileCount, FileCount);
+		}
+		if (! GemsVer)
+		{
+			GemsVer = DetectGemsVer(InLen - SongPos, &InData[SongPos]);
+			if (GemsVer)
+			{
+				printf("Detected GEMS %s (%u-byte track pointers)\n",
+					(GemsVer == GEMSVER_28) ? "2.8" : "2.0-2.5", 1 + GemsVer);
+			}
+			else
+			{
+				printf("Warning! GEMS Version Autodetection failed!\nPlease report!\n");
+				GemsVer = GEMSVER_20;
+			}
 		}
 		
 		CurPos = SongPos;
-		for (CurFile = 0x00; CurFile < FileCount; CurFile ++)
+		for (CurFile = 0x00; CurFile < FileCount; CurFile ++, CurPos += 0x02)
 		{
 			printf("File %u / %u ...", CurFile + 1, FileCount);
-			TempSht = ReadLittleEndianS(&InData[CurPos]);
-			CurPos += 0x02;
+			TempSht = ReadLE16(&InData[CurPos]);
 			RetVal = Gems2Mid(InLen - SongPos, InData + SongPos, TempSht/*, &OutLen, &OutData*/);
 			if (RetVal)
 			{
@@ -272,6 +294,59 @@ int main(int argc, char* argv[])
 	
 	return false;
 }*/
+
+static UINT16 DetectSongCount(UINT32 InLen, const UINT8* InData)
+{
+	UINT16 CurFile;
+	UINT32 CurPos;
+	UINT32 MaxLen;
+	UINT32 SongPtr;
+	
+	CurFile = 0x00;
+	MaxLen = InLen;
+	for (CurPos = 0x00, CurFile = 0x00; CurPos < MaxLen; CurPos += 0x02, CurFile ++)
+	{
+		SongPtr = ReadLE16(&InData[CurPos]);
+		if (SongPtr < MaxLen)
+			MaxLen = SongPtr;
+	}
+	return CurFile;
+}
+
+static UINT8 DetectGemsVer(UINT32 InLen, const UINT8* InData)
+{
+	// detect GEMS Sequence type (2-byte or 3-byte pointers)
+	UINT16 BasePos;
+	UINT16 MinPos1;
+	UINT16 MinPos2;
+	UINT16 CurPos;
+	UINT8 TrkCnt;
+	
+	MinPos1 = MinPos2 = 0xFFFF;
+	for (BasePos = 0x0000; BasePos < 0x200; BasePos += 0x02)
+	{
+		if (BasePos >= MinPos1)
+			break;
+		CurPos = ReadLE16(&InData[BasePos]);
+		if (! InData[CurPos])	// skip empty songs
+			continue;
+		
+		if (MinPos1 > CurPos)
+			MinPos1 = CurPos;
+		else if (MinPos2 > CurPos && CurPos > MinPos1)
+			MinPos2 = CurPos;
+	}
+	
+	TrkCnt = InData[MinPos1];
+	MinPos1 ++;
+	
+	if (MinPos1 + 0x03 * TrkCnt == MinPos2)
+		return GEMSVER_28;
+	else if (MinPos1 + 0x02 * TrkCnt == MinPos2)
+		return GEMSVER_20;
+	else
+		return 0;
+}
 
 UINT8 LoadInsData(const char* FileName)
 {
@@ -346,9 +421,9 @@ UINT8 LoadInsData(const char* FileName)
 UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLen, UINT8** OutData*/)
 {
 	UINT8 TrkCnt;
-	UINT16* ChnPtrList;
+	UINT32* ChnPtrList;
 	UINT8 CurTrk;
-	UINT16 InPos;
+	UINT32 InPos;
 	UINT32 DstPos;
 	UINT32 TrkBase;
 	UINT8 MidChn;
@@ -357,7 +432,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 	
 	UINT8 LoopID;
 	UINT8 LoopCount[0x10];
-	UINT16 LoopAddr[0x10];
+	UINT32 LoopAddr[0x10];
 	UINT8 LoopCur[0x10];
 	UINT32 TempLng;
 	UINT16 TempSht;
@@ -377,33 +452,38 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 	TrkCnt = GemsData[InPos];
 	if (! TrkCnt)
 		return 0x01;
-	ChnPtrList = (UINT16*)malloc(TrkCnt * sizeof(UINT16));
+	ChnPtrList = (UINT32*)malloc(TrkCnt * sizeof(UINT32));
 	InPos ++;
 	
 	MidLen = 0x10000;	// 64 KB should be enough
 	MidData = (UINT8*)malloc(MidLen);
 	
 	DstPos = 0x00;
-	WriteBigEndianL(&MidData[DstPos + 0x00], 0x4D546864);	// write 'MThd'
-	WriteBigEndianL(&MidData[DstPos + 0x04], 0x00000006);
+	WriteBE32(&MidData[DstPos + 0x00], 0x4D546864);	// write 'MThd'
+	WriteBE32(&MidData[DstPos + 0x04], 0x00000006);
 	DstPos += 0x08;
 	
-	WriteBigEndianS(&MidData[DstPos + 0x00], 0x0001);	// Format 1
-	WriteBigEndianS(&MidData[DstPos + 0x02], TrkCnt);	// Tracks: TrkCnt
-	WriteBigEndianS(&MidData[DstPos + 0x04], 0x0018);	// Ticks per Quarter: 24
+	WriteBE16(&MidData[DstPos + 0x00], 0x0001);		// Format 1
+	WriteBE16(&MidData[DstPos + 0x02], TrkCnt);		// Tracks: TrkCnt
+	WriteBE16(&MidData[DstPos + 0x04], 0x0018);		// Ticks per Quarter: 24
 	DstPos += 0x06;
 	
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
+	if (GemsVer == GEMSVER_28)
 	{
-		ChnPtrList[CurTrk] = ReadLittleEndianS(&GemsData[InPos]);
-		InPos += 0x02;
+		for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++, InPos += 0x03)
+			ChnPtrList[CurTrk] = ReadLE24(&GemsData[InPos]);
+	}
+	else
+	{
+		for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++, InPos += 0x02)
+			ChnPtrList[CurTrk] = ReadLE16(&GemsData[InPos]);
 	}
 	
 	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
 	{
 		InPos = ChnPtrList[CurTrk];
 		
-		WriteBigEndianL(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
+		WriteBE32(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
 		DstPos += 0x08;
 		
 		TrkBase = DstPos;
@@ -418,8 +498,9 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 		// This is a nice formula, that skips the drum channel 9.
 		MidChn = (CurTrk + (CurTrk + 6) / 15) & 0x0F;
 		NoteVol = 0x7F;
-		ChnVol = 0x64;
+		ChnVol = 0x7F;
 		PanMode = 0x00;
+		ChnDelay = 0x00;
 		
 		while(! TrkEnd && InPos < GemsLen)
 		{
@@ -480,7 +561,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					TrkEnd = true;
 					ProcDelay = false;
 					break;
-				case 0x61:	// Instrument Change
+				case 0x61:	// Instrument Change [gemsprogchange]
 					TempByt = GemsData[InPos + 0x00];
 					TempSht = PanMode;
 					if (TempByt < InsCount)
@@ -541,18 +622,16 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					
 					InPos += 0x01;
 					break;
-				case 0x62:	// Pitch Envelope
+				case 0x62:	// Pitch Envelope [gemssetenv]
 					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, GemsData[InPos + 0x00]);
+								0xB0 | MidChn, 80, GemsData[InPos + 0x00]);
 					InPos += 0x01;
 					break;
 				case 0x63:	// no operation
 					//WriteEvent(MidData, &DstPos, &CurDly,
 					//			0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
 					break;
-				case 0x64:	// Loop Start
+				case 0x64:	// Loop Start [originally MIDI Ctrl 81, value 1..127]
 					LoopID ++;
 					LoopCount[LoopID] = GemsData[InPos];
 					ProcDelay = false;
@@ -566,7 +645,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 									0xB0 | MidChn, 0x6F, LoopCur[LoopID]);
 					}
 					break;
-				case 0x65:	// Loop End
+				case 0x65:	// Loop End [originally MIDI Ctrl 81, value 0]
 					if (LoopID == 0xFF)
 					{
 						printf("Warning! Invalid Loop End found!\n");
@@ -590,63 +669,56 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					{
 						InPos = LoopAddr[LoopID];
 						if (InPos >= GemsLen)
+						{
+							printf("Loop-Jumping to invalid offset %04X!\n", InPos);
 							*((char*)NULL) = 'x';
+						}
 					}
 					else
 					{
 						LoopID --;
 					}
 					break;
-				case 0x66:	// Toggle retrigger mode. ?
+				case 0x66:	// Toggle retrigger mode. [gemsretrigenv]
 					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, GemsData[InPos]);
+								0xB0 | MidChn, 68, GemsData[InPos]);
 					InPos += 0x01;
 					break;
-				case 0x67:	// Sustain mode
+				case 0x67:	// Sustain mode [gemssustain]
 					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x40, GemsData[InPos]);
+								0xB0 | MidChn, 64, GemsData[InPos]);
 					InPos += 0x01;
 					break;
-				case 0x68:	// Set Tempo
+				case 0x68:	// Set Tempo [gemssettempo, originally MIDI Ctrl 16]
 					// Parameter byte contains (Tempo - 40)
-					/*WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, GemsData[InPos]);*/
+					//WriteEvent(MidData, &DstPos, &CurDly,
+					//			0xB0 | MidChn, 16, GemsData[InPos]);*/
 					
 					WriteEvent(MidData, &DstPos, &CurDly,
 								0xFF, 0x51, 0x00);
 					TempLng = 60000000 / (GemsData[InPos] + 40);
-					WriteBigEndianL(&MidData[DstPos - 0x01], TempLng);
+					WriteBE32(&MidData[DstPos - 0x01], TempLng);
 					MidData[DstPos - 0x01] = 0x03;
 					DstPos += 0x03;
 					
 					InPos += 0x01;
 					break;
-				case 0x69:	// Mute
+				case 0x69:	// Mute [gemsmute]
 					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, GemsData[InPos]);
+								0xB0 | MidChn, 18, GemsData[InPos]);
 					InPos += 0x01;
 					break;
-				case 0x6A:	// Set Channel Priority
+				case 0x6A:	// Set Channel Priority [gemspriority]
 					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, GemsData[InPos]);
+								0xB0 | MidChn, 19, GemsData[InPos]);
 					InPos += 0x01;
 					break;
-				case 0x6B:	// Play another song
+				case 0x6B:	// Play another song [gemsstartsong]
 					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, GemsData[InPos]);
+								0xB0 | MidChn, 82, GemsData[InPos]);
 					InPos += 0x01;
 					break;
-				case 0x6C:	// Pitch Bend
+				case 0x6C:	// Pitch Bend [gemspitchbend]
 					if (! WrotePBDepth)
 					{
 						WriteEvent(MidData, &DstPos, &CurDly,
@@ -659,36 +731,39 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					}
 					
 					// Note: ~256 = 1 semitone
-					TempSht = ReadLittleEndianS(&GemsData[InPos]);
+					TempSht = ReadLE16(&GemsData[InPos]);
 					TempSht = 0x2000 + (TempSht * 2);
 					WriteEvent(MidData, &DstPos, &CurDly,
 								0xE0 | MidChn, TempSht & 0x7F, (TempSht >> 7) & 0x7F);
 					InPos += 0x02;
 					break;
-				case 0x6D:	// Set song to use SFX timebase - 150 BPM
+				case 0x6D:	// Set song to use SFX timebase - 150 BPM [originally MIDI Ctrl 70 = 0]
 					//WriteEvent(MidData, &DstPos, &CurDly,
-					//			0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+					//			0xB0 | MidChn, 70, 0);
 					
 					WriteEvent(MidData, &DstPos, &CurDly,
 								0xFF, 0x51, 0x00);
 					TempLng = 400000;
-					WriteBigEndianL(&MidData[DstPos - 0x01], TempLng);
+					WriteBE32(&MidData[DstPos - 0x01], TempLng);
 					MidData[DstPos - 0x01] = 0x03;
 					DstPos += 0x03;
 					break;
-				case 0x6E:	// Set DAC sample playback rate
+				case 0x6E:	// Set DAC sample playback rate [originally MIDI Ctrl 71]
 					WriteEvent(MidData, &DstPos, &CurDly,
-								0xD0 | MidChn, GemsData[InPos], 0x00);
+								0xB0 | MidChn, 71, GemsData[InPos]);
 					InPos += 0x01;
 					break;
 				case 0x6F:	// Jump
-					TempSht = ReadLittleEndianS(&GemsData[InPos]);
+					TempSht = ReadLE16(&GemsData[InPos]);
 					ProcDelay = false;
 					//InPos += 0x02;
 					
 					InPos = TempSht;
 					if (InPos >= GemsLen)
+					{
+						printf("Jumping to invalid offset %04X!\n", InPos);
 						*((char*)NULL) = 'x';
+					}
 					break;
 				case 0x70:	// Store Value
 					WriteEvent(MidData, &DstPos, &CurDly,
@@ -758,23 +833,30 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 		
 		WriteEvent(MidData, &DstPos, &CurDly,
 					0xFF, 0x2F, 0x00);
-		if (RunNoteCnt)
-			*((char*)NULL) = 'x';
+		//if (RunNoteCnt)
+		//	*((char*)NULL) = 'x';
 		
-		WriteBigEndianL(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
+		WriteBE32(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
 	}
 	MidLen = DstPos;
 	
 	return 0x00;
 }
 
-UINT16 ReadLittleEndianS(UINT8* Buffer)
+static UINT16 ReadLE16(const UINT8* Buffer)
 {
-	return	(Buffer[0x01] << 8) |
-			(Buffer[0x00] << 0);
+	return	(Buffer[0x00] << 0) |
+			(Buffer[0x01] << 8);
 }
 
-static void WriteBigEndianL(UINT8* Buffer, UINT32 Value)
+static UINT32 ReadLE24(const UINT8* Buffer)
+{
+	return	(Buffer[0x00] <<  0) |
+			(Buffer[0x01] <<  8) |
+			(Buffer[0x02] << 16);
+}
+
+static void WriteBE32(UINT8* Buffer, UINT32 Value)
 {
 	Buffer[0x00] = (Value & 0xFF000000) >> 24;
 	Buffer[0x01] = (Value & 0x00FF0000) >> 16;
@@ -784,7 +866,7 @@ static void WriteBigEndianL(UINT8* Buffer, UINT32 Value)
 	return;
 }
 
-static void WriteBigEndianS(UINT8* Buffer, UINT16 Value)
+static void WriteBE16(UINT8* Buffer, UINT16 Value)
 {
 	Buffer[0x00] = (Value & 0xFF00) >> 8;
 	Buffer[0x01] = (Value & 0x00FF) >> 0;
@@ -813,7 +895,7 @@ static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UIN
 		TempNote = RunNotes;
 		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++, TempNote ++)
 		{
-			TempNote->RemLen -= TempDly;
+			TempNote->RemLen -= (UINT16)TempDly;
 			if (! TempNote->RemLen)
 			{
 				if (! MoreNotes)
@@ -917,7 +999,7 @@ static UINT8 DB2Mid(float DB)
 UINT8 LoadDACData(const char* FileName)
 {
 	FILE* hFile;
-	long TempPos;
+	UINT32 TempPos;
 	UINT32 SmplPos;
 	UINT8 CurDAC;
 	DAC_DATA* TempDAC;
@@ -927,13 +1009,13 @@ UINT8 LoadDACData(const char* FileName)
 		return 0x80;
 	
 	fseek(hFile, 0x00, SEEK_END);
-	TempPos = ftell(hFile);
+	TempPos = (UINT32)ftell(hFile);
 	
 	fseek(hFile, 0x00, SEEK_SET);
 	TempDAC = DacData;
 	for (CurDAC = 0x00; CurDAC < 0x80; CurDAC ++, TempDAC ++)
 	{
-		if (ftell(hFile) >= TempPos)
+		if ((UINT32)ftell(hFile) >= TempPos)
 			break;
 		
 		fread(TempDAC, 0x0C, 0x01, hFile);
