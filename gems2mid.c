@@ -23,26 +23,6 @@ typedef unsigned long	UINT32;
 #define SHOW_DEBUG_MESSAGES
 
 
-//bool LetterInArgument(char* Arg, char Letter);
-static UINT16 DetectSongCount(UINT32 InLen, const UINT8* InData);
-static UINT8 DetectGemsVer(UINT32 InLen, const UINT8* InData);
-UINT8 LoadInsData(const char* FileName);
-
-UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLen, UINT8** OutData*/);
-static UINT16 ReadLE16(const UINT8* Buffer);
-static UINT32 ReadLE24(const UINT8* Buffer);
-static void WriteBE32(UINT8* Buffer, UINT32 Value);
-static void WriteBE16(UINT8* Buffer, UINT16 Value);
-static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UINT8 Val1, UINT8 Val2);
-static void WriteMidiValue(UINT8* Buffer, UINT32* Pos, UINT32 Value);
-static float OPN2DB(UINT8 TL);
-static UINT8 DB2Mid(float DB);
-
-UINT8 LoadDACData(const char* FileName);
-void SaveDACData(const char* FileBase);
-void SaveInsAsGYB(const char* FileBase);
-
-
 #define MODE_MUS	0x00
 #define	MODE_DAC	0x01
 #define MODE_INS	0x02
@@ -54,6 +34,14 @@ typedef struct running_note
 	UINT16 RemLen;
 } RUN_NOTE;
 
+typedef struct file_information
+{
+	UINT32 Alloc;	// allocated bytes
+	UINT32 Pos;		// current file offset
+	UINT8* Data;	// file data
+} FILE_INF;
+
+#pragma pack(1)
 #define INSTYPE_FM			0x00
 #define INSTYPE_DAC			0x01
 #define INSTYPE_PSG_TONE	0x02
@@ -66,7 +54,6 @@ typedef struct instrument_data
 	UINT8 Data[0x26];
 } INS_DATA;
 
-#pragma pack(1)
 typedef struct dac_data
 {
 	UINT8 V00_Flags;
@@ -79,6 +66,27 @@ typedef struct dac_data
 	UINT8* Data;
 } DAC_DATA;
 #pragma pack()
+
+
+static UINT16 DetectSongCount(UINT32 InLen, const UINT8* InData);
+static UINT8 DetectGemsVer(UINT32 InLen, const UINT8* InData);
+UINT8 LoadInsData(const char* FileName);
+
+UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLen, UINT8** OutData*/);
+static UINT16 ReadLE16(const UINT8* Buffer);
+static UINT32 ReadLE24(const UINT8* Buffer);
+static void WriteBE32(UINT8* Buffer, UINT32 Value);
+static void WriteBE16(UINT8* Buffer, UINT16 Value);
+static void WriteEvent(FILE_INF* fInf, UINT32* Delay, UINT8 Evt, UINT8 Val1, UINT8 Val2);
+static void WriteMetaEvent_Data(FILE_INF* fInf, UINT32* Delay, UINT8 MetaType, UINT32 DataLen, const UINT8* Data);
+static void WriteMidiValue(FILE_INF* fInf, UINT32 Value);
+static void File_CheckRealloc(FILE_INF* fInf, UINT32 BytesNeeded);
+static float OPN2DB(UINT8 TL);
+static UINT8 DB2Mid(float DB);
+
+UINT8 LoadDACData(const char* FileName);
+void SaveDACData(const char* FileBase);
+void SaveInsAsGYB(const char* FileBase);
 
 
 #define GEMSVER_20	1
@@ -280,21 +288,6 @@ int main(int argc, char* argv[])
 	return 0;
 }
 
-/*bool LetterInArgument(char* Arg, char Letter)
-{
-	Letter = toupper(Letter);
-	
-	while(*Arg != '\0')
-	{
-		if (toupper(*Arg) == Letter)
-			return true;
-		
-		Arg ++;
-	}
-	
-	return false;
-}*/
-
 static UINT16 DetectSongCount(UINT32 InLen, const UINT8* InData)
 {
 	UINT16 CurFile;
@@ -425,6 +418,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 	UINT8 CurTrk;
 	UINT32 InPos;
 	UINT32 DstPos;
+	FILE_INF MidFileInf;
 	UINT32 TrkBase;
 	UINT8 MidChn;
 	bool TrkEnd;
@@ -434,6 +428,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 	UINT8 LoopCount[0x10];
 	UINT32 LoopAddr[0x10];
 	UINT8 LoopCur[0x10];
+	UINT8 TempArr[0x04];
 	UINT32 TempLng;
 	UINT16 TempSht;
 	UINT8 TempByt;
@@ -479,14 +474,17 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 			ChnPtrList[CurTrk] = ReadLE16(&GemsData[InPos]);
 	}
 	
+	MidFileInf.Alloc = MidLen;
+	MidFileInf.Data = MidData;
+	MidFileInf.Pos = DstPos;
 	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
 	{
 		InPos = ChnPtrList[CurTrk];
 		
-		WriteBE32(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
-		DstPos += 0x08;
+		WriteBE32(&MidFileInf.Data[MidFileInf.Pos], 0x4D54726B);	// write 'MTrk'
+		MidFileInf.Pos += 0x08;
 		
-		TrkBase = DstPos;
+		TrkBase = MidFileInf.Pos;
 		CurDly = 0x00;
 		RunNoteCnt = 0x00;
 		ChnMode = 0x00;
@@ -515,7 +513,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 				else
 					TempByt += 12;	// shift up one octave
 				
-				WriteEvent(MidData, &DstPos, &CurDly,
+				WriteEvent(&MidFileInf, &CurDly,
 							0x90 | MidChn, TempByt, NoteVol);
 				if (RunNoteCnt < 0x100)
 				{
@@ -577,20 +575,20 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 							break;
 						case INSTYPE_DAC:
 							MidChn = 0x09;
-							WriteEvent(MidData, &DstPos, &CurDly,
+							WriteEvent(&MidFileInf, &CurDly,
 										0xD0 | MidChn, InsData[TempByt].Data[0x00], 0x00);
 							TempByt = 0x00;
 							break;
 						case INSTYPE_PSG_TONE:
 							if (MidChn == 0x09)
 								MidChn = 0xFF;
-							WriteEvent(MidData, &DstPos, &CurDly,
+							WriteEvent(&MidFileInf, &CurDly,
 										0xB0 | MidChn, 0x20, TempByt);
 							TempByt = 0x50;
 							break;
 						case INSTYPE_PSG_NOISE:
 							MidChn = 0x09;
-							WriteEvent(MidData, &DstPos, &CurDly,
+							WriteEvent(&MidFileInf, &CurDly,
 										0xB0 | MidChn, 0x03, InsData[TempByt].Data[0x00]);
 							TempByt = 0x00;
 							break;
@@ -598,7 +596,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 						if (MidChn == 0xFF)
 							MidChn = (CurTrk + (CurTrk + 6) / 15) & 0x0F;
 					}
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xC0 | MidChn, TempByt, 0x00);
 					
 					if (PanMode != TempSht)
@@ -616,19 +614,19 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 							TempByt = 0x40;
 							break;
 						}
-						WriteEvent(MidData, &DstPos, &CurDly,
+						WriteEvent(&MidFileInf, &CurDly,
 									0xB0 | MidChn, 0x0A, TempByt);
 					}
 					
 					InPos += 0x01;
 					break;
 				case 0x62:	// Pitch Envelope [gemssetenv]
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xB0 | MidChn, 80, GemsData[InPos + 0x00]);
 					InPos += 0x01;
 					break;
 				case 0x63:	// no operation
-					//WriteEvent(MidData, &DstPos, &CurDly,
+					//WriteEvent(&MidFileInf, &CurDly,
 					//			0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
 					break;
 				case 0x64:	// Loop Start [originally MIDI Ctrl 81, value 1..127]
@@ -641,7 +639,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					LoopAddr[LoopID] = InPos;
 					if (LoopCount[LoopID] == 0x7F)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
+						WriteEvent(&MidFileInf, &CurDly,
 									0xB0 | MidChn, 0x6F, LoopCur[LoopID]);
 					}
 					break;
@@ -655,7 +653,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					LoopCur[LoopID] ++;
 					if (LoopCount[LoopID] == 0x7F)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
+						WriteEvent(&MidFileInf, &CurDly,
 									0xB0 | MidChn, 0x6F, LoopCur[LoopID]);
 						if (LoopCur[LoopID] >= 0x02)
 						{
@@ -680,52 +678,48 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					}
 					break;
 				case 0x66:	// Toggle retrigger mode. [gemsretrigenv]
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xB0 | MidChn, 68, GemsData[InPos]);
 					InPos += 0x01;
 					break;
 				case 0x67:	// Sustain mode [gemssustain]
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xB0 | MidChn, 64, GemsData[InPos]);
 					InPos += 0x01;
 					break;
 				case 0x68:	// Set Tempo [gemssettempo, originally MIDI Ctrl 16]
 					// Parameter byte contains (Tempo - 40)
-					//WriteEvent(MidData, &DstPos, &CurDly,
+					//WriteEvent(&MidFileInf, &CurDly,
 					//			0xB0 | MidChn, 16, GemsData[InPos]);*/
 					
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xFF, 0x51, 0x00);
 					TempLng = 60000000 / (GemsData[InPos] + 40);
-					WriteBE32(&MidData[DstPos - 0x01], TempLng);
-					MidData[DstPos - 0x01] = 0x03;
-					DstPos += 0x03;
-					
+					WriteBE32(TempArr, TempLng);
+					WriteMetaEvent_Data(&MidFileInf, &CurDly, 0x51, 0x03, &TempArr[1]);
 					InPos += 0x01;
 					break;
 				case 0x69:	// Mute [gemsmute]
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xB0 | MidChn, 18, GemsData[InPos]);
 					InPos += 0x01;
 					break;
 				case 0x6A:	// Set Channel Priority [gemspriority]
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xB0 | MidChn, 19, GemsData[InPos]);
 					InPos += 0x01;
 					break;
 				case 0x6B:	// Play another song [gemsstartsong]
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xB0 | MidChn, 82, GemsData[InPos]);
 					InPos += 0x01;
 					break;
 				case 0x6C:	// Pitch Bend [gemspitchbend]
 					if (! WrotePBDepth)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
+						WriteEvent(&MidFileInf, &CurDly,
 									0xB0 | MidChn, 0x65, 0x00);
-						WriteEvent(MidData, &DstPos, &CurDly,
+						WriteEvent(&MidFileInf, &CurDly,
 									0xB0 | MidChn, 0x64, 0x00);
-						WriteEvent(MidData, &DstPos, &CurDly,
+						WriteEvent(&MidFileInf, &CurDly,
 									0xB0 | MidChn, 0x06, 0x10);
 						WrotePBDepth = true;
 					}
@@ -733,23 +727,22 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					// Note: ~256 = 1 semitone
 					TempSht = ReadLE16(&GemsData[InPos]);
 					TempSht = 0x2000 + (TempSht * 2);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xE0 | MidChn, TempSht & 0x7F, (TempSht >> 7) & 0x7F);
 					InPos += 0x02;
 					break;
 				case 0x6D:	// Set song to use SFX timebase - 150 BPM [originally MIDI Ctrl 70 = 0]
-					//WriteEvent(MidData, &DstPos, &CurDly,
+					//WriteEvent(&MidFileInf, &CurDly,
 					//			0xB0 | MidChn, 70, 0);
 					
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xFF, 0x51, 0x00);
-					TempLng = 400000;
-					WriteBE32(&MidData[DstPos - 0x01], TempLng);
-					MidData[DstPos - 0x01] = 0x03;
-					DstPos += 0x03;
+					TempLng = 400000;	// 150 BPM
+					WriteBE32(TempArr, TempLng);
+					WriteMetaEvent_Data(&MidFileInf, &CurDly, 0x51, 0x03, &TempArr[1]);
 					break;
 				case 0x6E:	// Set DAC sample playback rate [originally MIDI Ctrl 71]
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xB0 | MidChn, 71, GemsData[InPos]);
 					InPos += 0x01;
 					break;
@@ -766,16 +759,16 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					}
 					break;
 				case 0x70:	// Store Value
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xB0 | MidChn, 0x63, 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xB0 | MidChn, 0x62, GemsData[InPos + 0x00]);
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xB0 | MidChn, 0x06, GemsData[InPos + 0x01]);
 					InPos += 0x02;
 					break;
 				case 0x71:	// Conditional Jump
-					WriteEvent(MidData, &DstPos, &CurDly,
+					WriteEvent(&MidFileInf, &CurDly,
 								0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
 					InPos += 0x05;
 					break;
@@ -783,9 +776,9 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					TempByt = GemsData[InPos + 0x00];
 					if (TempByt != 0x04 && TempByt != 0x05)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
+						WriteEvent(&MidFileInf, &CurDly,
 									0xB0 | MidChn, 0x70, TempByt & 0x7F);
-						WriteEvent(MidData, &DstPos, &CurDly,
+						WriteEvent(&MidFileInf, &CurDly,
 									0xB0 | MidChn, 0x26, GemsData[InPos + 0x01]);
 					}
 					switch(TempByt)
@@ -799,12 +792,12 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					case 0x03:	// Pause Music
 						break;
 					case 0x04:	// Set Master Volume
-						WriteEvent(MidData, &DstPos, &CurDly,
+						WriteEvent(&MidFileInf, &CurDly,
 									0xB0 | MidChn, 0x27, GemsData[InPos + 0x01] ^ 0x7F);
 						break;
 					case 0x05:	// Set Channel Volume
-						ChnVol = DB2Mid(OPN2DB(GemsData[InPos + 0x01]));
-						WriteEvent(MidData, &DstPos, &CurDly,
+						ChnVol = DB2Mid(OPN2DB(GemsData[InPos + 0x01]) + 6);
+						WriteEvent(&MidFileInf, &CurDly,
 									0xB0 | MidChn, 0x07, ChnVol);
 						break;
 					}
@@ -812,7 +805,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					break;
 				default:
 					printf("Unknown event %02X on track %X\n", CurCmd, CurTrk);
-					//WriteEvent(MidData, &DstPos, &CurDly,
+					//WriteEvent(&MidFileInf, &CurDly,
 					//			0xB0 | MidChn, 0x6E, CurCmd & 0x7F);
 					ProcDelay = false;
 					break;
@@ -820,9 +813,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 			}
 			
 			if (ProcDelay)
-			{
 				CurDly += ChnDelay;
-			}
 		}
 		//CurDly = 0;
 		for (TempByt = 0x00; TempByt < RunNoteCnt; TempByt ++)
@@ -831,14 +822,14 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 				CurDly = RunNotes[TempByt].RemLen;
 		}
 		
-		WriteEvent(MidData, &DstPos, &CurDly,
-					0xFF, 0x2F, 0x00);
+		WriteEvent(&MidFileInf, &CurDly, 0xFF, 0x2F, 0x00);
 		//if (RunNoteCnt)
 		//	*((char*)NULL) = 'x';
 		
-		WriteBE32(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
+		WriteBE32(&MidFileInf.Data[TrkBase - 0x04], MidFileInf.Pos - TrkBase);	// write Track Length
 	}
-	MidLen = DstPos;
+	MidData = MidFileInf.Data;
+	MidLen = MidFileInf.Pos;
 	
 	return 0x00;
 }
@@ -874,8 +865,9 @@ static void WriteBE16(UINT8* Buffer, UINT16 Value)
 	return;
 }
 
-static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UINT8 Val1, UINT8 Val2)
+static void WriteEvent(FILE_INF* fInf, UINT32* Delay, UINT8 Evt, UINT8 Val1, UINT8 Val2)
 {
+	UINT8* MidData;
 	UINT8 CurNote;
 	UINT32 TempDly;
 	RUN_NOTE* TempNote;
@@ -899,13 +891,15 @@ static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UIN
 			if (! TempNote->RemLen)
 			{
 				if (! MoreNotes)
-					WriteMidiValue(Buffer, Pos, TempDly);
+					WriteMidiValue(fInf, TempDly);
 				else
-					WriteMidiValue(Buffer, Pos, 0);
-				MidData[*Pos + 0x00] = 0x90 | TempNote->MidChn;
-				MidData[*Pos + 0x01] = TempNote->Note;
-				MidData[*Pos + 0x02] = 0x00;
-				*Pos += 0x03;
+					WriteMidiValue(fInf, 0);
+				File_CheckRealloc(fInf, 0x03);
+				MidData = fInf->Data;
+				MidData[fInf->Pos + 0x00] = 0x90 | TempNote->MidChn;
+				MidData[fInf->Pos + 0x01] = TempNote->Note;
+				MidData[fInf->Pos + 0x02] = 0x00;
+				fInf->Pos += 0x03;
 				
 				MoreNotes = true;
 				
@@ -919,9 +913,11 @@ static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UIN
 			(*Delay) -= TempDly;
 	} while(MoreNotes);
 	
-	WriteMidiValue(Buffer, Pos, *Delay);
+	WriteMidiValue(fInf, *Delay);
 	*Delay = 0x00;
 	
+	File_CheckRealloc(fInf, 0x03);
+	MidData = fInf->Data;
 	switch(Evt & 0xF0)
 	{
 	case 0x80:
@@ -929,22 +925,22 @@ static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UIN
 	case 0xA0:
 	case 0xB0:
 	case 0xE0:
-		MidData[*Pos + 0x00] = Evt;
-		MidData[*Pos + 0x01] = Val1;
-		MidData[*Pos + 0x02] = Val2;
-		*Pos += 0x03;
+		MidData[fInf->Pos + 0x00] = Evt;
+		MidData[fInf->Pos + 0x01] = Val1;
+		MidData[fInf->Pos + 0x02] = Val2;
+		fInf->Pos += 0x03;
 		break;
 	case 0xC0:
 	case 0xD0:
-		MidData[*Pos + 0x00] = Evt;
-		MidData[*Pos + 0x01] = Val1;
-		*Pos += 0x02;
+		MidData[fInf->Pos + 0x00] = Evt;
+		MidData[fInf->Pos + 0x01] = Val1;
+		fInf->Pos += 0x02;
 		break;
 	case 0xF0:	// for Meta Event: Track End
-		MidData[*Pos + 0x00] = Evt;
-		MidData[*Pos + 0x01] = Val1;
-		MidData[*Pos + 0x02] = Val2;
-		*Pos += 0x03;
+		MidData[fInf->Pos + 0x00] = Evt;
+		MidData[fInf->Pos + 0x01] = Val1;
+		MidData[fInf->Pos + 0x02] = Val2;
+		fInf->Pos += 0x03;
 		break;
 	default:
 		break;
@@ -953,7 +949,24 @@ static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UIN
 	return;
 }
 
-static void WriteMidiValue(UINT8* Buffer, UINT32* Pos, UINT32 Value)
+static void WriteMetaEvent_Data(FILE_INF* fInf, UINT32* Delay, UINT8 MetaType, UINT32 DataLen, const UINT8* Data)
+{
+	WriteMidiValue(fInf, *Delay);
+	*Delay = 0x00;
+	
+	File_CheckRealloc(fInf, 0x02 + 0x05 + DataLen);	// worst case: 5 bytes of data length
+	MidData = fInf->Data;
+	MidData[fInf->Pos + 0x00] = 0xFF;
+	MidData[fInf->Pos + 0x01] = MetaType;
+	fInf->Pos += 0x02;
+	WriteMidiValue(fInf, DataLen);
+	memcpy(&MidData[fInf->Pos], Data, DataLen);
+	fInf->Pos += DataLen;
+	
+	return;
+}
+
+static void WriteMidiValue(FILE_INF* fInf, UINT32 Value)
 {
 	UINT8 ValSize;
 	UINT8* ValData;
@@ -968,7 +981,8 @@ static void WriteMidiValue(UINT8* Buffer, UINT32* Pos, UINT32 Value)
 		ValSize ++;
 	} while(TempLng);
 	
-	ValData = &Buffer[*Pos];
+	File_CheckRealloc(fInf, ValSize);
+	ValData = &fInf->Data[fInf->Pos];
 	CurPos = ValSize;
 	TempLng = Value;
 	do
@@ -979,7 +993,23 @@ static void WriteMidiValue(UINT8* Buffer, UINT32* Pos, UINT32 Value)
 	} while(TempLng);
 	ValData[ValSize - 1] &= 0x7F;
 	
-	*Pos += ValSize;
+	fInf->Pos += ValSize;
+	
+	return;
+}
+
+static void File_CheckRealloc(FILE_INF* FileInf, UINT32 BytesNeeded)
+{
+#define REALLOC_STEP	0x8000	// 32 KB block
+	UINT32 MinPos;
+	
+	MinPos = FileInf->Pos + BytesNeeded;
+	if (MinPos <= FileInf->Alloc)
+		return;
+	
+	while(MinPos > FileInf->Alloc)
+		FileInf->Alloc += REALLOC_STEP;
+	FileInf->Data = (UINT8*)realloc(FileInf->Data, FileInf->Alloc);
 	
 	return;
 }
@@ -991,6 +1021,8 @@ static float OPN2DB(UINT8 TL)
 
 static UINT8 DB2Mid(float DB)
 {
+	if (DB > 0.0f)
+		DB = 0.0f;
 	return (UINT8)(pow(10.0, DB / 40.0) * 0x7F + 0.5);
 }
 
