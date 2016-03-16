@@ -39,7 +39,10 @@ Commands:
 98 dd vv - Set Volume vv + Delay dd
 99 dd pp - Set Pan pp + Delay dd
 9B xx
-9C xx xx xx
+9C dd pp tt - Modulation
+	dd - delay before modulation starts
+	pp - modulation depth (in 1/32 steps?)
+	tt - modulation time
 A2 xx
 A3 xx
 AA xx xx - Reverb
