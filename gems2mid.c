@@ -1016,7 +1016,7 @@ static void File_CheckRealloc(FILE_INF* FileInf, UINT32 BytesNeeded)
 
 static float OPN2DB(UINT8 TL)
 {
-	return -(TL * 4 / 3.0f);
+	return -(TL * 3 / 4.0f);
 }
 
 static UINT8 DB2Mid(float DB)
