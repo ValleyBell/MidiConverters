@@ -106,6 +106,7 @@ bool FixVolume;
 bool WriteDbgCtrls;
 bool LoopExt;
 UINT8 DefLoopCur;
+UINT8 DrvVer;
 
 int main(int argc, char* argv[])
 {
@@ -367,6 +368,15 @@ UINT8 ToP2Mid(void)
 	{	0x20, 0xE8, 0x00, 0xC4, 0xF4, 0xC4, 0xF5, 0xC4,
 		0xF6, 0xC4, 0xF7, 0xC4, 0x83, 0x8F, 0x30, 0xF1,
 		0xCD, 0xFF, 0xBD, 0x3F};
+	static const UINT8 DRIVER_SIG_OLD[0x14] =
+	{	0x20, 0x8F, 0x20, 0xF4, 0xE8, 0x00, 0xC4, 0xF5,
+		0xC4, 0xF6, 0xC4, 0xF7, 0xC4, 0xE7, 0x8F, 0xA0, 
+		0xE6, 0x8F, 0xF0, 0xF1};
+	static const UINT8 OLDDRV_CMDLUT[0x20] =
+	{	0x90, 0x97, 0x99, 0xB2, 0x9B, 0x9C, 0x9D, 0x9E,
+		0xE8, 0xE9, 0xEA, 0xEB, 0x96, 0xED, 0xEE, 0xEF,
+		0xF0, 0xF1, 0xF2, 0xF3, 0xA2, 0xF5, 0xF6, 0xF7,
+		0xF0, 0xF0, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF};
 	UINT16 BasePtr;
 	TRK_INFO TrkInfo[TRK_COUNT];
 	TRK_INFO* TempTInf;
@@ -379,6 +389,7 @@ UINT8 ToP2Mid(void)
 	UINT8 MidChn;
 	bool TrkEnd;
 	UINT8 CurCmd;
+	UINT8 CmdBase;
 	
 	UINT8 LoopIdx;
 	UINT16 LoopCur[0x10];	// current loop counter (16-bit due to loop extention)
@@ -406,12 +417,26 @@ UINT8 ToP2Mid(void)
 	UINT8 MsgMask;
 	UINT8 InitTempo;
 	
-	if (memcmp(&SpcData[0x0840], DRIVER_SIG, 0x14))
+	DrvVer = 0;
+	if (! memcmp(&SpcData[0x0840], DRIVER_SIG, 0x14))
+		DrvVer = 2;
+	else if (! memcmp(&SpcData[0x0700], DRIVER_SIG_OLD, 0x14))
+		DrvVer = 1;
+	if (! DrvVer)
 	{
 		printf("This SPC uses a wrong sound driver!\n");
 		return 0xFF;
 	}
-	BasePtr = ReadLE16(&SpcData[0x0854]);
+	if (DrvVer == 2)
+	{
+		BasePtr = ReadLE16(&SpcData[0x0854]);
+		CmdBase = 0x90;
+	}
+	else //if (DrvVer == 1)
+	{
+		BasePtr = ReadLE16(&SpcData[0x0844]);
+		CmdBase = 0xE0;
+	}
 	
 	MidLen = 0x40000;	// 256 KB should be enough (so-37 has 66.4 KB)
 	MidData = (UINT8*)malloc(MidLen);
@@ -471,7 +496,10 @@ UINT8 ToP2Mid(void)
 		TrkBase = DstPos;
 		CurDly = 0x00;
 		
-		TrkEnd = ! (TempTInf->Mode >> 7);
+		if (DrvVer == 2)
+			TrkEnd = ! (TempTInf->Mode >> 7);
+		else
+			TrkEnd = ! (TempTInf->Mode >> 0);
 		LoopIdx = 0x00;
 		MidChn = CurTrk + (CurTrk + 6) / 15;
 		LastChn = MidChn;
@@ -516,7 +544,7 @@ UINT8 ToP2Mid(void)
 			}
 			
 			CurCmd = SpcData[InPos];
-			if (CurCmd < 0x90)
+			if (CurCmd < CmdBase)
 			{
 				if (ChnSeq.DrmNote == 0xFF)
 				{
@@ -566,10 +594,20 @@ UINT8 ToP2Mid(void)
 					CurNote |= 0x80;
 				}
 				
-				if (FixVolume)
-					NoteVol = DB2Mid(Lin2DB(SpcData[InPos + 0x03]));
+				if (DrvVer == 2)
+				{
+					if (FixVolume)
+						NoteVol = DB2Mid(Lin2DB(SpcData[InPos + 0x03]));
+					else
+						NoteVol = SpcData[InPos + 0x03] >> 1;
+				}
 				else
-					NoteVol = SpcData[InPos + 0x03] >> 1;
+				{
+					if (FixVolume)
+						NoteVol = DB2Mid(Lin2DB(SpcData[InPos + 0x03] << 1));
+					else
+						NoteVol = SpcData[InPos + 0x03];
+				}
 				
 				WriteEvent(MidData, &DstPos, &CurDly, 0x00, 0x00, 0x00);
 				
@@ -600,6 +638,8 @@ UINT8 ToP2Mid(void)
 			}
 			else
 			{
+				if (DrvVer == 1)
+					CurCmd = OLDDRV_CMDLUT[CurCmd & 0x1F];
 				switch(CurCmd)
 				{
 				case 0x90:	// Delay
@@ -675,7 +715,7 @@ UINT8 ToP2Mid(void)
 					
 					break;
 				case 0x94:	// Pitch Bend
-					TempByt = 12;
+					TempByt = (DrvVer == 2) ? 12 : 2;
 					if (ChnMid.PBRange != TempByt)
 					{
 						WriteRPN(MidData, &DstPos, &CurDly, MidChn, 0x00, 0x00, TempByt, &ChnMid);
@@ -771,10 +811,20 @@ UINT8 ToP2Mid(void)
 					break;
 				case 0x97:	// another Volume setting?
 				case 0x98:	// Set Volume
-					if (FixVolume)
-						TempByt = DB2Mid(Lin2DB(SpcData[InPos + 0x02]));
+					if (DrvVer == 2)
+					{
+						if (FixVolume)
+							TempByt = DB2Mid(Lin2DB(SpcData[InPos + 0x02]));
+						else
+							TempByt = SpcData[InPos + 0x02] >> 1;
+					}
 					else
-						TempByt = SpcData[InPos + 0x02] >> 1;
+					{
+						if (FixVolume)
+							TempByt = DB2Mid(Lin2DB(SpcData[InPos + 0x02] << 1));
+						else
+							TempByt = SpcData[InPos + 0x02];
+					}
 					if (CurCmd == 0x97)
 					{
 						ChnMid.Vol = TempByt;
@@ -801,6 +851,16 @@ UINT8 ToP2Mid(void)
 						WriteRPN(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x9C, ChnSeq.DrmNote, ChnMid.Pan, &ChnMid);
 					CurDly += SpcData[InPos + 0x01];
 					InPos += 0x03;
+					break;
+				case 0x09:	// Set Pan
+					ChnMid.Pan = 0x80 - SpcData[InPos + 0x01];
+					if (ChnMid.Pan >= 0x80)
+						ChnMid.Pan = 0x7F;
+					if (ChnSeq.DrmNote == 0xFF)
+						WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0A, ChnMid.Pan);
+					else
+						WriteRPN(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x9C, ChnSeq.DrmNote, ChnMid.Pan, &ChnMid);
+					InPos += 0x02;
 					break;
 				case 0x9B:
 					if (WriteDbgCtrls)

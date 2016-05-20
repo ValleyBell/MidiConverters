@@ -1,0 +1,65 @@
+Arcus Odyssey SFC Sequence Format
+---------------------------------
+Reverse-engineered by Valley Bell, May 2016
+
+
+Sequence Header is at RAM offset 1820h
+
+
+Sequence Header:
+2 bytes - Sequence Size (0 in Arcus Odyssey?)
+1 byte  - Tempo (seems to be in BPM)
+0F*3 bytes - Track Headers
+
+Track Header:
+1 byte  - Track Flags (00 - not playing, 01 - playing (default))
+2 bytes - Track Pointer
+
+
+
+
+Note format:
+1 byte - Note Height
+1 byte - Tick Count til next note (chords are possible, so this can be 0)
+1 byte - Tick Count til Note Stop
+	-> if larger than NextNoteTick, when the note is held
+1 byte - Volume (00 min .. 7F max)
+
+
+Commands:
+00-DF - Note
+E0 xx - Delay of xx Ticks
+E1 dd vv - Set Volume vv + Delay dd
+E2 dd pp - Set Pan pp + Delay dd
+E4 xx - Modulation On?
+E5 dd pp tt - Modulation
+	dd - delay before modulation starts
+	pp - modulation depth (in 1/32 steps?)
+	tt - modulation time
+EC ii - Set Instrument ii
+FD - Return/Pattern End
+
+
+
+92 - Loop Start
+93 tt - Loop End (tt - times to loop, 00 - infinite)
+94 dd pp - Pitch Bend pp + Delay dd (12 semitones)
+95 dd tt - Set Tempo tt + Delay dd (relative to initial tempo, 40h is 100%, 20h is 50% etc.)
+97 dd xx - Set (another?) Volume vv + Delay dd
+9B xx
+A2 xx
+A3 xx
+AA xx xx - Reverb
+AD xx
+AE xx
+AF xx xx
+B2 xx
+C8
+F0
+FD - Return/Pattern End
+FE
+FF - Track End
+
+
+Note: All pointers are relative to the base offset, which is 4000 in Tales Of Phantasia and 3800 in Star Ocean.
+The offset is located at 0854.
