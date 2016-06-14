@@ -1,0 +1,175 @@
+???:		8000
+Volume Table:	8100
+FM Freqs:	8198 (6Ch frequencies, 2 bytes each)
+PSG Freqs:	8270 (6Ch frequencies, 2 bytes each)
+Instruments:	8348 (19h bytes per instrument)
+???		A07B (2 byte per entry)
+FM SFX Table:	A274 (6 bytes per entry/SFX header)
+DAC SFX Table:	B5EA (JE) / B648 (U) (6 bytes per entry)
+DAC Drum Table:	B6AA (JE) / B708 (U) (6 bytes per entry)
+Music Pointers:	B746 (JE) / B7A4 (U) (12h bytes per entry/Music header)
+Music Banks:	02D8 (Z80 RAM)
+Z80 Driver:	0F8000
+Sound Test IDs:	0179E6
+
+All tables exist in both sound banks:
+	1A - 0D0000
+	1B - 0D8000
+
+
+Sound Test ID Format
+--------------------
+1 byte  - BGM/Voice Number in BCD
+	00..39 - BGM Number
+	40..59 - Voice Number (subtract 40h to actual number)
+1 byte  - Sound ID for Z80 sound driver
+
+
+DAC Table Format
+----------------
+1 byte  - DAC Sound Priority (override on >= priority)
+2 bytes - Data Start (ROM Bank bit is enforced)
+2 bytes - Data Length
+1 byte  - DAC Bank
+-> 6 bytes
+
+The DAC data is stored in 4-bit LPCM format. The low nibble is sent first.
+(sample data 12h is sent as 20h and 10h)
+
+
+Music Format
+------------
+Every song has a header containing nothing but 9 track pointers: 6x FM and 3x PSG, i.e. it has 18 (dec) bytes
+So in order to get the 5th song, the address is (MusicBaseAddr + 4*12h).
+As with every other pointer, the ROM Bank bit is enforced.
+
+
+SFX Format
+----------
+Every SFX header contains 2 priority-related bytes and pointers for up to 2 FM tracks.
+So in order to get the 5th sound effect, the address is (MusicBaseAddr + 4*06h).
+
+Header Format:
+1 byte  - unknown (has something to do with the secondary SFX Priority)
+	00 - 2 channels? (FM 4+5), normal SFX priority
+	01 - 2 channels (FM 4+5), normal SFX priority checked, normal+secondary SFX priority set
+	81 - same as 00, but skips a few checks
+	82 - 1 channel (FM 5), secondary SFX priority
+1 byte  - SFX Priority
+
+
+
+Instrument Register Order:
+B0 30 40 50 60 70 80 38 48 58 68 78 88 34 44 54 64 74 84 3C 4C 5C 6C 7C 8C
+
+
+Global RAM
+----------
+1A12 - DAC Priority / FM 6 overridden
+1A18 - current Track is overridden
+
+Track RAM
+---------
+00	Channel Bits (00, 01, 02, 04, 05, 06, 80, A0, C0)
+01	Flags
+02..03	Track Pointer
+04..07	Operator 1..4 Total Level (Register 40, 48, 44, 4C)
+08..0B	Operator 1..4 Release Rate (Register 80, 88, 84, 8C)
+0C	Algorithm/Feedback
+0D	Loop 1 Counter
+0E	Loop 2 Counter
+0F	GoSub Flags
+	    Bit 0 (01) - Subroutine 1 active
+	    Bit 4 (10) - Subroutine 2 active
+10..11	Loop 1 Start Offset
+12..13	Loop 2 Start Offset
+14..15	Loop 1 Start Offset
+16..17	Loop 2 Start Offset
+18	Tick Increment [command E0 param 1]
+19	Tick Counter
+1A	remaining Note Ticks until next note (decremented when Tick Counter overflows)
+2F	FM Stereo Mask (Reg B4 data)
+30..31	Pan Animation Pointer
+39	Channel Volume
+3A	Octave [set by command F0..F7]
+3B	[command E0 param 4]
+3E	FM: LFO Amplitude Vibrato (Reg B4, mask 30h)
+	PSG Instrument ID??
+3F	FM: LFO Frequency Vibrato (Reg B4, mask 07h)
+44..45	3-part-Loop: Start Offset
+46..47	3-part-Loop: End Offset
+4A..4B	FM Instrument Data Pointer
+50	Flags
+	    Bit 0 (01) - at Rest
+	    Bit 1 (02) - NoteLen Multiply *2 (enabled if bit clear) [toggled by command DF]
+	    Bit 2 (04) - NoteLen Multiply *3 (enabled if bit clear) [toggled by command DD]
+	    Bit 3 (08) - subtract TrkRAM+3Dh from length
+51	Channel Mode?? (00 = FM, 01 = DAC)
+52	Note Volume [command D0..D7]
+53	Note Volume Index Base [command D8]
+55	[some other Transpose]
+56	FM Instrument ID
+57	FM Stereo Mask (data is 01/02/03, Reg B4 uses 40/80/C0)
+5A..5B	Frequency Detune [command ED]
+5B	[set by command ED]
+5C	3-part-Loop: Flags
+5E	[some other Volume]
+5F	[some other Transpose]
+
+
+
+
+Sequence Format
+---------------
+00..CF - Note
+	low nibble - length
+	high nibble - note (0 = rest)
+D0..FF - commands
+D0..D7 - set Note Volume (scaled)
+D8 mm - set Note Volume Multiplier to mm (mm can be 00..12, 00 equals 01)
+D9 [D9 D9 ...] xx - Note, add n*10h to note length (n = number of consecutive D9 commands)
+DA pp - set Stereo/Pan mask to pp (01 = right, 02 = left, 03 = center)
+DB xx - set TrkRAM+38h = -xx
+DC ab cd - set SSG-EG registers 90 98 94 9C to 0a 0b 0c 0d
+DD - toggle TrkRAM+50h Bit 2
+DE xx - set TrkRAM+50h Bit 3, then play note xx (modified, jumps into main code)
+DF - toggle TrkRAM+50h Bit 1
+E0 aa bb cc dd - set TrkRAM+51h = 00, Tick Increment = aa, set Instrument bb, Channel Volume = cc, set TrkRAM+3Bh = -dd
+E1 aa bb - set TrkRAM+51h = 01, Tick Increment = aa, set TrkRAM+39h = bb, set TrkRAM+3Bh = 0
+E2 aa - Tick Increment = aa
+E3 ii - [FM channel] set FM instrument ii
+E3 aa ii - [PSG channel] set TrkRAM+3Bh = -aa, set FM instrument ii
+E4 aa - Channel Volume = aa
+E5 00 - clear TrkRAM+50h Bit 4
+E5 aa bc - set TrkRAM+50h Bit 4, set TrkRAM+24h/25h = PtrTblA07B[aa], set TrkRAM+2Bh = 0b*4, set TrkRAM+2Ch = 0c
+E6 aa - set TrkRAM+58h = aa, set TrkRAM+36h/37h = PtrTblA07B[aa]
+E7 aa - set TrkRAM+54h = -aa
+E8 nn - cancel command processing and play Note as usual
+E9 00 - disable LFO for this channel
+E9 aa bc - set LFO Depth to aa, set TrkRAM+58h = 0b*4, set TrkRAM+40h = 0a*2
+EA ss - set LFO Frequency register to 00 (ss = 00) or 08..0F (ss = 01..08)
+EB tt - set global transpose (see also EC)
+EC tt - set channel transpose (bits 0-3 = note, bits 4-6 = octave, bit 7 = sign)
+ED dd - set Detune (00..7F -> +00..+7F = higher, 80..FF -> -00..-7F = lower)
+EE aa bb cc - ??
+EF aa bb - set global Music Volume to aa, other global Volume to bb (both values are signed)
+F0..F7 - set TrkRAM+3Ah = (command AND 07h) * 24 (12 semitones = offset of 24 bytes in Frequency LUT)
+F8 aa bb - [FM channel]
+F8 aa - [PSG channel]
+F9 aa bb - jump to Z80 offset (8000h OR bbaa)
+FA - Loop 1 Start
+FA tt - Loop 1 End, loop for tt times
+FB - Loop 2 Start
+FB tt - Loop 2 End, loop for tt times
+FC - Return 1
+FC aa bb - Subroutine 1 (save current offset to TrkRAM+14h/15h and jump to (8000h OR bbaa))
+FD - Return 2
+FD aa bb - Subroutine 2 (save current offset to TrkRAM+16h/17h and jump to (8000h OR bbaa))
+FE - 3-part loop:
+	"FE (start) data1 FE (exit flag) data2 FE FE (end)" plays "data1 data2 data1"
+	"FE (start) data1 FE (exit flag) data2 FE xx (end1) data3 FE FE (end)" plays "data1 data2 data1 data3"
+	The sequence can be extended infinitely.
+FF - Track End
+
+!!! all signed values use the sign-magnitude format where the MSBit is the sign and the rest is the data.
+i.e. +0..+127 = 00h..7Fh and -0..-127 = 80h..FFh
