@@ -1,0 +1,127 @@
+8C10+	Sequence Headers (18h bytes per header)
+
+
+Sequence Header
+---------------
+Pos	Len	Desc
+00	01	Sequence ID
+01	01	Priority? (00-FD = Music, FE/FF = SFX)
+02	01	?? [copied to TrackRAM+08h]
+03	01	??
+04	02	Track Mask
+		-> 1 bit per used track (9 bits, Little Endian)
+		-> lowest bit = first track, highest bit = last track
+06	12	Track Pointer (absolute)
+
+
+
+
+... an F8 byte makes the note longer by 240 ticks?
+
+Sequence Commands
+-----------------
+80 - Rest
+90 nn vv - Note nn, Velocity vv
+C0 ii - set Instrument
+D0 vv - set Volume
+E0 ll mm - set Pitch Bend mmll (reset by new notes)
+    0000 = no change, 7800 = 1 semitone down, 0800 = 1 semitone up
+    -> range of 8 semitones
+F1 xx - set Note Timeout
+	-> Note Length *= (10h - xx) / 10h
+	-> 00h = 100%, 04h = 75%, 06h = 63%, 08h = 50%
+F2 oooo - Subroutine, offset oooo [jumps to command]
+F3 - Return from Subroutine
+F4 ii tt oooo - Loop, Index ii, relative offset oooo [jumps to command]
+F5 rr dd - YM2151 write (register rr, data dd)
+F6 xx - Detune (signed 7-bit)
+F7 xx - set FD99 to xx
+F9 xx xx - set YM2151 Timer to xxxx
+FC - Track End
+
+
+Notes:
+- Velocity/Volume 7-bit signed (00..3F = loud..silent, 7F..40 = negative volume)
+- offsets are Little Endian and relative to the last byte of the offset
+  (i.e. ll mm -> add mmll to the position of mm)
+
+
+
+RAM Map
+-------
+
+
+
+Track RAM
+---------
+Pos	Len	Desc
+00	01	Channel Mask (0..8)
+01	01	Channel Mode (0, 1, 4, 5)
+02	01	Sequence ID [Sequence Header, byte 00]
+03	02	Sequence Header Offset
+05	01	Flags
+		Bit 0 (01): Track Enabled
+		Bit 1 (02): Note is playing (0 - no, 1 - yes)
+		Bit 2 (04): Parse Mode (0 - read delay, 1 - read command)
+		Bit 3 (08): 
+		Bit 4 (10): 
+		Bit 5 (20): 
+		Bit 6 (40): 
+		Bit 7 (80): 
+06	02	Track Pointer
+08	02	[Sequence Header, byte 02]
+09	01	Remining Ticks until next event
+0A	01	[command F1 param]
+0B	01	[reset by command F1}
+0C	01	current MIDI command type
+0D	01	current MIDI note value
+0E	01	YM2151 Note Fraction
+0F	01	YM2151 Note
+10	02	Frequency Modifier (initialized to Note Detune, changed by Modulation Envelope)
+12	01	current note velocity
+13	01	current channel volume
+14	02	Note Detune
+16	01	current Instrument
+17	01	[instrument byte 02]
+18	01	FM algorithm (0..7) [instrument byte 01]
+19	04	instrument TL values
+1D	01	Loop Index
+1E	10	Loop Memory
+		-> 4 bytes per slot
+		-> 1 byte: loop ID, 1 byte: loop count, 2 bytes: loop offset
+2E	01	Subroutine Index
+2F	08	Subroutine Return Pointers
+		-> 2 bytes per pointer
+37	01	Modulation Envelope Type
+38	01	[init] -> 3E
+39	01	
+3A	01	[init] -> 3F
+3B	01	[init] -> 40
+3C	01	[init] -> 3D
+3D	01	[work]
+3E	01	[work]
+3F	01	[work]
+40	01	[work]
+41	01	Volume Envelope Type
+42	01	[init] -> 48
+43	01	
+44	01	[init] -> 49
+45	01	[init] -> 4A
+46	01	[init] -> 47
+47	01	[work]
+48	01	[work]
+49	01	[work]
+4A	01	[work]
+4B	01	[work] VolEnv: final volume
+-> 4C bytes
+
+Instrument
+----------
+25h bytes per instrument
+
+01h byte  - [ignored]
+01h byte  - Reg 20 (FM algorithm)
+01h byte  - [ignored]
+18h bytes - Reg 40/48/../FC
+05h bytes - Modulation Envelope Data (copied to Track RAM 37h..3Bh)
+05h bytes - Volume Envelope Data (copied to Track RAM 41h..45h)
