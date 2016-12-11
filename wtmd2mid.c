@@ -9,8 +9,8 @@
 #include <ctype.h>
 #include <math.h>
 
-#include "stdtype.h"
-#include "stdbool.h"
+#include <stdtype.h>
+#include <stdbool.h>
 
 void ConvertAllSongs(UINT16 MusBankList);
 UINT8 Wolfteam2Mid(UINT32 SongStartPos);
@@ -89,7 +89,7 @@ int main(int argc, char* argv[])
 	
 	FixDrumSet = true;
 	FixVolume = true;
-	PLMode = 0x01;
+	PLMode = 0x00;
 	SongPos = 0x00;
 	StrPtr = argv[1];
 	while(*StrPtr != '\0')
@@ -134,11 +134,12 @@ int main(int argc, char* argv[])
 	
 	fclose(hFile);
 	
-	Z80DrvMode = RAMMODE_NONE;
-	Z80MusList = 0x0000;
-	WolfTeamDriver_Autodetection();
 	if (PLMode)
 	{
+		Z80DrvMode = RAMMODE_NONE;
+		Z80MusList = 0x0000;
+		WolfTeamDriver_Autodetection();
+		
 		ConvertAllSongs(Z80MusList);
 	}
 	else
@@ -263,6 +264,7 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 	
 	UINT16 TickpQrt;
 	UINT8 LoopCnt;
+	UINT8 SongMode;
 	UINT8 TrkCnt;
 	UINT8 CurTrk;
 	UINT16 SegBase;
@@ -310,7 +312,8 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 	
 	MidLen = 0x20000;	// 128 KB should be enough
 	MidData = (UINT8*)malloc(MidLen);
-	if (SongData[0x01] != 'F')
+	SongMode = SongData[0x01];
+	if (SongMode != 'B' && SongMode != 'F')
 	{
 		printf("Invalid Song Mode %c!\n", SongData[0x01]);
 		MidLen = 0;
@@ -366,7 +369,7 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 	MidData[DstPos - 0x01] = 0x03;	// write again, because the above instruction overwrote it
 	DstPos += 0x03;
 	
-	LoopSeg = 0x01;
+	LoopSeg = 0x0001;
 	InPos += 0x08;	// skip second header
 	
 	WriteEvent(MidData, &DstPos, &CurDly, 0xFF, 0x2F, 0x00);
@@ -392,6 +395,9 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 		TrkEnd = (ChnList[CurTrk].Mode == 0x00);
 		LoopIdx = 0x00;
 		LoopCount = 0;
+		// Tracks are: FM 1-7, Sample 1 (melodic), Sample 2 (drums)
+		// Sample 1: instrument = sample, note = pitch
+		// Sample 2: instrument = ignored, note = sample
 		MidChn = 1 + CurTrk;	// Channel 0 is reserved for SFX, and so track 8 ends up on the Drum channel
 		DrumMode = (CurTrk == 8);
 		ChnVol = 0x7F;
@@ -444,52 +450,73 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 			}
 			
 			CurCmd = SongData[InPos];
-			if (CurCmd < 0xEC || (CurCmd >= 0xF0 && CurCmd < 0xFC))
+			if (SongMode == 'B')
 			{
-				InPos ++;
+				if (CurCmd < 0x80)
+					CurCmd = 0x00;
+				else if (CurCmd < 0xE0)
+					CurCmd = 0x01;
+				else //if (CurCmd >= 0xE0)
+					CurCmd = CurCmd;
+			}
+			else if (SongMode == 'F')
+			{
+				static UINT8 FMODE_CMD_TBL[0x04] = {0xE0, 0xE1, 0xE2, 0xE4};
 				if (CurCmd == 0xDC)
+					CurCmd = 0x02;	// Previous Note
+				else if (CurCmd >= 0xEC && CurCmd <= 0xEF)
+					CurCmd = FMODE_CMD_TBL[CurCmd - 0xEC];
+				else if (CurCmd >= 0xFC && CurCmd <= 0xFF)
+					CurCmd = CurCmd;
+				else if (CurCmd < 0x80)
+					CurCmd = 0x00;
+				else //if (CurCmd >= 0x80)
+					CurCmd = 0x01;
+			}
+			
+			if (CurCmd < 0xE0)
+			{
+				if (CurCmd == 0x00)	// 00..7F
 				{
+					PrevNoteDly = NewNoteDly;
+					PrevNoteLen = NewNoteLen;
+					CurCmd = SongData[InPos + 0x00];
+					if (DrumMode)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly, 0x7F, 0x00, 0x00);	// flush DAC notes
+						// The drum track is special and lacks a note length.
+						NewNoteDly = SongData[InPos + 0x01];
+						//NewNoteLen = NewNoteDly ? (NewNoteDly - 1) : 1;
+						NewNoteLen = NewNoteDly;
+						InPos += 0x02;
+					}
+					else
+					{
+						NewNoteDly = SongData[InPos + 0x01];
+						NewNoteLen = SongData[InPos + 0x02];
+						InPos += 0x03;
+					}
+					CurNoteDly = NewNoteDly;
+					CurNoteLen = NewNoteLen;
+				}
+				else if (CurCmd == 0x01)	// 80..DF, E0..EB, F0..FB
+				{
+					CurCmd = SongData[InPos];
+					CurNoteDly = NewNoteDly;
+					CurNoteLen = NewNoteLen;
+					InPos ++;
+				}
+				else if (CurCmd == 0x02)	// command DC
+				{
+					InPos ++;
 					// reuse PrevNoteDly/Len
 					CurCmd = SongData[InPos];
 					CurNoteDly = PrevNoteDly;
 					CurNoteLen = PrevNoteLen;
 					InPos ++;
 				}
-				else	// 00..7F, 80..DF
-				{
-					if (! (CurCmd & 0x80))
-					{
-						PrevNoteDly = NewNoteDly;
-						PrevNoteLen = NewNoteLen;
-						if (DrumMode)
-						{
-							WriteEvent(MidData, &DstPos, &CurDly, 0x7F, 0x00, 0x00);	// flush DAC notes
-							// The DAC track is special.
-							NewNoteDly = SongData[InPos];
-							//NewNoteLen = NewNoteDly ? (NewNoteDly - 1) : 1;
-							NewNoteLen = NewNoteDly;
-							InPos ++;
-						}
-						else
-						{
-							NewNoteDly = SongData[InPos + 0x00];
-							NewNoteLen = SongData[InPos + 0x01];
-							InPos += 0x02;
-						}
-					}
-					CurNoteDly = NewNoteDly;
-					CurNoteLen = NewNoteLen;
-				}
-				if (CurTrk != 8)
-				{
-					// FM channels
-					CurNote = CurCmd & 0x0F;
-					CurNote += ((CurCmd & 0x70) >> 4) * 12;
-					CurNote += NoteMove;
-					if (! CurNoteLen)
-						CurNote = 0x00;
-				}
-				else
+				
+				if (DrumMode)
 				{
 					// DAC channel
 					CurNote = CurCmd & 0x7F;
@@ -504,6 +531,15 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 					}
 					if (! CurNote)
 						CurNote = (CurCmd & 0x7F) + NoteMove;
+				}
+				else
+				{
+					// FM channels
+					CurNote = CurCmd & 0x0F;
+					CurNote += ((CurCmd & 0x70) >> 4) * 12;
+					CurNote += NoteMove;
+					if (! CurNoteLen)
+						CurNote = 0x00;
 				}
 				
 				WriteEvent(MidData, &DstPos, &CurDly, 0x00, 0x00, 0x00);
@@ -567,9 +603,9 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 			{
 				switch(CurCmd)
 				{
-				case 0xEC:	// Set Instrument
+				case 0xE0:	// Set Instrument
 					CurCmd = SongData[InPos + 0x02];
-					if (1)
+					if (CurTrk < 7)	// FM 1-7 only
 					{
 						if (CurCmd < (sizeof(INS_MAP) / sizeof(INS_TABLE)))
 						{
@@ -590,11 +626,15 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 						//else
 						//	WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x20, 0x00);
 					}
+					else
+					{
+						TempByt = CurCmd;
+					}
 					WriteEvent(MidData, &DstPos, &CurDly, 0xC0 | MidChn, TempByt, 0x00);
 					CurDly += SongData[InPos + 0x01];
 					InPos += 0x03;
 					break;
-				case 0xED:	// Set Volume
+				case 0xE1:	// Set Volume
 					if (FixVolume)
 						TempByt = DB2Mid(Lin2DB(SongData[InPos + 0x02]) * 0.5);
 					else
@@ -602,13 +642,13 @@ UINT8 Wolfteam2Mid(UINT32 SongStartPos)
 					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x07, TempByt);
 					InPos += 0x03;
 					break;
-				case 0xEE:	// Set Pan
+				case 0xE2:	// Set Pan
 					TempByt = PanBits2MidiPan(SongData[InPos + 0x02]);
 					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0A, TempByt);
 					CurDly += SongData[InPos + 0x01];
 					InPos += 0x03;
 					break;
-				case 0xEF:	// Pitch Bend
+				case 0xE4:	// Pitch Bend
 					if (! PBRange)
 					{
 						// write Pitch Bend Range
@@ -920,6 +960,7 @@ static void LZSS_Init(void)	// ported from the Arcus Odyssey ROM
 	// 01E7DE - AE00..AEFF
 	do
 	{
+		// TODO: Shouldn't I decrement D0 first?
 		text_buf[BufPos] = (UINT8)RegD0;
 		RegD0 --; BufPos ++;
 	} while(RegD0 > 0x00);
