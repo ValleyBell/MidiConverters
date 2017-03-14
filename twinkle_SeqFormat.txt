@@ -1,0 +1,39 @@
+Twinkle Soft Sequence Format
+============================
+(.MF2 files)
+
+Header
+------
+0Ah*2 bytes - track pointers (absolute)
+	OPN/OPNA Mode:
+		PSG 1/2/3
+		FM 1/2/3
+		FM 4/5/6
+		dummy
+	MIDI Mode:
+		10 MIDI tracks (channel ID is set via sequence commands)
+
+Sequence Commands
+-----------------
+00-7F dd ll - play note with length ll, delay dd
+82 ii - set FM/SSG Instrument
+85 vv - set Volume (00..64?)
+8A tt - set Tempo to tt BPM
+9B tt - Loop End, loop tt times (tt = 0 -> infinite)
+9C - Loop Start
+9D ii - set Detune
+9F pp - set Pan (01 = right, 02 = left, 03 = center)
+A4 ll mm - Pitch Bend (mm = semitones, ll = fraction)
+A5 xx - ??
+
+DD dd v1 v2 - SysEx data bytes 1-2, delay dd
+DE dd v3 v3 - SysEx data bytes 3-4 and send SysEx command, delay dd
+		SC-55 Mode: F0 41 di mi 12 v1 v2 v3 v4 [chksum] F7
+DF dd di mi - set SysEx command header (di = device ID, mi = model ID)
+
+E6 dd cc - set MIDI Channel to cc, delay dd
+E7 dd ?? ?? - ??
+EB dd cc vv - MIDI Controller cc, value vv, delay dd
+EC dd ii - MIDI Instrument ii change, delay dd
+EE dd ll mm - Pitch Bend with additional delay dd
+FE - Track End
