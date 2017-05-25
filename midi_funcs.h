@@ -11,76 +11,73 @@
 
 typedef struct _midi_track_state
 {
-	UINT32 TrkBase;
-	UINT32 CurDly;	// delay until next event
-	UINT8 MidChn;
+	UINT32 trkBase;
+	UINT32 curDly;	// delay until next event
+	UINT8 midChn;
 } MID_TRK_STATE;
 
 typedef struct file_information
 {
-	UINT32 Alloc;	// allocated bytes
-	UINT32 Pos;		// current file offset
-	UINT8* Data;	// file data
+	UINT32 alloc;	// allocated bytes
+	UINT32 pos;		// current file offset
+	UINT8* data;	// file data
 } FILE_INF;
 
 
-static void WriteMidiDelay(FILE_INF* fInf, UINT32* Delay);
-static void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 Evt, UINT8 Val1, UINT8 Val2);
-static void WriteLongEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 Evt, UINT32 DataLen, const UINT8* Data);
-static void WriteMetaEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 MetaType, UINT32 DataLen, const UINT8* Data);
-static void WriteMidiValue(FILE_INF* fInf, UINT32 Value);
-static void File_CheckRealloc(FILE_INF* FileInf, UINT32 BytesNeeded);
-static void WriteMidiHeader(FILE_INF* fInf, UINT16 Format, UINT16 Tracks, UINT16 Resolution);
+#ifndef INLINE
+#define INLINE static
+#endif
+
+static void WriteMidiDelay(FILE_INF* fInf, UINT32* delay);
+static void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT8 val1, UINT8 val2);
+static void WriteLongEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT32 dataLen, const void* data);
+static void WriteMetaEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 metaType, UINT32 dataLen, const void* data);
+static void WriteMidiValue(FILE_INF* fInf, UINT32 value);
+static void File_CheckRealloc(FILE_INF* FileInf, UINT32 bytesNeeded);
+static void WriteMidiHeader(FILE_INF* fInf, UINT16 format, UINT16 tracks, UINT16 resolution);
 static void WriteMidiTrackStart(FILE_INF* fInf, MID_TRK_STATE* MTS);
 static void WriteMidiTrackEnd(FILE_INF* fInf, MID_TRK_STATE* MTS);
 
-static void WriteBE32(UINT8* Buffer, UINT32 Value);
-static void WriteBE16(UINT8* Buffer, UINT16 Value);
+INLINE void WriteBE32(UINT8* buffer, UINT32 value);
+INLINE void WriteBE16(UINT8* buffer, UINT16 value);
 
 
-static void WriteMidiDelay(FILE_INF* fInf, UINT32* Delay)
+static void WriteMidiDelay(FILE_INF* fInf, UINT32* delay)
 {
-	WriteMidiValue(fInf, *Delay);
-	if (*Delay)
-	{
-		UINT8 CurNote;
-		
-		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
-			RunNotes[CurNote].RemLen -= (UINT16)*Delay;
-		*Delay = 0x00;
-	}
+	WriteMidiValue(fInf, *delay);
+	*delay = 0;
 	
 	return;
 }
 
-static void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 Evt, UINT8 Val1, UINT8 Val2)
+static void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT8 val1, UINT8 val2)
 {
-	WriteMidiDelay(fInf, &MTS->CurDly);
+	WriteMidiDelay(fInf, &MTS->curDly);
 	
 	File_CheckRealloc(fInf, 0x03);
-	switch(Evt & 0xF0)
+	switch(evt & 0xF0)
 	{
 	case 0x80:
 	case 0x90:
 	case 0xA0:
 	case 0xB0:
 	case 0xE0:
-		fInf->Data[fInf->Pos + 0x00] = Evt | MTS->MidChn;
-		fInf->Data[fInf->Pos + 0x01] = Val1;
-		fInf->Data[fInf->Pos + 0x02] = Val2;
-		fInf->Pos += 0x03;
+		fInf->data[fInf->pos + 0x00] = evt | MTS->midChn;
+		fInf->data[fInf->pos + 0x01] = val1;
+		fInf->data[fInf->pos + 0x02] = val2;
+		fInf->pos += 0x03;
 		break;
 	case 0xC0:
 	case 0xD0:
-		fInf->Data[fInf->Pos + 0x00] = Evt | MTS->MidChn;
-		fInf->Data[fInf->Pos + 0x01] = Val1;
-		fInf->Pos += 0x02;
+		fInf->data[fInf->pos + 0x00] = evt | MTS->midChn;
+		fInf->data[fInf->pos + 0x01] = val1;
+		fInf->pos += 0x02;
 		break;
 	case 0xF0:	// for Meta Event: Track End
-		fInf->Data[fInf->Pos + 0x00] = Evt;
-		fInf->Data[fInf->Pos + 0x01] = Val1;
-		fInf->Data[fInf->Pos + 0x02] = Val2;
-		fInf->Pos += 0x03;
+		fInf->data[fInf->pos + 0x00] = evt;
+		fInf->data[fInf->pos + 0x01] = val1;
+		fInf->data[fInf->pos + 0x02] = val2;
+		fInf->pos += 0x03;
 		break;
 	default:
 		break;
@@ -89,95 +86,95 @@ static void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 Evt, UINT8 Val1
 	return;
 }
 
-static void WriteLongEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 Evt, UINT32 DataLen, const UINT8* Data)
+static void WriteLongEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT32 dataLen, const void* data)
 {
-	WriteMidiDelay(fInf, &MTS->CurDly);
+	WriteMidiDelay(fInf, &MTS->curDly);
 	
-	File_CheckRealloc(fInf, 0x01 + 0x04 + DataLen);	// worst case: 4 bytes of data length
-	fInf->Data[fInf->Pos + 0x00] = Evt;
-	fInf->Pos += 0x01;
-	WriteMidiValue(fInf, DataLen);
-	memcpy(&fInf->Data[fInf->Pos], Data, DataLen);
-	fInf->Pos += DataLen;
+	File_CheckRealloc(fInf, 0x01 + 0x04 + dataLen);	// worst case: 4 bytes of data length
+	fInf->data[fInf->pos + 0x00] = evt;
+	fInf->pos += 0x01;
+	WriteMidiValue(fInf, dataLen);
+	memcpy(&fInf->data[fInf->pos], data, dataLen);
+	fInf->pos += dataLen;
 	
 	return;
 }
 
-static void WriteMetaEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 MetaType, UINT32 DataLen, const UINT8* Data)
+static void WriteMetaEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 metaType, UINT32 dataLen, const void* data)
 {
-	WriteMidiDelay(fInf, &MTS->CurDly);
+	WriteMidiDelay(fInf, &MTS->curDly);
 	
-	File_CheckRealloc(fInf, 0x02 + 0x05 + DataLen);	// worst case: 5 bytes of data length
-	fInf->Data[fInf->Pos + 0x00] = 0xFF;
-	fInf->Data[fInf->Pos + 0x01] = MetaType;
-	fInf->Pos += 0x02;
-	WriteMidiValue(fInf, DataLen);
-	memcpy(&fInf->Data[fInf->Pos], Data, DataLen);
-	fInf->Pos += DataLen;
+	File_CheckRealloc(fInf, 0x02 + 0x05 + dataLen);	// worst case: 5 bytes of data length
+	fInf->data[fInf->pos + 0x00] = 0xFF;
+	fInf->data[fInf->pos + 0x01] = metaType;
+	fInf->pos += 0x02;
+	WriteMidiValue(fInf, dataLen);
+	memcpy(&fInf->data[fInf->pos], data, dataLen);
+	fInf->pos += dataLen;
 	
 	return;
 }
 
-static void WriteMidiValue(FILE_INF* fInf, UINT32 Value)
+static void WriteMidiValue(FILE_INF* fInf, UINT32 value)
 {
-	UINT8 ValSize;
-	UINT8* ValData;
-	UINT32 TempLng;
-	UINT32 CurPos;
+	UINT8 valSize;
+	UINT8* valData;
+	UINT32 tempLng;
+	UINT32 curPos;
 	
-	ValSize = 0x00;
-	TempLng = Value;
+	valSize = 0x00;
+	tempLng = value;
 	do
 	{
-		TempLng >>= 7;
-		ValSize ++;
-	} while(TempLng);
+		tempLng >>= 7;
+		valSize ++;
+	} while(tempLng);
 	
-	File_CheckRealloc(fInf, ValSize);
-	ValData = &fInf->Data[fInf->Pos];
-	CurPos = ValSize;
-	TempLng = Value;
+	File_CheckRealloc(fInf, valSize);
+	valData = &fInf->data[fInf->pos];
+	curPos = valSize;
+	tempLng = value;
 	do
 	{
-		CurPos --;
-		ValData[CurPos] = 0x80 | (TempLng & 0x7F);
-		TempLng >>= 7;
-	} while(TempLng);
-	ValData[ValSize - 1] &= 0x7F;
+		curPos --;
+		valData[curPos] = 0x80 | (tempLng & 0x7F);
+		tempLng >>= 7;
+	} while(tempLng);
+	valData[valSize - 1] &= 0x7F;
 	
-	fInf->Pos += ValSize;
+	fInf->pos += valSize;
 	
 	return;
 }
 
-static void File_CheckRealloc(FILE_INF* FileInf, UINT32 BytesNeeded)
+static void File_CheckRealloc(FILE_INF* fInf, UINT32 bytesNeeded)
 {
 #define REALLOC_STEP	0x8000	// 32 KB block
-	UINT32 MinPos;
+	UINT32 minPos;
 	
-	MinPos = FileInf->Pos + BytesNeeded;
-	if (MinPos <= FileInf->Alloc)
+	minPos = fInf->pos + bytesNeeded;
+	if (minPos <= fInf->alloc)
 		return;
 	
-	while(MinPos > FileInf->Alloc)
-		FileInf->Alloc += REALLOC_STEP;
-	FileInf->Data = (UINT8*)realloc(FileInf->Data, FileInf->Alloc);
+	while(minPos > fInf->alloc)
+		fInf->alloc += REALLOC_STEP;
+	fInf->data = (UINT8*)realloc(fInf->data, fInf->alloc);
 	
 	return;
 }
 
-static void WriteMidiHeader(FILE_INF* fInf, UINT16 Format, UINT16 Tracks, UINT16 Resolution)
+static void WriteMidiHeader(FILE_INF* fInf, UINT16 format, UINT16 tracks, UINT16 resolution)
 {
 	File_CheckRealloc(fInf, 0x08 + 0x06);
 	
-	WriteBE32(&fInf->Data[fInf->Pos + 0x00], 0x4D546864);	// write 'MThd'
-	WriteBE32(&fInf->Data[fInf->Pos + 0x04], 0x00000006);	// Header Length
-	fInf->Pos += 0x08;
+	WriteBE32(&fInf->data[fInf->pos + 0x00], 0x4D546864);	// write 'MThd'
+	WriteBE32(&fInf->data[fInf->pos + 0x04], 0x00000006);	// Header Length
+	fInf->pos += 0x08;
 	
-	WriteBE16(&fInf->Data[fInf->Pos + 0x00], Format);		// MIDI Format (0/1/2)
-	WriteBE16(&fInf->Data[fInf->Pos + 0x02], Tracks);		// number of tracks
-	WriteBE16(&fInf->Data[fInf->Pos + 0x04], Resolution);	// Ticks per Quarter
-	fInf->Pos += 0x06;
+	WriteBE16(&fInf->data[fInf->pos + 0x00], format);		// MIDI Format (0/1/2)
+	WriteBE16(&fInf->data[fInf->pos + 0x02], tracks);		// number of tracks
+	WriteBE16(&fInf->data[fInf->pos + 0x04], resolution);	// Ticks per Quarter
+	fInf->pos += 0x06;
 	
 	return;
 }
@@ -186,41 +183,41 @@ static void WriteMidiTrackStart(FILE_INF* fInf, MID_TRK_STATE* MTS)
 {
 	File_CheckRealloc(fInf, 0x08);
 	
-	WriteBE32(&fInf->Data[fInf->Pos + 0x00], 0x4D54726B);	// write 'MTrk'
-	WriteBE32(&fInf->Data[fInf->Pos + 0x04], 0x00000000);	// write dummy length
-	fInf->Pos += 0x08;
+	WriteBE32(&fInf->data[fInf->pos + 0x00], 0x4D54726B);	// write 'MTrk'
+	WriteBE32(&fInf->data[fInf->pos + 0x04], 0x00000000);	// write dummy length
+	fInf->pos += 0x08;
 	
-	MTS->TrkBase = fInf->Pos;
-	MTS->CurDly = 0;
+	MTS->trkBase = fInf->pos;
+	MTS->curDly = 0;
 	
 	return;
 }
 
 static void WriteMidiTrackEnd(FILE_INF* fInf, MID_TRK_STATE* MTS)
 {
-	UINT32 TrkLen;
+	UINT32 trkLen;
 	
-	TrkLen = fInf->Pos - MTS->TrkBase;
-	WriteBE32(&fInf->Data[MTS->TrkBase - 0x04], TrkLen);	// write Track Length
-	
-	return;
-}
-
-
-static void WriteBE32(UINT8* Buffer, UINT32 Value)
-{
-	Buffer[0x00] = (Value >> 24) & 0xFF;
-	Buffer[0x01] = (Value >> 16) & 0xFF;
-	Buffer[0x02] = (Value >>  8) & 0xFF;
-	Buffer[0x03] = (Value >>  0) & 0xFF;
+	trkLen = fInf->pos - MTS->trkBase;
+	WriteBE32(&fInf->data[MTS->trkBase - 0x04], trkLen);	// write Track Length
 	
 	return;
 }
 
-static void WriteBE16(UINT8* Buffer, UINT16 Value)
+
+INLINE void WriteBE32(UINT8* buffer, UINT32 value)
 {
-	Buffer[0x00] = (Value >> 8) & 0xFF;
-	Buffer[0x01] = (Value >> 0) & 0xFF;
+	buffer[0x00] = (value >> 24) & 0xFF;
+	buffer[0x01] = (value >> 16) & 0xFF;
+	buffer[0x02] = (value >>  8) & 0xFF;
+	buffer[0x03] = (value >>  0) & 0xFF;
+	
+	return;
+}
+
+INLINE void WriteBE16(UINT8* buffer, UINT16 value)
+{
+	buffer[0x00] = (value >> 8) & 0xFF;
+	buffer[0x01] = (value >> 0) & 0xFF;
 	
 	return;
 }

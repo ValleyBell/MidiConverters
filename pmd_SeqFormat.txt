@@ -1,0 +1,147 @@
+P.M.D. Sequence Format
+----------------------
+Header
+------
+1 byte - file version (can be 00..0F, usually 00 for .M/.M2, must be FF for FM Towns)
+
+11*2 bytes - track pointers
+	0-5: FM 1-6
+	6-8: PSG 1-3
+	9: OPNA ADPCM B
+	10: OPNA Rhythm
+2 bytes - Rhythm Subroutine Table
+2 bytes - FM instrument pointer (also used for getting additional file pointers)
+
+x bytes - sequence data
+
+x*2 bytes - rhythm subroutine pointers
+x bytes - rhythm subroutine data
+
+2 bytes - extra data pointer
+1 byte - extra data type (40..4F)
+1 byte - must be FE
+
+x bytes - FM instruments
+x bytes - PSG envelopes
+
+extra data pointers:
+2 bytes - PPZ file name pointer (FM Towns) [type 48+]
+2 bytes - PPS file name pointer [type 42+]
+2 bytes - PPC/P86 file name pointer
+
+
+
+FM Instrument Format
+--------------------
+1 byte - instrument ID
+19h bytes - instrument data
+	register order: 30 34 38 3C 40 44 ... 88 8C B0 
+
+
+Sequence Commands
+-----------------
+00-7F ll - Note (high nibble = octave, low nibble = note within octave), ll = length
+	note xC..xF = special
+	note xC = hold??
+	note xF = stop
+80 - track end
+B1
+B2 tt - set secondary transposition
+B3
+B4
+B5
+B6
+B7
+B8
+B9
+BA
+BB xx - set "Extend Mode", bit 5
+BC
+BD
+BE tt - set Modulation Mask #2 (bits 4-6), range is 00..07
+BF
+C0
+C1
+C2
+C3
+C4
+C5
+C6 aaaa bbbb cccc - FM3 Extended Channels Initialize (aa/bb/cc = pointer to channel's sequence data)
+C7
+C8
+C9 xx - set "Extend Mode", bit 2
+CA xx - set "Extend Mode", bit 1
+CB ww - set Modulation Waveform
+CC xx - set "Extend Mode", bit 0
+CD ar dr sr SR al - set PSG Envelope (ar = attack rate, dr = decay rate, sr = sustain rate, R = release rate, S = sustain level, al = attack level)
+CE
+CF mm - set FM Slot Mask
+D0 ff - add ff to PSG Noise Frequency
+D1 xx - [ignored]
+D2 ss - Fade Out (speed ss)
+D3 ?? - SSG effect
+D4 ?? - FM effect
+D5 dddd - add to Detune
+D6 ss dd - ?? (ss = speed, dd = depth)
+D7 xx - [ignored]
+D8 xx - [ignored]
+D9 xx - [ignored]
+DA aa bb ll - Note Portamento from aa to bb, length ll
+DB xx - increment Status Byte by xx
+DC xx - set Status Byte to xx
+DD vv - Volume down by vv for next note only
+DE vv - Volume up by vv for next note only
+DF xx - set ticks per measure?
+E0 ss - set Hardware LFO Speed to ss (register 22)
+E1 ll - set Hardware LFO AM/FM to ll (register B4)
+E2 vv - Volume down by vv (subtracted from raw FM/PSG value)
+E3 vv - Volume up by vv (added to raw FM/PSG value)
+E4 dd - set Hardware LFO delay
+E5 vv - add to OPNA Rhythm Volume (high 3 bits = channel, low 5 bits = volume)
+E6 vv - add to OPNA Rhythm Master Volume
+E7 tt - add to Transposition
+E8 vv - set OPNA Rhythm Master Volume
+E9 pp - set OPNA Rhythm Panning (high 3 bits = channel, low 2 bits = panning, see EC)
+EA vv - set OPNA Rhythm Volume (high 3 bits = channel, low 5 bits = volume)
+EB kk - OPNA Rhythm Key On
+EC pp - set panning (00 = off, 01 = right, 02 = left, 03 = center)
+ED xx - set PSG Tone/Noise Mask (register 07)
+EE ff - set PSG Noise Frequency to ff
+EF rr dd - send OPN register rr, data dd (patched with correct channel)
+F0 ar dr sr rr - set PSG Envelope (ar = attack rate, dr = decay rate, sr = sustain rate, rr = release rate)
+F1 tt - set Modulation Mask #1 (bits 0-2), range is 00..07
+F2 dd sp st tc - set Modulation (dd = delay, sp = speed, st = step, tc = tick count)
+F3 - Volume down by 3 db (FM step 4, PSG step 1) Note: result is properly clipped
+F4 - Volume up by 3 db (FM step 4, PSG step 1) Note: result is properly clipped
+F5 tt - set Transposition
+F6 - Master Loop Start
+F7 oooo - Loop exit (oo = absolute offset of "tt" part of Loop End command), exits the loop when cc == (tt-1)
+F8 tt cc oooo - Loop End, tt = times to loop (0 = infinite), cc = space for loop counter, jump to offset oooo+2
+F9 oooo - Loop Start (oo = absolute offset of "tt" part of Loop End command)
+FA dddd - set Detune to dddd
+FB - Tie/Hold
+FC tt - set Tempo to tt (raw OPN Timer B value)
+FC FD tt - add to Ticks per Quarter
+FC FE tt - add to Tempo
+FC FF tt - set Ticks per Quarter
+FD vv - set Volume (Note: 00 = silent, 7F (FM) / 0F (PSG) = max)
+FE dd - set "qdata" (-> calc_q)
+FF ii - set Instrument
+
+
+Rhythm Sequence Data
+--------------------
+This is a list of rhythm subroutine IDs.
+00-7F - execute rhythm subroutine (look up pointer from rhythm subroutine table)
+80-FF - Sequence Commands (used for looping etc.)
+
+Rhythm Subroutine Sequence Commands
+-----------------------------------
+00-7F ll - rest, length ll
+80-BF bb ll - (command * 0x100 + bb) & 0x3FFF -> some ID/mask, length ll
+C0-FE - Sequence Commands
+FF - Subroutine Return
+
+
+Values are stored in Little Endian.
+Offsets and pointers are relative to file offset 0001h.
