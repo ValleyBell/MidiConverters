@@ -1,5 +1,8 @@
 P.M.D. Sequence Format
 ----------------------
+for Professional Music Driver [P.M.D.] version 4.8
+based on PMDWin 0.36 source
+
 Header
 ------
 1 byte - file version (can be 00..0F, usually 00 for .M/.M2, must be FF for FM Towns)
@@ -45,9 +48,9 @@ Sequence Commands
 	note xC = hold??
 	note xF = stop
 80 - track end
-B1
+B1 tt - set Early Key Off Timeout Randomizer Range (range is 0..tt ticks, added to value of commands C4/FE)
 B2 tt - set secondary transposition
-B3
+B3 tt - set Early Key Off Timeout 2 (stop note after tt ticks, OR earler, if the combines result of B1/C4/FE happens first)
 B4
 B5
 B6
@@ -61,10 +64,10 @@ BD
 BE tt - set Modulation Mask #2 (bits 4-6), range is 00..07
 BF
 C0
-C1
+C1 - Early Key Off Ignore (when playing a note, Early Key Off is ignored if it is followed by this event)
 C2
 C3
-C4
+C4 pp - set Early Key Off Timeout Percentage (stops note length*pp/100h ticks early, added to value of command FE)
 C5
 C6 aaaa bbbb cccc - FM3 Extended Channels Initialize (aa/bb/cc = pointer to channel's sequence data)
 C7
@@ -103,7 +106,7 @@ E7 tt - add to Transposition
 E8 vv - set OPNA Rhythm Master Volume
 E9 pp - set OPNA Rhythm Panning (high 3 bits = channel, low 2 bits = panning, see EC)
 EA vv - set OPNA Rhythm Volume (high 3 bits = channel, low 5 bits = volume)
-EB kk - OPNA Rhythm Key On
+EB kk - OPNA Rhythm Key On (YM2608 register 0x010)
 EC pp - set panning (00 = off, 01 = right, 02 = left, 03 = center)
 ED xx - set PSG Tone/Noise Mask (register 07)
 EE ff - set PSG Noise Frequency to ff
@@ -125,7 +128,7 @@ FC FD tt - add to Ticks per Quarter
 FC FE tt - add to Tempo
 FC FF tt - set Ticks per Quarter
 FD vv - set Volume (Note: 00 = silent, 7F (FM) / 0F (PSG) = max)
-FE dd - set "qdata" (-> calc_q)
+FE tt - set Early Key Off Timeout (end note tt ticks before the actual end)
 FF ii - set Instrument
 
 
