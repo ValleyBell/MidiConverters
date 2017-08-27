@@ -1,0 +1,65 @@
+FMP3 Sequence Format (TGL/GIGA)
+====================
+(.M?? files)
+
+Extentions
+----------
+MFM - OPN/YM2203
+MF2 - OPNA/YM2608
+MMT - MT-32
+MCM - CM-64
+MGS - SC-55
+MG2 - SC-88
+
+Header
+------
+Note: Unused data in the header is dummied out using byte 2E.
+01 byte - FM / MIDI Mode
+	01 - FM mode (OPN/OPNA)
+	02 - MIDI mode (MT-32/SC-55/SC-88)
+01 byte - [FM only] ??
+02 bytes - [FM only] pointer to ?? (instrument data??)
+xx*2 bytes - track pointers
+	FM: 0Ch pointers
+	MIDI: 14h pointers
+10h bytes - space padded with byte 2E
+
+
+
+Sequence Commands [MIDI mode]
+-----------------
+General format:
+command, delay, command, delay, ...
+
+Commands:
+00-7F ll - play note with length ll
+80 ii - set instrument ii
+81 vv - set Volume
+82 a1 a2 a3 b1 b2 - set Tempo
+83 vv - set Note Velocity
+84 vv - set Modulation
+85 ll mm - Pitch Bend
+86 - Sustain Pedal On (send MIDI controller 64, value 64)
+87 - Sustain Pedal Off (send MIDI controller 64, value 0)
+88 o1 o2 tt - Loop Start, loop tt times (o2o1 = file offset for Loop End)
+89 - Loop End
+8B pp - set Pan
+8C ... F7 - send SysEx message
+8E 0c - set MIDI Channel to cc
+8F vv - set Expression
+90 cc vv - MIDI Controller cc, value vv
+
+A1 a1 a2 - set Tempo? [seen in Briganty]
+
+B6 00 yy a1 a2 a3 b1 b2 - set Tempo [seen in V.G.II]
+	yy - OPN Timer B value? (usually 82h, setting for 48 Ticks per Quarter?)
+	a3a2a1 - ??
+	b2b1 - ?? (b = a / 314.95)
+	Examples:
+		B6 0082 E0A32D 1925 - ~134 BPM
+		B6 0082 E2D529 0122 - ~144 BPM
+	MIDI Tempo = 500 000 * a3a2a1 / 32F000h
+B7 00 y1 y2 - set OPN Timer A value? [seen in V.G.]
+
+FF - Track End
+	Note: Tracks often end with FF 01 FF.

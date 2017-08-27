@@ -11,32 +11,26 @@
 
 #include <stdtype.h>
 
+#ifndef INLINE
+#if defined(_MSC_VER)
+#define INLINE	static __inline
+#elif defined(__GNUC__)
+#define INLINE	static __inline__
+#else
+#define INLINE	static inline
+#endif
+#endif	// INLINE
+
+
+#include "midi_funcs.h"
+
 
 typedef struct running_note
 {
-	UINT8 MidChn;
-	UINT8 Note;
-	UINT16 RemLen;
+	UINT8 midChn;
+	UINT8 note;
+	UINT16 remLen;
 } RUN_NOTE;
-
-typedef struct _midi_track_state
-{
-	UINT32 TrkBase;
-	UINT32 CurDly;	// delay until next event
-	UINT8 Flags;	// Bit 0 - raw MIDI mode (don't do any fixes)
-	UINT8 MidChn;
-	INT8 NoteMove;
-	UINT8 PBRange;
-	UINT8 MidIns;
-	UINT8 NoteVol;
-} MID_TRK_STATE;
-
-typedef struct file_information
-{
-	UINT32 Alloc;	// allocated bytes
-	UINT32 Pos;		// current file offset
-	UINT8* Data;	// file data
-} FILE_INF;
 
 typedef struct _track_info
 {
@@ -45,27 +39,14 @@ typedef struct _track_info
 
 
 UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData);
-static void CheckRunningNotes(FILE_INF* fInf, UINT32* Delay);
-static void WriteMidiDelay(FILE_INF* fInf, UINT32* Delay);
-static void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 Evt, UINT8 Val1, UINT8 Val2);
-static void WriteLongEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 Evt, UINT32 DataLen, const UINT8* Data);
-static void WriteMetaEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 MetaType, UINT32 DataLen, const UINT8* Data);
-static void WriteMidiValue(FILE_INF* fInf, UINT32 Value);
-static void File_CheckRealloc(FILE_INF* FileInf, UINT32 BytesNeeded);
-static void WriteMidiHeader(FILE_INF* fInf, UINT16 Format, UINT16 Tracks, UINT16 Resolution);
-static void WriteMidiTrackStart(FILE_INF* fInf, MID_TRK_STATE* MTS);
-static void WriteMidiTrackEnd(FILE_INF* fInf, MID_TRK_STATE* MTS);
-static UINT8 WriteFileData(UINT32 DataLen, const UINT8* Data, const char* FileName);
-static double OPN2DB(UINT8 TL);
-static UINT8 DB2Mid(double DB);
-static UINT32 Tempo2Mid(UINT8 TempoVal);
-static UINT8 PanBits2MidiPan(UINT8 Pan);
+static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay);
+static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay);
+static void FlushRunningNotes(FILE_INF* fInf, MID_TRK_STATE* MTS);
+static UINT8 WriteFileData(UINT32 dataLen, const UINT8* data, const char* fileName);
 
-static UINT16 ReadLE16(const UINT8* Data);
-static UINT32 ReadLE24(const UINT8* Data);
-static UINT32 ReadLE32(const UINT8* Data);
-static void WriteBE32(UINT8* Buffer, UINT32 Value);
-static void WriteBE16(UINT8* Buffer, UINT16 Value);
+static UINT16 ReadLE16(const UINT8* data);
+static UINT32 ReadLE24(const UINT8* data);
+static UINT32 ReadLE32(const UINT8* data);
 
 
 static UINT32 ROMLen;
@@ -76,45 +57,29 @@ static UINT8* MidData;
 #define MAX_RUN_NOTES	0x20	// should be more than enough even for the MIDI sequences
 static UINT8 RunNoteCnt;
 static RUN_NOTE RunNotes[MAX_RUN_NOTES];
-static UINT8 FixVolume;
 
 static UINT16 MIDI_RES = 48;
 static UINT16 NUM_LOOPS = 2;
 
 int main(int argc, char* argv[])
 {
+	int argbase;
 	FILE* hFile;
-	char* StrPtr;
 	UINT8 retVal;
 	
 	printf("FMP3 -> Midi Converter\n----------------------\n");
 	if (argc < 3)
 	{
-		printf("Usage: Fmp2Mid.exe Options input.bin output.mid\n");
-		printf("Options: (options can be combined, default setting is 'r')\n");
-		printf("    r   Raw conversion (other options are ignored)\n");
-		printf("    v   fix Volume (convert db levels to logarithmic MIDI, OPN(A) only)\n");
-		printf("Supported/verified games: V.G. II\n");
+		printf("Usage: Fmp2Mid.exe input.bin output.mid\n");
+		printf("Verified games: V.G. 1/2, Briganty, Steam-Heart's\n");
 		return 0;
 	}
 	
-	FixVolume = 0;
-	StrPtr = argv[1];
-	while(*StrPtr != '\0')
-	{
-		switch(toupper(*StrPtr))
-		{
-		case 'R':
-			FixVolume = 0;
-			break;
-		case 'V':
-			FixVolume = 1;
-			break;
-		}
-		StrPtr ++;
-	}
+	MidiDelayCallback = MidiDelayHandler;
 	
-	hFile = fopen(argv[2], "rb");
+	argbase = 1;
+	
+	hFile = fopen(argv[argbase + 0], "rb");
 	if (hFile == NULL)
 	{
 		printf("Error opening file!\n");
@@ -134,7 +99,7 @@ int main(int argc, char* argv[])
 	
 	retVal = Fmp2Mid(ROMLen, ROMData);
 	if (! retVal)
-		WriteFileData(MidLen, MidData, argv[3]);
+		WriteFileData(MidLen, MidData, argv[argbase + 1]);
 	free(MidData);	MidData = NULL;
 	
 	printf("Done.\n");
@@ -150,31 +115,32 @@ int main(int argc, char* argv[])
 
 UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 {
-	TRK_INFO TrkInf[20];
+	TRK_INFO trkInf[20];
 	
-	UINT8 TrkCnt;
-	UINT8 CurTrk;
-	UINT16 InPos;
-	FILE_INF MidFileInf;
+	UINT8 trkCnt;
+	UINT8 curTrk;
+	UINT16 inPos;
+	FILE_INF midFileInf;
 	MID_TRK_STATE MTS;
-	UINT8 TrkEnd;
-	UINT8 CurCmd;
+	UINT8 trkEnd;
+	UINT8 curCmd;
+	UINT8 LoopIdx;
+	UINT16 mstLoopCount;
+	UINT16 LoopCount[8];
+	UINT16 LoopPos[8];
 	
-	//UINT8 LoopIdx;
-	//UINT16 LoopCount[8];
-	//UINT16 LoopPos[8];
-	UINT16 MstLoopCount;
-	UINT16 MstLoopPos;
-	UINT32 TempLng;
-	//UINT16 TempSht;
-	UINT8 TempByt;
-	UINT8 CurNote;
-	UINT8 CurNoteLen;
+	UINT32 tempLng;
+	UINT16 tempSht;
+	UINT8 tempByt;
+	UINT8 tempArr[4];
 	
-	UINT32 SysExAlloc;
-	UINT32 SysExLen;
-	UINT8* SysExData;
-	UINT8 TempArr[0x04];
+	UINT8 curNote;
+	UINT8 curNoteLen;
+	UINT8 curNoteVol;
+	
+	UINT32 sysExAlloc;
+	UINT32 sysExLen;
+	UINT8* sysExData;
 	
 	if (SongData[0x00] != 0x02)
 	{
@@ -184,293 +150,280 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 		return 0x80;
 	}
 	
-	TrkCnt = 20;
+	trkCnt = 20;
 	
-	MidFileInf.Alloc = 0x20000;	// 128 KB should be enough
-	MidFileInf.Data = (UINT8*)malloc(MidFileInf.Alloc);
-	MidFileInf.Pos = 0x00;
-	SysExAlloc = 0x20;
-	SysExLen = 0x00;
-	SysExData = (UINT8*)malloc(SysExAlloc);
+	midFileInf.alloc = 0x20000;	// 128 KB should be enough
+	midFileInf.data = (UINT8*)malloc(midFileInf.alloc);
+	midFileInf.pos = 0x00;
+	sysExAlloc = 0x20;
+	sysExLen = 0x00;
+	sysExData = (UINT8*)malloc(sysExAlloc);
 	
-	WriteMidiHeader(&MidFileInf, 0x0001, TrkCnt, MIDI_RES);
+	WriteMidiHeader(&midFileInf, 0x0001, trkCnt, MIDI_RES);
 	
-	InPos = 0x04;
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++, InPos += 0x02)
-		TrkInf[CurTrk].StartOfs = ReadLE16(&SongData[InPos]);
+	inPos = 0x04;
+	for (curTrk = 0x00; curTrk < trkCnt; curTrk ++, inPos += 0x02)
+		trkInf[curTrk].StartOfs = ReadLE16(&SongData[inPos]);
 	
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
+	for (curTrk = 0x00; curTrk < trkCnt; curTrk ++)
 	{
-		InPos = TrkInf[CurTrk].StartOfs;
+		inPos = trkInf[curTrk].StartOfs;
 		
-		WriteMidiTrackStart(&MidFileInf, &MTS);
+		WriteMidiTrackStart(&midFileInf, &MTS);
 		
-		TrkEnd = 0;
-		//LoopIdx = 0x00;
-		MstLoopPos = 0x0000;
-		MstLoopCount = 0;
-		MTS.Flags = 0x00;
-		MTS.MidChn = CurTrk;
-		MTS.NoteVol = 0x7F;
-		MTS.NoteMove = 0;	// FM channel
-		MTS.PBRange = 0;
+		trkEnd = 0;
+		LoopIdx = 0x00;
+		mstLoopCount = 0;
+		MTS.midChn = curTrk;
+		curNoteVol = 0x7F;
 		RunNoteCnt = 0x00;
 		
-		while(! TrkEnd)
+		while(inPos < SongLen)
 		{
-			CurCmd = SongData[InPos];
-			if (CurCmd < 0x80)
+			curCmd = SongData[inPos];
+			if (curCmd < 0x80)
 			{
-				CurNoteLen = SongData[InPos + 0x01];
-				InPos += 0x02;
+				curNoteLen = SongData[inPos + 0x01];
+				inPos += 0x02;
 				
-				CurNote = CurCmd;
-				if (! (MTS.Flags & 0x01))
-					CurNote += MTS.NoteMove;
-				if (! CurNoteLen)	// length == 0 -> rest (confirmed with MIDI log of sound driver)
-					CurNote = 0xFF;
+				curNote = curCmd;
+				if (! curNoteLen)	// length == 0 -> rest (confirmed with MIDI log of sound driver)
+					curNote = 0xFF;
 				
-				WriteEvent(&MidFileInf, &MTS, 0x00, 0x00, 0x00);
-				
-				for (TempByt = 0x00; TempByt < RunNoteCnt; TempByt ++)
+				CheckRunningNotes(&midFileInf, &MTS.curDly);
+				for (tempByt = 0x00; tempByt < RunNoteCnt; tempByt ++)
 				{
-					if (RunNotes[TempByt].Note == CurNote)
+					if (RunNotes[tempByt].note == curNote)
 					{
-						RunNotes[TempByt].RemLen = (UINT16)MTS.CurDly + CurNoteLen;
+						RunNotes[tempByt].remLen = (UINT16)MTS.curDly + curNoteLen;
 						break;
 					}
 				}
-				if (TempByt >= RunNoteCnt && CurNote != 0xFF)
+				if (tempByt >= RunNoteCnt && curNote != 0xFF)
 				{
-					WriteEvent(&MidFileInf, &MTS, 0x90, CurNote, MTS.NoteVol);
+					WriteEvent(&midFileInf, &MTS, 0x90, curNote, curNoteVol);
 					if (RunNoteCnt < MAX_RUN_NOTES)
 					{
-						RunNotes[RunNoteCnt].MidChn = MTS.MidChn;
-						RunNotes[RunNoteCnt].Note = CurNote;
-						RunNotes[RunNoteCnt].RemLen = CurNoteLen;
+						RunNotes[RunNoteCnt].midChn = MTS.midChn;
+						RunNotes[RunNoteCnt].note = curNote;
+						RunNotes[RunNoteCnt].remLen = curNoteLen;
 						RunNoteCnt ++;
 					}
 				}
 			}
 			else
 			{
-				switch(CurCmd)
+				switch(curCmd)
 				{
 				case 0x80:	// Set Instrument
-					MTS.MidIns = SongData[InPos + 0x01];
-					WriteEvent(&MidFileInf, &MTS, 0xC0, MTS.MidIns, 0x00);
-					InPos += 0x02;
+					tempByt = SongData[inPos + 0x01];
+					WriteEvent(&midFileInf, &MTS, 0xC0, tempByt, 0x00);
+					inPos += 0x02;
 					break;
 				case 0x81:	// Set Volume
-					TempByt = SongData[InPos + 0x01];
-					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x07, TempByt);
-					InPos += 0x02;
+					tempByt = SongData[inPos + 0x01];
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					inPos += 0x02;
 					break;
-				case 0x83:	// Set Velocity
-					TempByt = SongData[InPos + 0x01];
-					MTS.NoteVol = TempByt;
-					InPos += 0x02;
+				case 0x82:	// Tempo
+					tempLng = ReadLE24(&SongData[inPos + 0x01]);
+					tempLng = (UINT32)((UINT64)500000 * tempLng / 0x32F000);
+					WriteBE32(tempArr, tempLng);
+					WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
+					inPos += 0x06;
+					break;
+				case 0x83:	// Set Note Velocity
+					tempByt = SongData[inPos + 0x01];
+					curNoteVol = tempByt;
+					inPos += 0x02;
+					break;
+				case 0x84:	// Set Modulation
+					tempByt = SongData[inPos + 0x01];
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x01, tempByt);
+					inPos += 0x02;
 					break;
 				case 0x85:	// Pitch Bend
-					WriteEvent(&MidFileInf, &MTS, 0xE0, SongData[InPos + 0x01], SongData[InPos + 0x02]);
-					InPos += 0x03;
+					WriteEvent(&midFileInf, &MTS, 0xE0, SongData[inPos + 0x01], SongData[inPos + 0x02]);
+					inPos += 0x03;
 					break;
-				case 0x8B:	// Set Pan
-					TempByt = SongData[InPos + 0x01];
-					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x0A, TempByt);
-					InPos += 0x02;
+				case 0x86:	// Sustain Pedal On
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x40, 0x40);	// value verified with MIDI log
+					inPos += 0x01;
 					break;
-				case 0x8C:	// Send SysEx Data
-					SysExData[0x00] = 0x41;			// Roland ID
-					for (SysExLen = 0x01; InPos + SysExLen < SongLen; SysExLen ++)
+				case 0x87:	// Sustain Pedal Off
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x40, 0x00);
+					inPos += 0x01;
+					break;
+				case 0x88:	// Loop Start
+					tempByt = SongData[inPos + 0x03];
+					inPos += 0x04;
+					
+					LoopPos[LoopIdx] = inPos;
+					LoopCount[LoopIdx] = tempByt;
+					if (LoopCount[LoopIdx] == 0x00)
 					{
-						if (SysExAlloc <= SysExLen)
-						{
-							SysExAlloc *= 2;
-							SysExData = (UINT8*)realloc(SysExData, SysExAlloc);
-						}
-						SysExData[SysExLen] = SongData[InPos + SysExLen];
-						if (SysExData[SysExLen] == 0xF7)
-							break;
+						mstLoopCount = 0;
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)mstLoopCount);
 					}
-					if (SysExData[SysExLen] == 0xF7)
-					{
-						SysExLen ++;	// count end SysEx End command
-						WriteLongEvent(&MidFileInf, &MTS, 0xF0, SysExLen, SysExData);
-					}
-					InPos += SysExLen;
+					LoopIdx ++;
 					break;
-				case 0x8E:	// set MIDI Channel
-					MTS.MidChn = SongData[InPos + 0x01] & 0x0F;
-					MTS.Flags |= 0x01;
-					MTS.NoteMove = 0;
-					MTS.PBRange = 0xFF;
-					InPos += 0x02;
-					break;
-				case 0x90:	// MIDI Controller
-					WriteEvent(&MidFileInf, &MTS, 0xB0, SongData[InPos + 0x01], SongData[InPos + 0x02]);
-					InPos += 0x03;
-					break;
-				case 0xB6:	// Tempo
-					TempLng = ReadLE24(&SongData[InPos + 0x03]);
-					TempLng = (UINT32)((UINT64)500000 * TempLng / 0x32F000);
-					WriteBE32(TempArr, TempLng);
-					WriteMetaEvent(&MidFileInf, &MTS, 0x51, 0x03, &TempArr[0x01]);
-					InPos += 0x08;
-					break;
-#if 0
-				case 0x9B:	// Loop End
+				case 0x89:	// Loop End
 					if (! LoopIdx)
 					{
 						printf("Warning: Loop End without Loop Start!\n");
-						TrkEnd = 1;
+						trkEnd = 1;
 						break;
 					}
+					inPos += 0x01;
+					
 					LoopIdx --;
-					LoopCount[LoopIdx] ++;
-					TempSht = SongData[InPos + 0x01];
-					if (! TempSht || TempSht >= 0xF0)	// infinite loop
+					if (! LoopCount[LoopIdx])
 					{
-						if (LoopCount[LoopIdx] <= 0x7F)
-							WriteEvent(&MidFileInf, &MTS, 0xB0, 0x6F, (UINT8)LoopCount[LoopIdx]);
-						TempSht = NUM_LOOPS;
-					}
-					if (LoopCount[LoopIdx] < TempSht)
-					{
-						// loop back
-						InPos = LoopPos[LoopIdx];
-						LoopIdx ++;
+						// master loop
+						mstLoopCount ++;
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)mstLoopCount);
+						if (mstLoopCount >= NUM_LOOPS)
+							break;
 					}
 					else
 					{
-						// finish loop
-						InPos += 0x02;
+						LoopCount[LoopIdx] --;
+						if (! LoopCount[LoopIdx])
+							break;
 					}
-					break;
-				case 0x9C:	// Loop Start
-					if (InPos == TrkInf[CurTrk].LoopOfs)
-						WriteEvent(&MidFileInf, &MTS, 0xB0, 0x6F, 0);
-					InPos += 0x01;
-					LoopPos[LoopIdx] = InPos;
-					LoopCount[LoopIdx] = 0;
+					// loop back
+					inPos = LoopPos[LoopIdx];
 					LoopIdx ++;
 					break;
-				case 0x9D:	// Detune
-					TempSht = (INT8)SongData[InPos + 0x01];
-					TempSht *= 8;
-					TempSht += 0x2000;
-					WriteEvent(&MidFileInf, &MTS, 0xE0, TempSht & 0x7F, TempSht >> 7);
-					InPos += 0x02;
+				case 0x8B:	// Set Pan
+					tempByt = SongData[inPos + 0x01];
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, tempByt);
+					inPos += 0x02;
 					break;
-				case 0xA5:	// unknown
-					printf("Ignored unknown event %02X on track %X at %04X\n", SongData[InPos + 0x00], CurTrk, InPos);
-					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
-					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x06, SongData[InPos + 0x01]);
-					InPos += 0x02;
-					break;
-				case 0xE7:	// unknown (doesn't result in a MIDI event)
-					printf("Ignored unknown event %02X on track %X at %04X\n", SongData[InPos + 0x00], CurTrk, InPos);
-					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x03, SongData[InPos + 0x02]);
-					MTS.CurDly += SongData[InPos + 0x01];
-					InPos += 0x04;
-					break;
-#endif
-				case 0xFF:	// Track End
-					if (! MstLoopPos)
+				case 0x8C:	// Send SysEx Data
+					sysExData[0x00] = 0x41;			// Roland ID
+					for (sysExLen = 0x01; inPos + sysExLen < SongLen; sysExLen ++)
 					{
-						// detect pattern for non-looping tracks
-						if ((SongData[InPos + 0x01] == 0x01 && SongData[InPos + 0x02] == 0xFF) ||
-							InPos + 0x03 >= SongLen)
+						if (sysExAlloc <= sysExLen)
 						{
-							TrkEnd = 1;
-							break;
+							sysExAlloc *= 2;
+							sysExData = (UINT8*)realloc(sysExData, sysExAlloc);
 						}
-						MstLoopPos = InPos;
+						sysExData[sysExLen] = SongData[inPos + sysExLen];
+						if (sysExData[sysExLen] == 0xF7)
+							break;
 					}
-					else
+					if (sysExData[sysExLen] == 0xF7)
 					{
-						InPos = MstLoopPos;
+						sysExLen ++;	// count end SysEx End command
+						WriteLongEvent(&midFileInf, &MTS, 0xF0, sysExLen, sysExData);
 					}
-					
-					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x6F, (UINT8)MstLoopCount);
-					if (MstLoopCount >= NUM_LOOPS)
-						TrkEnd = 1;
-					InPos += 0x01;
+					inPos += sysExLen;
+					break;
+				case 0x8E:	// set MIDI Channel
+					MTS.midChn = SongData[inPos + 0x01] & 0x0F;
+					inPos += 0x02;
+					break;
+				case 0x8F:	// Set Expression
+					tempByt = SongData[inPos + 0x01];
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x0B, tempByt);
+					inPos += 0x02;
+					break;
+				case 0x90:	// MIDI Controller
+					WriteEvent(&midFileInf, &MTS, 0xB0, SongData[inPos + 0x01], SongData[inPos + 0x02]);
+					inPos += 0x03;
+					break;
+				case 0xA1:
+					printf("Unknown event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
+					inPos += 0x03;
+					break;
+				case 0xB6:	// Tempo/Timing?
+					// TODO: read [inPos + 0x02] to get actual base timing
+					tempLng = ReadLE24(&SongData[inPos + 0x03]);
+					tempLng = (UINT32)((UINT64)500000 * tempLng / 0x32F000);
+					WriteBE32(tempArr, tempLng);
+					WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
+					inPos += 0x08;
+					break;
+				case 0xB7:	// ?Timing related? (set OPN Timer A?)
+					inPos += 0x04;
+					break;
+				case 0xFF:	// Track End
+					trkEnd = 1;
+					inPos += 0x01;
 					break;
 				default:
-					printf("Unknown event %02X on track %X at %04X\n", SongData[InPos + 0x00], CurTrk, InPos);
-					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x6E, CurCmd & 0x7F);
-					InPos += 0x01;
-					TrkEnd = 1;
+					printf("Unknown event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
+					inPos += 0x01;
+					trkEnd = 1;
 					break;
 				}
 			}
+			if (trkEnd)
+				break;
 			
-			TempByt = SongData[InPos];	InPos ++;
-			MTS.CurDly += TempByt;
+			tempByt = SongData[inPos];	inPos ++;
+			MTS.curDly += tempByt;
 		}
-		for (TempByt = 0x00; TempByt < RunNoteCnt; TempByt ++)
-		{
-			if (RunNotes[TempByt].RemLen > MTS.CurDly)
-				MTS.CurDly = RunNotes[TempByt].RemLen;
-		}
-		WriteEvent(&MidFileInf, &MTS, 0x7F, 0x00, 0x00);	// flush all notes
+		FlushRunningNotes(&midFileInf, &MTS);
 		
-		WriteEvent(&MidFileInf, &MTS, 0xFF, 0x2F, 0x00);
+		WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
 		
-		WriteMidiTrackEnd(&MidFileInf, &MTS);
+		WriteMidiTrackEnd(&midFileInf, &MTS);
 	}
-	MidData = MidFileInf.Data;
-	MidLen = MidFileInf.Pos;
+	MidData = midFileInf.data;
+	MidLen = midFileInf.pos;
 	
-	free(SysExData);	SysExData = NULL;
+	free(sysExData);	sysExData = NULL;
 	
 	return 0x00;
 }
 
-static void CheckRunningNotes(FILE_INF* fInf, UINT32* Delay)
+static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay)
 {
-	UINT8 CurNote;
-	UINT32 TempDly;
-	RUN_NOTE* TempNote;
+	UINT8 curNote;
+	UINT32 tempDly;
+	RUN_NOTE* tempNote;
 	
 	while(RunNoteCnt)
 	{
 		// 1. Check if we're going beyond a note's timeout.
-		TempDly = *Delay + 1;
-		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
+		tempDly = *delay + 1;
+		for (curNote = 0x00; curNote < RunNoteCnt; curNote ++)
 		{
-			TempNote = &RunNotes[CurNote];
-			if (TempNote->RemLen < TempDly)
-				TempDly = TempNote->RemLen;
+			tempNote = &RunNotes[curNote];
+			if (tempNote->remLen < tempDly)
+				tempDly = tempNote->remLen;
 		}
-		if (TempDly > *Delay)
+		if (tempDly > *delay)
 			break;	// not beyond the timeout - do the event
 		
 		// 2. advance all notes by X ticks
-		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
-			RunNotes[CurNote].RemLen -= (UINT16)TempDly;
-		(*Delay) -= TempDly;
+		for (curNote = 0x00; curNote < RunNoteCnt; curNote ++)
+			RunNotes[curNote].remLen -= (UINT16)tempDly;
+		(*delay) -= tempDly;
 		
 		// 3. send NoteOff for expired notes
-		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
+		for (curNote = 0x00; curNote < RunNoteCnt; curNote ++)
 		{
-			TempNote = &RunNotes[CurNote];
-			if (! TempNote->RemLen)	// turn note off, it going beyond the Timeout
+			tempNote = &RunNotes[curNote];
+			if (! tempNote->remLen)	// turn note off, it going beyond the Timeout
 			{
-				WriteMidiValue(fInf, TempDly);
-				TempDly = 0;
+				WriteMidiValue(fInf, tempDly);
+				tempDly = 0;
 				
 				File_CheckRealloc(fInf, 0x03);
-				fInf->Data[fInf->Pos + 0x00] = 0x90 | TempNote->MidChn;
-				fInf->Data[fInf->Pos + 0x01] = TempNote->Note;
-				fInf->Data[fInf->Pos + 0x02] = 0x00;
-				fInf->Pos += 0x03;
+				fInf->data[fInf->pos + 0x00] = 0x90 | tempNote->midChn;
+				fInf->data[fInf->pos + 0x01] = tempNote->note;
+				fInf->data[fInf->pos + 0x02] = 0x00;
+				fInf->pos += 0x03;
 				
 				RunNoteCnt --;
 				if (RunNoteCnt)
-					*TempNote = RunNotes[RunNoteCnt];
-				CurNote --;
+					*tempNote = RunNotes[RunNoteCnt];
+				curNote --;
 			}
 		}
 	}
@@ -478,273 +431,64 @@ static void CheckRunningNotes(FILE_INF* fInf, UINT32* Delay)
 	return;
 }
 
-static void WriteMidiDelay(FILE_INF* fInf, UINT32* Delay)
+static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay)
 {
-	CheckRunningNotes(fInf, Delay);
-	
-	WriteMidiValue(fInf, *Delay);
-	if (*Delay)
+	CheckRunningNotes(fInf, delay);
+	if (*delay)
 	{
-		UINT8 CurNote;
+		UINT8 curNote;
 		
-		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
-			RunNotes[CurNote].RemLen -= (UINT16)*Delay;
-		*Delay = 0x00;
+		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
+			RunNotes[curNote].remLen -= (UINT16)*delay;
 	}
 	
-	return;
+	return 0x00;
 }
 
-static void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 Evt, UINT8 Val1, UINT8 Val2)
+static void FlushRunningNotes(FILE_INF* fInf, MID_TRK_STATE* MTS)
 {
-	if (! (Evt & 0x80))
+	UINT8 curNote;
+	
+	for (curNote = 0x00; curNote < RunNoteCnt; curNote ++)
 	{
-		CheckRunningNotes(fInf, &MTS->CurDly);
-		return;
+		if (RunNotes[curNote].remLen > MTS->curDly)
+			MTS->curDly = RunNotes[curNote].remLen;
 	}
-	
-	WriteMidiDelay(fInf, &MTS->CurDly);
-	
-	File_CheckRealloc(fInf, 0x03);
-	switch(Evt & 0xF0)
-	{
-	case 0x80:
-	case 0x90:
-	case 0xA0:
-	case 0xB0:
-	case 0xE0:
-		fInf->Data[fInf->Pos + 0x00] = Evt | MTS->MidChn;
-		fInf->Data[fInf->Pos + 0x01] = Val1;
-		fInf->Data[fInf->Pos + 0x02] = Val2;
-		fInf->Pos += 0x03;
-		break;
-	case 0xC0:
-	case 0xD0:
-		fInf->Data[fInf->Pos + 0x00] = Evt | MTS->MidChn;
-		fInf->Data[fInf->Pos + 0x01] = Val1;
-		fInf->Pos += 0x02;
-		break;
-	case 0xF0:	// for Meta Event: Track End
-		fInf->Data[fInf->Pos + 0x00] = Evt;
-		fInf->Data[fInf->Pos + 0x01] = Val1;
-		fInf->Data[fInf->Pos + 0x02] = Val2;
-		fInf->Pos += 0x03;
-		break;
-	default:
-		break;
-	}
+	CheckRunningNotes(fInf, &MTS->curDly);
 	
 	return;
 }
 
-static void WriteLongEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 Evt, UINT32 DataLen, const UINT8* Data)
-{
-	WriteMidiDelay(fInf, &MTS->CurDly);
-	
-	File_CheckRealloc(fInf, 0x01 + 0x04 + DataLen);	// worst case: 4 bytes of data length
-	fInf->Data[fInf->Pos + 0x00] = Evt;
-	fInf->Pos += 0x01;
-	WriteMidiValue(fInf, DataLen);
-	memcpy(&fInf->Data[fInf->Pos], Data, DataLen);
-	fInf->Pos += DataLen;
-	
-	return;
-}
-
-static void WriteMetaEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 MetaType, UINT32 DataLen, const UINT8* Data)
-{
-	WriteMidiDelay(fInf, &MTS->CurDly);
-	
-	File_CheckRealloc(fInf, 0x02 + 0x05 + DataLen);	// worst case: 5 bytes of data length
-	fInf->Data[fInf->Pos + 0x00] = 0xFF;
-	fInf->Data[fInf->Pos + 0x01] = MetaType;
-	fInf->Pos += 0x02;
-	WriteMidiValue(fInf, DataLen);
-	memcpy(&fInf->Data[fInf->Pos], Data, DataLen);
-	fInf->Pos += DataLen;
-	
-	return;
-}
-
-static void WriteMidiValue(FILE_INF* fInf, UINT32 Value)
-{
-	UINT8 ValSize;
-	UINT8* ValData;
-	UINT32 TempLng;
-	UINT32 CurPos;
-	
-	ValSize = 0x00;
-	TempLng = Value;
-	do
-	{
-		TempLng >>= 7;
-		ValSize ++;
-	} while(TempLng);
-	
-	File_CheckRealloc(fInf, ValSize);
-	ValData = &fInf->Data[fInf->Pos];
-	CurPos = ValSize;
-	TempLng = Value;
-	do
-	{
-		CurPos --;
-		ValData[CurPos] = 0x80 | (TempLng & 0x7F);
-		TempLng >>= 7;
-	} while(TempLng);
-	ValData[ValSize - 1] &= 0x7F;
-	
-	fInf->Pos += ValSize;
-	
-	return;
-}
-
-static void File_CheckRealloc(FILE_INF* FileInf, UINT32 BytesNeeded)
-{
-#define REALLOC_STEP	0x8000	// 32 KB block
-	UINT32 MinPos;
-	
-	MinPos = FileInf->Pos + BytesNeeded;
-	if (MinPos <= FileInf->Alloc)
-		return;
-	
-	while(MinPos > FileInf->Alloc)
-		FileInf->Alloc += REALLOC_STEP;
-	FileInf->Data = (UINT8*)realloc(FileInf->Data, FileInf->Alloc);
-	
-	return;
-}
-
-static void WriteMidiHeader(FILE_INF* fInf, UINT16 Format, UINT16 Tracks, UINT16 Resolution)
-{
-	File_CheckRealloc(fInf, 0x08 + 0x06);
-	
-	WriteBE32(&fInf->Data[fInf->Pos + 0x00], 0x4D546864);	// write 'MThd'
-	WriteBE32(&fInf->Data[fInf->Pos + 0x04], 0x00000006);	// Header Length
-	fInf->Pos += 0x08;
-	
-	WriteBE16(&fInf->Data[fInf->Pos + 0x00], Format);		// MIDI Format (0/1/2)
-	WriteBE16(&fInf->Data[fInf->Pos + 0x02], Tracks);		// number of tracks
-	WriteBE16(&fInf->Data[fInf->Pos + 0x04], Resolution);	// Ticks per Quarter
-	fInf->Pos += 0x06;
-	
-	return;
-}
-
-static void WriteMidiTrackStart(FILE_INF* fInf, MID_TRK_STATE* MTS)
-{
-	File_CheckRealloc(fInf, 0x08);
-	
-	WriteBE32(&fInf->Data[fInf->Pos + 0x00], 0x4D54726B);	// write 'MTrk'
-	WriteBE32(&fInf->Data[fInf->Pos + 0x04], 0x00000000);	// write dummy length
-	fInf->Pos += 0x08;
-	
-	MTS->TrkBase = fInf->Pos;
-	MTS->CurDly = 0;
-	
-	return;
-}
-
-static void WriteMidiTrackEnd(FILE_INF* fInf, MID_TRK_STATE* MTS)
-{
-	UINT32 TrkLen;
-	
-	TrkLen = fInf->Pos - MTS->TrkBase;
-	WriteBE32(&fInf->Data[MTS->TrkBase - 0x04], TrkLen);	// write Track Length
-	
-	return;
-}
-
-static UINT8 WriteFileData(UINT32 DataLen, const UINT8* Data, const char* FileName)
+static UINT8 WriteFileData(UINT32 dataLen, const UINT8* data, const char* fileName)
 {
 	FILE* hFile;
 	
-	hFile = fopen(FileName, "wb");
+	hFile = fopen(fileName, "wb");
 	if (hFile == NULL)
 	{
-		printf("Error opening %s!\n", FileName);
+		printf("Error opening %s!\n", fileName);
 		return 0xFF;
 	}
 	
-	fwrite(Data, 0x01, DataLen, hFile);
+	fwrite(data, 0x01, dataLen, hFile);
 	fclose(hFile);
 	
 	return 0;
 }
 
-static double OPN2DB(UINT8 TL)
+
+static UINT16 ReadLE16(const UINT8* data)
 {
-	return -(TL * 3 / 4.0f);
+	return (data[0x01] << 8) | (data[0x00] << 0);
 }
 
-static UINT8 DB2Mid(double DB)
+static UINT32 ReadLE24(const UINT8* data)
 {
-	return (UINT8)(pow(10.0, DB / 40.0) * 0x7F + 0.5);
+	return (data[0x02] << 16) | (data[0x01] <<  8) | (data[0x00] <<  0);
 }
 
-static UINT32 Tempo2Mid(UINT8 TempoVal)
+static UINT32 ReadLE32(const UINT8* data)
 {
-	// Note: The tempo value is the value of YM Timer B.
-	// higher value = higher tick frequency = higher tempo
-	
-	// Base Clock = 2 MHz
-	// Prescaler: 6 * 12
-	// internal Timer Countdown: (100h - value) * 10h
-	// Timer Frequency: Clock / (Countdown * Prescaler)
-	double TicksPerSec;
-	UINT16 TmrVal;
-	
-	TmrVal = (0x100 - TempoVal) << 4;
-	TicksPerSec = 2000000.0 / (6 * 12 * TmrVal);
-	return (UINT32)(500000 * MIDI_RES / TicksPerSec/4 + 0.5);
-}
-
-static UINT8 PanBits2MidiPan(UINT8 Pan)
-{
-	switch(Pan & 0x03)
-	{
-	case 0x00:	// no sound
-		return 0x3F;
-	case 0x01:	// Right Channel
-		return 0x7F;
-	case 0x02:	// Left Channel
-		return 0x00;
-	case 0x03:	// Center
-		return 0x40;
-	}
-	return 0x3F;
-}
-
-
-static UINT16 ReadLE16(const UINT8* Data)
-{
-	return (Data[0x01] << 8) | (Data[0x00] << 0);
-}
-
-static UINT32 ReadLE24(const UINT8* Data)
-{
-	return (Data[0x02] << 16) | (Data[0x01] <<  8) | (Data[0x00] <<  0);
-}
-
-static UINT32 ReadLE32(const UINT8* Data)
-{
-	return	(Data[0x03] << 24) | (Data[0x02] << 16) |
-			(Data[0x01] <<  8) | (Data[0x00] <<  0);
-}
-
-static void WriteBE32(UINT8* Buffer, UINT32 Value)
-{
-	Buffer[0x00] = (Value & 0xFF000000) >> 24;
-	Buffer[0x01] = (Value & 0x00FF0000) >> 16;
-	Buffer[0x02] = (Value & 0x0000FF00) >>  8;
-	Buffer[0x03] = (Value & 0x000000FF) >>  0;
-	
-	return;
-}
-
-static void WriteBE16(UINT8* Buffer, UINT16 Value)
-{
-	Buffer[0x00] = (Value & 0xFF00) >> 8;
-	Buffer[0x01] = (Value & 0x00FF) >> 0;
-	
-	return;
+	return	(data[0x03] << 24) | (data[0x02] << 16) |
+			(data[0x01] <<  8) | (data[0x00] <<  0);
 }

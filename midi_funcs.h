@@ -3,11 +3,14 @@
 // written by Valley Bell
 // to be included as header file
 
+// Note: MidiDelayCallback can be used to inject additional events.
+//       IMPORTANT: You must not call any of the Write*Event() functions or
+//       WriteMidiDelay() within this function.
+
 #include <stdlib.h>
 #include <string.h>
 
 #include <stdtype.h>
-
 
 typedef struct _midi_track_state
 {
@@ -42,8 +45,15 @@ INLINE void WriteBE32(UINT8* buffer, UINT32 value);
 INLINE void WriteBE16(UINT8* buffer, UINT16 value);
 
 
+// optional callback for injecting raw data before writing delays
+// Returning nonzero makes it skip writing the delay.
+static UINT8 (*MidiDelayCallback)(FILE_INF* fInf, UINT32* delay) = NULL;
+
 static void WriteMidiDelay(FILE_INF* fInf, UINT32* delay)
 {
+	if (MidiDelayCallback != NULL && MidiDelayCallback(fInf, delay))
+		return;
+	
 	WriteMidiValue(fInf, *delay);
 	*delay = 0;
 	
