@@ -59,6 +59,7 @@ Private SurpressDbgCtrls As Boolean
 Sub Main()
 
     Dim FilePath As String
+    Dim FileFilter As String
     Dim FileName As String
     Dim FileCount As Long
     'Dim FileType As Byte
@@ -86,7 +87,25 @@ Sub Main()
     'FileList(&H16) = "401 Mods de Chocobo.minipsf"
     'FileList(&H20) = "205 Battle Scene 1.psf"
     'FileList(&H21) = "bFF2_223.bin"
-    FilePath = "D:\VStudio-Programme\VBasic\PSFCnv\FF9\"
+    'FilePath = "D:\VStudio-Programme\VBasic\PSFCnv\FF9\"
+    FileName = Command$()
+    If FileName = "" Then
+        MsgBox "Usage:" & vbNewLine & _
+            "akao2mid.exe ""in.ako""" & vbNewLine & _
+            "akao2mid.exe ""Path\*.ako""" & vbNewLine & _
+            "Use at your own risk. -Valley Bell"
+        Exit Sub
+    End If
+    If Left$(FileName, 1) = """" Then
+        FileName = Mid$(FileName, 2)
+    End If
+    If Right$(FileName, 1) = """" Then
+        FileName = Left$(FileName, Len(FileName) - 1)
+    End If
+    
+    TempLng = InStrRev(FileName, "\")
+    FilePath = Left$(FileName, TempLng)
+    FileFilter = Mid$(FileName, TempLng + 1)
     
     'FixMidi = True
     SurpressDbgCtrls = True 'False
@@ -94,7 +113,7 @@ Sub Main()
     'TempLng = &H4
     
     'Exit Sub
-    FileName = Dir(FilePath & "305*.ako")
+    FileName = Dir(FilePath & FileFilter)
     FileCount = &H0
     Do Until FileName = ""
         FileList(FileCount) = FileName
@@ -103,14 +122,19 @@ Sub Main()
         FileName = Dir()
     Loop
     
+    Dim ConvCount As Long
+    ConvCount = 0
     For TempLng = &H0 To FileCount - 1
         FileName = FilePath & FileList(TempLng)
-        Call ConvertAkao(FileName)
+        ConvCount = ConvCount + ConvertAkao(FileName)
     Next TempLng
+    
+    MsgBox "Input files: " & Format$(FileCount) & vbNewLine & _
+            "Successful: " & Format$(ConvCount)
 
 End Sub
 
-Private Sub ConvertAkao(ByVal FileName As String)
+Private Function ConvertAkao(ByVal FileName As String) As Long
 
     Dim FilePath As String
     Dim MidAllCnt As Long
@@ -125,7 +149,8 @@ Private Sub ConvertAkao(ByVal FileName As String)
     
     If Dir(FilePath & FileName, vbHidden) = "" Then
         Debug.Print "File not found!"
-        Exit Sub
+        ConvertAkao = 0
+        Exit Function
     End If
     
     Debug.Print "Loading " & FileName & "...";
@@ -183,8 +208,9 @@ Private Sub ConvertAkao(ByVal FileName As String)
     
     Debug.Print Format$(MidAllCnt) & " File" & IIf(MidAllCnt = 1, "", "s") & _
                 " saved."
+    ConvertAkao = IIf(MidAllCnt >= 1, 1, 0)
 
-End Sub
+End Function
 
 Private Function Akao2MidConversion(ByRef PosStart As Long) As Long
 
@@ -218,6 +244,7 @@ Private Function Akao2MidConversion(ByRef PosStart As Long) As Long
     Dim NoteVal As Byte
     Dim NextDelay As Byte
     Dim NextNote As Integer
+    Dim DelayOverride As Long
     Dim CommonCmd As Boolean
     Dim MstJmpCnt As Long
     Dim MidiChn As Byte
@@ -231,6 +258,8 @@ Private Function Akao2MidConversion(ByRef PosStart As Long) As Long
     Dim VolFadeTo As Long
     Dim LastNoteVol As Byte
     Dim NoteVol As Byte
+    
+    Dim HadDlyOvr As Boolean
     
     MidiLen = &H40000
     ReDim MidiFile(&H0 To MidiLen - 1)
@@ -398,6 +427,7 @@ Private Function Akao2MidConversion(ByRef PosStart As Long) As Long
     WholeDelay = &H60 * 4
     MidiPos = &HE
     
+    HadDlyOvr = False
     For CurChn = &H0 To ChnCount - 1
         'CurChn = 2
         Call CopyMemory(MidiFile(MidiPos + &H0), &H6B72544D, &H4)
@@ -423,7 +453,8 @@ Private Function Akao2MidConversion(ByRef PosStart As Long) As Long
         
         MidiChn = CurChn And &HF
         If MidiChn = &H9 Then MidiChn = &HF
-        MidiDelay = WholeDelay  ' 4 Quarters Delay
+        'MidiDelay = WholeDelay  ' 4 Quarters Delay
+        MidiDelay = 0
         DelayPos = 0
         LastNote = &H0
         CurOctave = &H0
@@ -432,7 +463,9 @@ Private Function Akao2MidConversion(ByRef PosStart As Long) As Long
         OctBakD = &H0
         ChnVol = &H7F
         NextDelay = &H0
+        DelayOverride = 0
         NextNote = 0
+        NoteVol = 100
         LastNoteVol = &HFF
         VolFadeDelay = &H0
         LoopIdx = &H0
@@ -504,6 +537,8 @@ DoCommand:
                     TempLng = TempLng * 1.5
                 ElseIf NextDelay = &H2 Then
                     TempLng = TempLng * 2
+                ElseIf NextDelay = &H3 Then
+                    TempLng = DelayOverride
                 ElseIf NextDelay = &HFF Then
                     TempLng = &H0
                 End If
@@ -571,25 +606,34 @@ DoCommand:
                         Debug.Print "High Instrument Value: " & Hex$(TempByt)
                     End If
                     CurPos = CurPos + &H2
-                Case &HA2
-                    If TempByt = &H1 Or TempByt = &H4 Or TempByt = &H2 Then
-                        ' fixes "Electric de Chocobo", "Interrupted by Fireworks"
-                        ' but breaks JENOVA
-                        ' ... don't know why I have to skip this byte
-                        CurPos = CurPos + &H3
-                    ElseIf TempByt = &H5 Then
-                        NextDelay = &H2
-                        CurPos = CurPos + &H2
-                    Else
-                        CurPos = CurPos + &H2
+                Case &HA2   ' "set next note length" according to VGMTrans
+                    'If TempByt = &H1 Or TempByt = &H4 Or TempByt = &H2 Then
+                    '    ' fixes "Electric de Chocobo", "Interrupted by Fireworks"
+                    '    ' but breaks JENOVA
+                    '    ' ... don't know why I have to skip this byte
+                    '    CurPos = CurPos + &H3
+                    'ElseIf TempByt = &H5 Then
+                    '    NextDelay = &H2
+                    '    CurPos = CurPos + &H2
+                    'Else
+                    '    CurPos = CurPos + &H2
+                    'End If
+                    ' This ... seems to look good!
+                    NextDelay = &H3
+                    DelayOverride = (WholeDelay / 192) * TempByt
+                    CurPos = CurPos + &H2
+                    'If Not SurpressDbgCtrls Then
+                    '    MidCmd = &HB0 Or MidiChn
+                    '    Call WriteMidiCommand(MidCmd, &H71, CmdVal And &H7F)
+                    '    Call WriteMidiCommand(MidCmd, &H6, TempByt And &H7F)
+                    'End If
+                    'Call WriteMidiCommand(&HD0 Or MidiChn, &H6, TempByt And &H7F)
+                    If Not HadDlyOvr Then
+                        HadDlyOvr = True
+                        Debug.Print "Used flag A2"
                     End If
-                    If Not SurpressDbgCtrls Then
-                        MidCmd = &HB0 Or MidiChn
-                        Call WriteMidiCommand(MidCmd, &H71, CmdVal And &H7F)
-                        Call WriteMidiCommand(MidCmd, &H6, TempByt And &H7F)
-                    End If
-                'Case &HA3   ' Volume Modifier
-                Case &HA8   ' Volume Modifier
+                Case &HA3   ' Volume Modifier
+                'Case &HA8   ' Volume Modifier
                     NoteVol = TempByt
                     If NoteVol = &H0 Then NoteVol = &H1
                     'MidCmd = &HB0 Or MidiChn
@@ -614,7 +658,7 @@ DoCommand:
                     If LastNote Then
                         MidCmd = &H90 Or MidiChn
                         Call WriteMidiCommand(MidCmd, LastNote, &H0)
-                        Call WriteMidiCommand(MidCmd, NoteVal, &H7F)
+                        Call WriteMidiCommand(MidCmd, NoteVal, NoteVol)
                         LastNote = NoteVal
                     End If
                     CurPos = CurPos + &H3
@@ -629,10 +673,12 @@ DoCommand:
                     If CurOctave > 8 Then Stop
                     CurPos = CurPos + &H1
                 Case &HA7   ' Octave Down
+                    If CurOctave > 0 Then
                     CurOctave = CurOctave - 1
+                    End If
                     CurPos = CurPos + &H1
-                'Case &HA8   ' Channel Volume
-                Case &HA3   ' Channel Volume
+                Case &HA8   ' Channel Volume
+                'Case &HA3   ' Channel Volume
                     'TempByt = Int(TempByt / &H2) + &H40
                     'MidCmd = &HB0 Or MidiChn
                     'Call WriteMidiCommand(MidCmd, &HB, TempByt)
