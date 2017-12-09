@@ -42,10 +42,11 @@ typedef struct file_information
 } FILE_INF;
 
 #pragma pack(1)
-#define INSTYPE_FM			0x00
-#define INSTYPE_DAC			0x01
-#define INSTYPE_PSG_TONE	0x02
-#define INSTYPE_PSG_NOISE	0x03
+#define INSTYPE_FM			 0
+#define INSTYPE_DAC			 1
+#define INSTYPE_PSG_TONE	 2
+#define INSTYPE_PSG_NOISE	 3
+#define INSTYPE_DUMMY		99
 typedef struct instrument_data
 {
 	UINT8 InsType;
@@ -103,6 +104,8 @@ INS_DATA InsData[0x80];
 
 UINT8 DacCount;
 DAC_DATA DacData[0x80];
+
+static UINT8 NUM_LOOPS = 2;
 
 int main(int argc, char* argv[])
 {
@@ -394,6 +397,9 @@ UINT8 LoadInsData(const char* FileName)
 			// 6 bytes - the first byte is the Noise type
 			TempIns->DataLen = 0x06;
 			break;
+		case INSTYPE_DUMMY:
+			TempIns->DataLen = 0x00;
+			break;
 		default:
 			printf("Warning: Instrument %02X uses an unknown instrument type: %02X!\n",
 					CurIns, TempIns->InsType);
@@ -429,8 +435,10 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 	UINT32 LoopAddr[0x10];
 	UINT8 LoopCur[0x10];
 	UINT8 TempArr[0x04];
+	UINT8 JumpCount;
 	UINT32 TempLng;
 	UINT16 TempSht;
+	INT16 TempOfs;
 	UINT8 TempByt;
 	UINT32 CurDly;
 	UINT8 NoteVol;
@@ -491,6 +499,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 		
 		TrkEnd = false;
 		LoopID = 0xFF;
+		JumpCount = 0;
 		WrotePBDepth = false;
 		
 		// This is a nice formula, that skips the drum channel 9.
@@ -655,7 +664,7 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					{
 						WriteEvent(&MidFileInf, &CurDly,
 									0xB0 | MidChn, 0x6F, LoopCur[LoopID]);
-						if (LoopCur[LoopID] >= 0x02)
+						if (LoopCur[LoopID] >= NUM_LOOPS)
 						{
 							LoopCur[LoopID] = LoopCount[LoopID];
 							TrkEnd = true;
@@ -664,18 +673,9 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					ProcDelay = false;
 					
 					if (LoopCur[LoopID] <= LoopCount[LoopID])
-					{
 						InPos = LoopAddr[LoopID];
-						if (InPos >= GemsLen)
-						{
-							printf("Loop-Jumping to invalid offset %04X!\n", InPos);
-							*((char*)NULL) = 'x';
-						}
-					}
 					else
-					{
 						LoopID --;
-					}
 					break;
 				case 0x66:	// Toggle retrigger mode. [gemsretrigenv]
 					WriteEvent(&MidFileInf, &CurDly,
@@ -725,8 +725,8 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					}
 					
 					// Note: ~256 = 1 semitone
-					TempSht = ReadLE16(&GemsData[InPos]);
-					TempSht = 0x2000 + (TempSht * 2);
+					TempOfs = (INT16)ReadLE16(&GemsData[InPos]);
+					TempSht = 0x2000 + (TempOfs * 2);
 					WriteEvent(&MidFileInf, &CurDly,
 								0xE0 | MidChn, TempSht & 0x7F, (TempSht >> 7) & 0x7F);
 					InPos += 0x02;
@@ -747,15 +747,24 @@ UINT8 Gems2Mid(UINT32 GemsLen, UINT8* GemsData, UINT16 GemsAddr/*, UINT32* OutLe
 					InPos += 0x01;
 					break;
 				case 0x6F:	// Jump
-					TempSht = ReadLE16(&GemsData[InPos]);
+					TempLng = InPos;
+					TempOfs = (INT16)ReadLE16(&GemsData[InPos]);
 					ProcDelay = false;
-					//InPos += 0x02;
+					InPos += 0x02;
 					
-					InPos = TempSht;
+					if (TempOfs < 0)
+					{
+						JumpCount ++;
+						WriteEvent(&MidFileInf, &CurDly,
+									0xB0 | MidChn, 0x6F, JumpCount);
+						if (JumpCount >= NUM_LOOPS)
+							break;
+					}
+					InPos += TempOfs;
 					if (InPos >= GemsLen)
 					{
-						printf("Jumping to invalid offset %04X!\n", InPos);
-						*((char*)NULL) = 'x';
+						printf("Track %u, Pos 0x%04: Jumping to invalid offset %04X!\n", CurTrk, TempLng, InPos);
+						TrkEnd = true;
 					}
 					break;
 				case 0x70:	// Store Value
