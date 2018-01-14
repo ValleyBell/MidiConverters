@@ -35,10 +35,16 @@ typedef struct running_note
 typedef struct _track_info
 {
 	UINT16 StartOfs;
+	UINT16 LoopOfs;
+	UINT32 TickCnt;
+	UINT32 LoopTick;
+	UINT16 LoopTimes;
 } TRK_INFO;
 
 
 UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData);
+static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf);
+static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf);
 static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay);
 static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay);
 static void FlushRunningNotes(FILE_INF* fInf, MID_TRK_STATE* MTS);
@@ -60,6 +66,7 @@ static RUN_NOTE RunNotes[MAX_RUN_NOTES];
 
 static UINT16 MIDI_RES = 48;
 static UINT16 NUM_LOOPS = 2;
+static UINT8 NO_LOOP_EXT = 0;
 
 int main(int argc, char* argv[])
 {
@@ -78,6 +85,29 @@ int main(int argc, char* argv[])
 	MidiDelayCallback = MidiDelayHandler;
 	
 	argbase = 1;
+	while(argbase < argc && argv[argbase][0] == '-')
+	{
+		if (! _stricmp(argv[argbase] + 1, "Loops"))
+		{
+			argbase ++;
+			if (argbase < argc)
+			{
+				NUM_LOOPS = (UINT16)strtoul(argv[argbase], NULL, 0);
+				if (! NUM_LOOPS)
+					NUM_LOOPS = 2;
+			}
+		}
+		else if (! _stricmp(argv[argbase] + 1, "NoLpExt"))
+			NO_LOOP_EXT = 1;
+		else
+			break;
+		argbase ++;
+	}
+	if (argc < argbase + 2)
+	{
+		printf("Not enough arguments.\n");
+		return 0;
+	}
 	
 	hFile = fopen(argv[argbase + 0], "rb");
 	if (hFile == NULL)
@@ -116,7 +146,7 @@ int main(int argc, char* argv[])
 UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 {
 	TRK_INFO trkInf[20];
-	
+	TRK_INFO* tempTInf;
 	UINT8 trkCnt;
 	UINT8 curTrk;
 	UINT16 inPos;
@@ -130,7 +160,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	UINT16 LoopPos[8];
 	
 	UINT32 tempLng;
-	UINT16 tempSht;
+	//UINT16 tempSht;
 	UINT8 tempByt;
 	UINT8 tempArr[4];
 	
@@ -163,7 +193,19 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	
 	inPos = 0x04;
 	for (curTrk = 0x00; curTrk < trkCnt; curTrk ++, inPos += 0x02)
-		trkInf[curTrk].StartOfs = ReadLE16(&SongData[inPos]);
+	{
+		tempTInf = &trkInf[curTrk];
+		tempTInf->StartOfs = ReadLE16(&SongData[inPos]);
+		tempTInf->LoopOfs = 0x0000;
+		tempTInf->TickCnt = 0;
+		tempTInf->LoopTimes = NUM_LOOPS;
+		tempTInf->LoopTick = 0;
+		
+		PreparseFmp(SongLen, SongData, tempTInf);
+	}
+	
+	if (! NO_LOOP_EXT)
+		GuessLoopTimes(trkCnt, trkInf);
 	
 	for (curTrk = 0x00; curTrk < trkCnt; curTrk ++)
 	{
@@ -176,7 +218,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 		mstLoopCount = 0;
 		MTS.midChn = curTrk;
 		curNoteVol = 0x7F;
-		RunNoteCnt = 0x00;
+		RunNoteCnt = 0;
 		
 		while(inPos < SongLen)
 		{
@@ -191,7 +233,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					curNote = 0xFF;
 				
 				CheckRunningNotes(&midFileInf, &MTS.curDly);
-				for (tempByt = 0x00; tempByt < RunNoteCnt; tempByt ++)
+				for (tempByt = 0; tempByt < RunNoteCnt; tempByt ++)
 				{
 					if (RunNotes[tempByt].note == curNote)
 					{
@@ -282,7 +324,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 						// master loop
 						mstLoopCount ++;
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)mstLoopCount);
-						if (mstLoopCount >= NUM_LOOPS)
+						if (mstLoopCount >= trkInf[curTrk].LoopTimes)
 							break;
 					}
 					else
@@ -334,7 +376,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos += 0x03;
 					break;
 				case 0xA1:
-					printf("Unknown event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
+					printf("Ignored event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
 					inPos += 0x03;
 					break;
@@ -381,6 +423,168 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	return 0x00;
 }
 
+static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf)
+{
+	UINT16 inPos;
+	UINT16 cmdLen;
+	UINT8 trkEnd;
+	UINT8 curCmd;
+	UINT8 LoopIdx;
+	UINT16 LoopCount[8];
+	UINT16 LoopPos[8];
+	UINT8 tempByt;
+	
+	trkEnd = 0;
+	LoopIdx = 0x00;
+	TrkInf->LoopOfs = 0x0000;
+	inPos = TrkInf->StartOfs;
+	while(inPos < SongLen)
+	{
+		curCmd = SongData[inPos];
+		if (curCmd < 0x80)
+		{
+			cmdLen = 0x02;
+		}
+		else
+		{
+			cmdLen = 0x00;
+			switch(curCmd)
+			{
+			case 0x86:	// Sustain Pedal On
+			case 0x87:	// Sustain Pedal Off
+				cmdLen = 0x01;
+				break;
+			case 0x80:	// Set Instrument
+			case 0x81:	// Set Volume
+			case 0x83:	// Set Note Velocity
+			case 0x84:	// Set Modulation
+			case 0x8B:	// Set Pan
+			case 0x8E:	// set MIDI Channel
+			case 0x8F:	// Set Expression
+				cmdLen = 0x02;
+				break;
+			case 0x85:	// Pitch Bend
+			case 0x90:	// MIDI Controller
+			case 0xA1:
+				cmdLen = 0x03;
+				break;
+			case 0xB7:	// ?Timing related?
+				cmdLen = 0x04;
+				break;
+			case 0x82:	// Tempo
+				cmdLen = 0x06;
+				break;
+			case 0xB6:	// Tempo/Timing?
+				cmdLen = 0x08;
+				break;
+			case 0x88:	// Loop Start
+				tempByt = SongData[inPos + 0x03];
+				cmdLen = 0x04;
+				
+				LoopPos[LoopIdx] = inPos + cmdLen;
+				LoopCount[LoopIdx] = tempByt;
+				if (LoopCount[LoopIdx] == 0x00)
+					TrkInf->LoopOfs = inPos;
+				LoopIdx ++;
+				break;
+			case 0x89:	// Loop End
+				if (! LoopIdx)
+				{
+					trkEnd = 1;
+					break;
+				}
+				cmdLen = 0x01;
+				
+				LoopIdx --;
+				if (LoopCount[LoopIdx])
+					LoopCount[LoopIdx] --;
+				if (LoopCount[LoopIdx])
+				{
+					// loop back
+					inPos = LoopPos[LoopIdx];
+					cmdLen = 0x00;
+					LoopIdx ++;
+				}
+				break;
+			case 0x8C:	// Send SysEx Data
+				cmdLen = 0x01;
+				for (cmdLen = 0x01; inPos + cmdLen < SongLen; cmdLen ++)
+				{
+					if (SongData[inPos + cmdLen] == 0xF7)
+					{
+						cmdLen ++;	// count end SysEx End command
+						break;
+					}
+				}
+				break;
+			case 0xFF:	// Track End
+				trkEnd = 1;
+				cmdLen = 0x01;
+				break;
+			default:
+				return;
+			}
+		}
+		inPos += cmdLen;
+		if (trkEnd)
+			break;
+		
+		tempByt = SongData[inPos];
+		inPos ++;
+		TrkInf->TickCnt += tempByt;
+		if (! TrkInf->LoopOfs)
+			TrkInf->LoopTick += tempByt;
+	}
+	
+	return;
+}
+
+static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf)
+{
+	UINT8 CurTrk;
+	TRK_INFO* TempTInf;
+	UINT32 TrkLen;
+	UINT32 TrkLoopLen;
+	UINT32 MaxTrkLen;
+	
+	MaxTrkLen = 0x00;
+	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
+	{
+		TempTInf = &TrkInf[CurTrk];
+		if (TempTInf->LoopOfs)
+			TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
+		else
+			TrkLoopLen = 0x00;
+		
+		TrkLen = TempTInf->TickCnt + TrkLoopLen * (TempTInf->LoopTimes - 1);
+		if (MaxTrkLen < TrkLen)
+			MaxTrkLen = TrkLen;
+	}
+	
+	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
+	{
+		TempTInf = &TrkInf[CurTrk];
+		if (TempTInf->LoopOfs)
+			TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
+		else
+			TrkLoopLen = 0x00;
+		if (TrkLoopLen < 0x20)
+			continue;
+		
+		TrkLen = TempTInf->TickCnt + TrkLoopLen * (TempTInf->LoopTimes - 1);
+		if (TrkLen * 5 / 4 < MaxTrkLen)
+		{
+			// TrkLen = desired length of the loop
+			TrkLen = MaxTrkLen - TempTInf->LoopTick;
+			
+			TempTInf->LoopTimes = (UINT16)((TrkLen + TrkLoopLen / 3) / TrkLoopLen);
+			printf("Trk %u: Extended loop to %u times\n", CurTrk, TempTInf->LoopTimes);
+		}
+	}
+	
+	return;
+}
+
 static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay)
 {
 	UINT8 curNote;
@@ -391,7 +595,7 @@ static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay)
 	{
 		// 1. Check if we're going beyond a note's timeout.
 		tempDly = *delay + 1;
-		for (curNote = 0x00; curNote < RunNoteCnt; curNote ++)
+		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
 		{
 			tempNote = &RunNotes[curNote];
 			if (tempNote->remLen < tempDly)
@@ -401,12 +605,12 @@ static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay)
 			break;	// not beyond the timeout - do the event
 		
 		// 2. advance all notes by X ticks
-		for (curNote = 0x00; curNote < RunNoteCnt; curNote ++)
+		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
 			RunNotes[curNote].remLen -= (UINT16)tempDly;
 		(*delay) -= tempDly;
 		
 		// 3. send NoteOff for expired notes
-		for (curNote = 0x00; curNote < RunNoteCnt; curNote ++)
+		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
 		{
 			tempNote = &RunNotes[curNote];
 			if (! tempNote->remLen)	// turn note off, it going beyond the Timeout
@@ -449,7 +653,7 @@ static void FlushRunningNotes(FILE_INF* fInf, MID_TRK_STATE* MTS)
 {
 	UINT8 curNote;
 	
-	for (curNote = 0x00; curNote < RunNoteCnt; curNote ++)
+	for (curNote = 0; curNote < RunNoteCnt; curNote ++)
 	{
 		if (RunNotes[curNote].remLen > MTS->curDly)
 			MTS->curDly = RunNotes[curNote].remLen;
