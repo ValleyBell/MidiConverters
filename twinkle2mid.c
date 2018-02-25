@@ -40,8 +40,8 @@ typedef struct file_information
 
 typedef struct _track_info
 {
-	UINT16 StartOfs;
-	UINT16 LoopOfs;
+	UINT32 StartOfs;
+	UINT32 LoopOfs;
 } TRK_INFO;
 
 
@@ -65,12 +65,14 @@ static UINT32 Tempo2Mid(UINT8 TempoVal);
 static UINT8 PanBits2MidiPan(UINT8 Pan);
 static UINT8 CalcGSChecksum(UINT16 DataSize, const UINT8* Data);
 
-static UINT16 ReadBE16(const UINT8* Data);
-static UINT32 ReadBE32(const UINT8* Data);
 static UINT16 ReadLE16(const UINT8* Data);
+static UINT32 ReadLE32(const UINT8* Data);
 static void WriteBE32(UINT8* Buffer, UINT32 Value);
 static void WriteBE16(UINT8* Buffer, UINT16 Value);
 
+
+#define FILEVER_OLD		0	// 10 tracks, no padding (Bunretsu Shugo Shin Twinkle Star)
+#define FILEVER_NEW		1	// 24 tracks, 4-byte padding (MsDrv 4.4)
 
 static UINT32 ROMLen;
 static UINT8* ROMData;
@@ -81,6 +83,8 @@ static UINT8* MidData;
 static UINT8 RunNoteCnt;
 static RUN_NOTE RunNotes[MAX_RUN_NOTES];
 static UINT8 FixVolume;
+static UINT8 DebugCtrls;
+static UINT8 fileVer;
 
 static UINT16 MIDI_RES = 48;
 static UINT16 NUM_LOOPS = 2;
@@ -97,11 +101,13 @@ int main(int argc, char* argv[])
 		printf("Options: (options can be combined, default setting is 'r')\n");
 		printf("    r   Raw conversion (other options are ignored)\n");
 		printf("    v   fix Volume (convert db levels to logarithmic MIDI, OPN(A) only)\n");
+		printf("    d   write debug MIDI controllers\n");
 		printf("Supported/verified games: Bunretsu Shugo Shin Twinkle Star\n");
 		return 0;
 	}
 	
 	FixVolume = 0;
+	DebugCtrls = 0;
 	StrPtr = argv[1];
 	while(*StrPtr != '\0')
 	{
@@ -112,6 +118,9 @@ int main(int argc, char* argv[])
 			break;
 		case 'V':
 			FixVolume = 1;
+			break;
+		case 'D':
+			DebugCtrls = 1;
 			break;
 		}
 		StrPtr ++;
@@ -144,7 +153,7 @@ int main(int argc, char* argv[])
 	free(ROMData);	ROMData = NULL;
 	
 #ifdef _DEBUG
-	getchar();
+	//getchar();
 #endif
 	
 	return 0;
@@ -152,11 +161,11 @@ int main(int argc, char* argv[])
 
 UINT8 Twinkle2Mid(UINT16 SongLen, const UINT8* SongData)
 {
-	TRK_INFO TrkInf[0x10];
+	TRK_INFO TrkInf[0x40];
 	
 	UINT8 TrkCnt;
 	UINT8 CurTrk;
-	UINT16 InPos;
+	UINT32 InPos;
 	FILE_INF MidFileInf;
 	MID_TRK_STATE MTS;
 	UINT8 TrkEnd;
@@ -164,7 +173,7 @@ UINT8 Twinkle2Mid(UINT16 SongLen, const UINT8* SongData)
 	
 	UINT8 LoopIdx;
 	UINT16 LoopCount[8];
-	UINT16 LoopPos[8];
+	UINT32 LoopPos[8];
 	UINT32 TempLng;
 	UINT16 TempSht;
 	INT16 TempSSht;
@@ -178,20 +187,49 @@ UINT8 Twinkle2Mid(UINT16 SongLen, const UINT8* SongData)
 	UINT8 SysExData[4];
 	UINT8 TempArr[0x10];
 	
-	TrkCnt = 10;	// 3xSSG + 6xFM
+	TempSht = ReadLE16(&SongData[0x00]);
+	if (TempSht == 0x0014)
+	{
+		fileVer = FILEVER_OLD;
+		TrkCnt = 10;
+		printf("Detected format: %s, %u tracks\n", "old", TrkCnt);
+	}
+	else if (TempSht == 0x00A0)
+	{
+		fileVer = FILEVER_NEW;
+		TrkCnt = 24;
+		printf("Detected format: %s, %u tracks\n", "new", TrkCnt);
+	}
+	else
+	{
+		printf("Unable to detect format version!\n");
+		return 0xFF;	// unknown version
+	}
 	
 	MidFileInf.Alloc = 0x20000;	// 128 KB should be enough
 	MidFileInf.Data = (UINT8*)malloc(MidFileInf.Alloc);
 	MidFileInf.Pos = 0x00;
 	
-	WriteMidiHeader(&MidFileInf, 0x0001, TrkCnt, MIDI_RES);
-	
-	InPos = 0x00;
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++, InPos += 0x02)
+	if (fileVer == FILEVER_OLD)
 	{
-		TrkInf[CurTrk].StartOfs = ReadLE16(&SongData[InPos]);
-		PreparseTwinkleTrack(SongLen, SongData, &TrkInf[CurTrk]);
+		InPos = 0x00;
+		for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++, InPos += 0x02)
+		{
+			TrkInf[CurTrk].StartOfs = ReadLE16(&SongData[InPos]);
+			PreparseTwinkleTrack(SongLen, SongData, &TrkInf[CurTrk]);
+		}
 	}
+	else if (fileVer == FILEVER_NEW)
+	{
+		InPos = 0x00;
+		for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++, InPos += 0x04)
+		{
+			TrkInf[CurTrk].StartOfs = ReadLE32(&SongData[InPos]);
+			PreparseTwinkleTrack(SongLen, SongData, &TrkInf[CurTrk]);
+		}
+	}
+	
+	WriteMidiHeader(&MidFileInf, 0x0001, TrkCnt, MIDI_RES);
 	
 	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
 	{
@@ -220,6 +258,11 @@ UINT8 Twinkle2Mid(UINT16 SongLen, const UINT8* SongData)
 				CurNoteDly = SongData[InPos + 0x01];
 				CurNoteLen = SongData[InPos + 0x02];
 				InPos += 0x03;
+				if (fileVer == FILEVER_NEW)
+				{
+					MTS.NoteVol = SongData[InPos];
+					InPos ++;
+				}
 				
 				if (CurCmd == 0)
 					CurCmd = 0x30;	// fix for TWED.MF2 (OPN/OPNA)
@@ -228,7 +271,14 @@ UINT8 Twinkle2Mid(UINT16 SongLen, const UINT8* SongData)
 				
 				CurNote = CurCmd;
 				if (! (MTS.Flags & 0x01))
-					CurNote += MTS.NoteMove;
+				{
+					if (CurNote < MTS.NoteMove)
+						CurNote = 0x00;
+					else if (CurNote + MTS.NoteMove > 0x7F)
+						CurNote = 0x7F;
+					else
+						CurNote += MTS.NoteMove;
+				}
 				if (! CurNoteLen)	// length == 0 -> rest (confirmed with MIDI log of sound driver)
 					CurNote = 0x00;
 				
@@ -260,12 +310,23 @@ UINT8 Twinkle2Mid(UINT16 SongLen, const UINT8* SongData)
 			{
 				switch(CurCmd)
 				{
+				case 0x81:	// unknown
+					printf("Ignored unknown event %02X on track %X at %04X\n", CurCmd, CurTrk, InPos);
+					if (DebugCtrls)
+					{
+						WriteEvent(&MidFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+						WriteEvent(&MidFileInf, &MTS, 0xB0, 0x26, SongData[InPos + 0x01]);
+					}
+					InPos += 0x04;
+					break;
 				case 0x82:	// Set Instrument
 					MTS.MidIns = SongData[InPos + 0x01];
 					WriteEvent(&MidFileInf, &MTS, 0xC0, MTS.MidIns, 0x00);
 					InPos += 0x02;
 					break;
 				case 0x85:	// Set Volume
+					if (fileVer == FILEVER_NEW)
+						printf("Warning: Obsolete 'SetVolume' command on track %X at %04X\n", CurTrk, InPos);
 					if (FixVolume && ! (MTS.Flags & 0x01))
 						TempByt = DB2Mid(OPN2DB(SongData[InPos + 0x01] ^ 0x7F));
 					else
@@ -280,6 +341,20 @@ UINT8 Twinkle2Mid(UINT16 SongLen, const UINT8* SongData)
 					WriteBE32(TempArr, TempLng);
 					WriteMetaEvent(&MidFileInf, &MTS, 0x51, 0x03, &TempArr[0x01]);
 					InPos += 0x02;
+					break;
+				case 0x96:	// unknown (parameters seem to be always 00 00)
+					if (SongData[InPos + 0x01] || SongData[InPos + 0x02])
+					{
+						printf("Ignored unknown event %02X %02X %02X on track %X at %04X\n",
+							SongData[InPos + 0x00], SongData[InPos + 0x01], SongData[InPos + 0x02],
+							CurTrk, InPos);
+						if (DebugCtrls)
+						{
+							WriteEvent(&MidFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+							WriteEvent(&MidFileInf, &MTS, 0xB0, 0x26, SongData[InPos + 0x01]);
+						}
+					}
+					InPos += 0x03;
 					break;
 				case 0x9B:	// Loop End
 					if (! LoopIdx)
@@ -348,18 +423,46 @@ UINT8 Twinkle2Mid(UINT16 SongLen, const UINT8* SongData)
 					InPos += 0x03;
 					break;
 				case 0xA5:	// unknown
-					printf("Ignored unknown event %02X on track %X at %04X\n", SongData[InPos + 0x00], CurTrk, InPos);
-					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
-					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x06, SongData[InPos + 0x01]);
+					printf("Ignored unknown event %02X on track %X at %04X\n", CurCmd, CurTrk, InPos);
+					if (DebugCtrls)
+					{
+						WriteEvent(&MidFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+						WriteEvent(&MidFileInf, &MTS, 0xB0, 0x26, SongData[InPos + 0x01]);
+					}
 					InPos += 0x02;
 					break;
-				case 0xDD:	// set SysEx Data 1
+				case 0xC1:	// unknown
+					printf("Ignored unknown event %02X on track %X at %04X\n", CurCmd, CurTrk, InPos);
+					if (DebugCtrls)
+					{
+						WriteEvent(&MidFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+						WriteEvent(&MidFileInf, &MTS, 0xB0, 0x26, SongData[InPos + 0x01]);
+					}
+					InPos += 0x03;
+					break;
+				case 0xC2:	// unknown
+				case 0xC3:	// unknown
+					printf("Ignored unknown event %02X on track %X at %04X\n", CurCmd, CurTrk, InPos);
+					if (DebugCtrls)
+					{
+						WriteEvent(&MidFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+						WriteEvent(&MidFileInf, &MTS, 0xB0, 0x26, SongData[InPos + 0x01] & 0x7F);
+					}
+					InPos += 0x02;
+					break;
+				case 0xC4:	// unknown
+					printf("Ignored unknown event %02X on track %X at %04X\n", CurCmd, CurTrk, InPos);
+					if (DebugCtrls)
+						WriteEvent(&MidFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+					InPos += 0x01;
+					break;
+				case 0xDD:	// set SysEx Offset high/mid
 					SysExData[0] = SongData[InPos + 0x02];
 					SysExData[1] = SongData[InPos + 0x03];
-					//MTS.CurDly += SongData[InPos + 0x01];
+					MTS.CurDly += SongData[InPos + 0x01];
 					InPos += 0x04;
 					break;
-				case 0xDE:	// set SysEx Data 2 + send
+				case 0xDE:	// set SysEx Offset low + Data, send SysEx
 					SysExData[2] = SongData[InPos + 0x02];
 					SysExData[3] = SongData[InPos + 0x03];
 					// Generate Roland GS SysEx command
@@ -373,26 +476,62 @@ UINT8 Twinkle2Mid(UINT16 SongLen, const UINT8* SongData)
 					TempByt = 0x0A;	// SysEx data size
 					
 					WriteLongEvent(&MidFileInf, &MTS, 0xF0, TempByt, TempArr);
-					//MTS.CurDly += SongData[InPos + 0x01];
+					MTS.CurDly += SongData[InPos + 0x01];
 					InPos += 0x04;
 					break;
 				case 0xDF:	// set SysEx Device ID + Model ID
 					SysExHdr[0] = SongData[InPos + 0x02];	// Device ID
 					SysExHdr[1] = SongData[InPos + 0x03];	// Model ID
-					//MTS.CurDly += SongData[InPos + 0x01];
+					MTS.CurDly += SongData[InPos + 0x01];
+					InPos += 0x04;
+					break;
+				case 0xE2:	// set MIDI instrument with Bank MSB/LSB
+					MTS.MidIns = SongData[InPos + 0x02];
+					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x00, SongData[InPos + 0x03]);	// Bank MSB
+					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x20, 0x00);	// Bank LSB (fixed to 0?)
+					WriteEvent(&MidFileInf, &MTS, 0xC0, MTS.MidIns, 0x00);
+					MTS.CurDly += SongData[InPos + 0x01];
 					InPos += 0x04;
 					break;
 				case 0xE6:	// set MIDI Channel
-					MTS.MidChn = SongData[InPos + 0x02] & 0x0F;
-					MTS.CurDly += SongData[InPos + 0x01];
-					MTS.Flags |= 0x01;
+					TempByt = SongData[InPos + 0x02];
+					MTS.MidChn = TempByt & 0x0F;
 					MTS.NoteMove = 0;
-					MTS.PBRange = 0xFF;
+					if (TempByt < 0x10)
+					{
+						MTS.Flags |= 0x01;
+						MTS.PBRange = 0xFF;
+						WriteEvent(&MidFileInf, &MTS, 0xFF, 0x20, 0x01);
+						MidFileInf.Data[MidFileInf.Pos] = MTS.MidChn;
+						MidFileInf.Pos ++;
+					}
+					else
+					{
+						// used by later version only?
+						if ((TempByt & 0xF0) == 0x40)
+						{
+							MTS.NoteMove = +24;	// SSG channel
+							MTS.MidChn += 10;
+						}
+						else if ((TempByt & 0xF0) == 0x50)
+						{
+							MTS.NoteMove = 0;	// FM/OPN channel
+						}
+						else if ((TempByt & 0xF0) == 0x70 || (TempByt & 0xF0) == 0x80)
+						{
+							if (TempByt >= 0x7F)
+								MTS.MidChn = TempByt - 0x7C;
+							MTS.NoteMove = 0;	// FM/OPL channel
+						}
+					}
+					MTS.CurDly += SongData[InPos + 0x01];
 					InPos += 0x03;
 					break;
 				case 0xE7:	// unknown (doesn't result in a MIDI event)
-					printf("Ignored unknown event %02X on track %X at %04X\n", SongData[InPos + 0x00], CurTrk, InPos);
-					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x03, SongData[InPos + 0x02]);
+					TempSht = ReadLE16(&SongData[InPos + 0x02]);
+					printf("Ignored unknown event %02X on track %X at %04X\n", CurCmd, CurTrk, InPos);
+					if (DebugCtrls)
+						WriteEvent(&MidFileInf, &MTS, 0xB0, 0x03, SongData[InPos + 0x02]);
 					MTS.CurDly += SongData[InPos + 0x01];
 					InPos += 0x04;
 					break;
@@ -429,18 +568,17 @@ UINT8 Twinkle2Mid(UINT16 SongLen, const UINT8* SongData)
 					TrkEnd = 1;
 					InPos += 0x01;
 					break;
-				/*case 0xFF:
-					TrkEnd = 1;
-					InPos += 0x01;
-					break;*/
 				default:
-					printf("Unknown event %02X on track %X at %04X\n", SongData[InPos + 0x00], CurTrk, InPos);
-					WriteEvent(&MidFileInf, &MTS, 0xB0, 0x6E, CurCmd & 0x7F);
+					printf("Unknown event %02X on track %X at %04X\n", CurCmd, CurTrk, InPos);
+					if (DebugCtrls)
+						WriteEvent(&MidFileInf, &MTS, 0xB0, 0x6E, CurCmd & 0x7F);
 					InPos += 0x01;
 					TrkEnd = 1;
 					break;
 				}
 			}
+			if (fileVer == FILEVER_NEW)
+				InPos = (InPos + 0x03) & ~0x03;	// 4-byte padding
 		}
 		for (TempByt = 0x00; TempByt < RunNoteCnt; TempByt ++)
 		{
@@ -462,12 +600,12 @@ UINT8 Twinkle2Mid(UINT16 SongLen, const UINT8* SongData)
 static void PreparseTwinkleTrack(UINT16 SongLen, const UINT8* SongData, TRK_INFO* TrkInf)
 {
 	// this function is only used to detect the offset of the master loop
-	UINT16 InPos;
+	UINT32 InPos;
 	UINT8 CurCmd;
 	
 	UINT8 LoopIdx;
 	UINT8 LoopCount[8];
-	UINT16 LoopPos[8];
+	UINT32 LoopPos[8];
 	
 	InPos = TrkInf->StartOfs;
 	TrkInf->LoopOfs = 0x0000;
@@ -859,20 +997,15 @@ static UINT8 CalcGSChecksum(UINT16 DataSize, const UINT8* Data)
 }
 
 
-static UINT16 ReadBE16(const UINT8* Data)
-{
-	return (Data[0x00] << 8) | (Data[0x01] << 0);
-}
-
-static UINT32 ReadBE32(const UINT8* Data)
-{
-	return	(Data[0x00] << 24) | (Data[0x01] << 16) |
-			(Data[0x02] <<  8) | (Data[0x03] <<  0);
-}
-
 static UINT16 ReadLE16(const UINT8* Data)
 {
 	return (Data[0x01] << 8) | (Data[0x00] << 0);
+}
+
+static UINT32 ReadLE32(const UINT8* Data)
+{
+	return	(Data[0x03] << 24) | (Data[0x02] << 16) |
+			(Data[0x01] <<  8) | (Data[0x00] <<  0);
 }
 
 static void WriteBE32(UINT8* Buffer, UINT32 Value)
