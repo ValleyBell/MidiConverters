@@ -1,0 +1,177 @@
+MsDRV Sequence Format (for MsDRV)
+=====================
+(.MS files)
+
+Header - MsDRV v1
+------
+0Ah*2 bytes - track pointers (absolute)
+	OPN/OPNA Mode:
+		PSG 1/2/3
+		FM 1/2/3
+		FM 4/5/6
+		dummy
+	MIDI Mode:
+		10 MIDI tracks (channel ID is set via sequence commands)
+
+Header - MsDRV v4
+------
+24h*4 bytes - track pointers
+3*4 bytes - ?? (always 00)
+4 bytes - end of file offset
+
+Sequence Commands
+-----------------
+Notes:
+- MsDRV v1 defaults to 3-byte note format.
+- MsDRV v4 defaults to 4-byte note format.
+- MsDRV v4 (non-light): All commands are padded up to 4 bytes. The padding byte is 9E.
+
+[1]	00-7F dd ll - play note with length ll, delay dd
+[4]	00-7F dd ll [vv] - play note with length ll, delay dd, volume vv
+		vv might or might not be present, depending on whether 3-byte note format is enabled or disabled
+[4A]	80 ll mm - set song tick resolution to mmll (default: 48)
+[4L]	81 mm rr dd - write to OPL3 register rr, data dd, mode mm
+		mode 00 -> ??
+		mode 80 -> write directly to port 0
+		mode 81 -> write directly to port 1
+		other modes: ignored
+[1A]	82 ii - set FM/SSG Instrument
+[4A]	83 ... - repeat previous section
+		Parameters are 2 file offsets, start and end offset, of the section to be repeated.
+		The offsets are 4 bytes wide in MsDRV v4.
+		Both offsets are relative to the beginning of the track.
+[1A]	84 ll mm - GoTo position (relative to beginning of the command)
+[4A]	84 - Subroutine Return (temporarily written into the sequence data by command 83)
+		Note: Can not be used in sequences regularly!
+[0A]	85 vv - set Volume (00..7F)
+		MIDI: Volume defines Note Velocity
+		FM: TL operator = (7F - vv)
+		SSG: volume = (vv / 08)
+[0A]	8A tt - set Tempo to tt BPM
+[4A]	8B dd - switch between 3-byte and 4-byte note format (dd == 01 - 3 byte format)
+[4A]	8C ll mm dd - data set (writes dd to offset oo+mmll, oo is some global variable)
+[4A]	8D ll mm ss ... - data copy (copy ss bytes from the sequence to offset oo+mmll, oo is some global variable)
+[4A]	8E ll mm dd - data set (same as 8C, but oo is different)
+[4A]	8F ll mm ss ... - data set (same as 8D, but oo is different)
+[0NSL]	94 rr dd - write to OPN register rr, data dd (register ID/port is adjusted for the current channel)
+		Note: writes to OPNA port even in OPL mode
+[0A]	96 xx xx - ignored in all modes (parameters seem to be always 00)
+[0A]	9B tt - Loop End, loop tt times (tt = 0 -> infinite)
+[0A]	9C - Loop Start
+[0NSL]	9D dd - set raw FM frequency detune (dd is 8-bit signed)
+[4A]	9E - ignored (apparently used for padding/alignment in some songs)
+[1A]	9F pp - set Speaker (01 = right, 02 = left, 03 = centre)
+		MIDI: 01 -> Pan 7F, 02 -> Pan 00, else Pan 40
+[4MNL]	9F pp - set Panning
+		FM OPNA: 80..FF - left (80), 00 - centre (C0), 01..7F - right (40)
+		MIDI: Pan = (pp + 80h) / 2 (scales 80..FF,00..7F -> 00..3F,40..7F)
+[0A]	A4 ll mm - Pitch Bend (mm = semitones, ll = fraction)
+[1N]	A5 mm - set OPN/OPNA mode (mm = 00 - OPN, mm = 01..FF - OPNA)
+[4A]	A5 - invalid
+[0N]	A6 ss - set LFO speed (OPNA register 22, 00 = off [data 00], 01..08 = on [data 08..0F])
+[0A]	A7 xx xx - ??? (writes to some bytes)
+[4A]	A8 xx - ??? (writes xx to some location and clears 24h-xx bytes of instrument cache)
+[4A]	A9 mm - enable Special FM3 Mode (00 - off, 01..FF - on)
+		Note: The function to enable OPN's Special FM3 mode is called in all modes, but the function itself checks for an OPN to be present before executing.
+[4N]	AA xx - set Special FM3 key on operator mask
+[4NS]	AB mm dd - ?? (mm = mode 00..07, dd = data written to some TrackRAM)
+[4NS]	AC mm dd - ?? (mm = mode 00..07, dd = data written to some TrackRAM)
+[4A]	AD ll mm - set Pitch Slide step (mm = semitones, ll = fraction)
+[4A]	AE ll mm - set Pitch Slide destination (--''--)
+[4A]	AF ll mm - set current Pitch Slide state (--''--)
+[1A]	B0 xx - set Panning left
+		MIDI: Pan = 0x40 - (xx / 2)
+		FM: 00 = centre, 01-FF = hard left
+[1A]	B1 xx - set Panning right
+		MIDI: Pan = 0x40 + (xx / 2)
+		FM: 00 = centre, 01-FF = hard right
+[0A]	C1 xx xx - set Game Communication value (the value is unused by the sound driver itself)
+[4M]	C2 - reset GS checksum
+[4M]	C3 dd - send SysEx data byte dd (data is added to GS checksum)
+[4M]	C4 - send GS checksum (calculated over all bytes sent via command C3 since the last C2 command)
+[4M]	C5 ll mm ... - send block of SysEx data bytes (like repeated C3 commands)
+			mmll = number of bytes to send, the data to send begins right after the mm byte
+[0A]	D0 dd mm - play ADPCM-A drums (mm - rhythm mask for OPNA register 10, dd = duration + delay until next command)
+		Note: Commands D0-D6 are fully working in all modes in v4. (i.e. MIDI or OPL3 tracks may control the OPNA rhythm section, if an OPNA is present)
+[0A]	D1 vv - set ADPCM-A channel 0 pan/volume
+[0A]	D2 vv - set ADPCM-A channel 1 pan/volume
+[0A]	D3 vv - set ADPCM-A channel 2 pan/volume
+[0A]	D4 vv - set ADPCM-A channel 3 pan/volume
+[0A]	D5 vv - set ADPCM-A channel 4 pan/volume
+[0A]	D6 vv - set ADPCM-A channel 5 pan/volume
+[0M]	DD dd v1 v2 - SysEx data bytes 1-2, delay dd
+[0M]	DE dd v3 v3 - SysEx data bytes 3-4 and send SysEx command, delay dd
+			SC-55 Mode: F0 41 di mi 12 v1 v2 v3 v4 [chksum] F7
+[0M]	DF dd di mi - set SysEx command header (di = device ID, mi = model ID)
+[0M]	E2 dd ii mm - Bank MSB mm, Bank LSB 00, MIDI Instrument ii, delay dd
+[0M]	E6 dd cc - set MIDI Channel to cc, delay dd
+[0A]	E7 dd mm ll - Tempo Modifier, delay dd
+			mmll = tempo modification factor, 100% = 0x4000
+[0M]	EA dd vv - MIDI Channel Aftertouch vv, delay dd
+[0M]	EB dd cc vv - MIDI Controller cc, value vv, delay dd
+[0A]	EC dd ii - MIDI Instrument ii, delay dd
+[0M]	ED dd nn vv - MIDI Note nn Aftertouch vv, delay dd
+[0A]	EE dd ll mm - MIDI Pitch Bend (mm = semitones, ll = fraction), delay dd
+[0A]	FE - Track End
+[0A]	FF - Song End (terminates all tracks)
+
+
+Description for [] letters:
+0 - available in all versions
+1 - available in v1 only
+4 - available in v4 only
+A - supported by all modes
+M - supported in MIDI mode
+N - supported in OPN/OPNA mode
+S - supported in SSG mode
+L - supported in OPL3 mode
+
+
+v4 channel IDs:
+00..0F	MIDI channels 1-16, part A
+10..1F	MIDI channels 1-16, part B
+40..42	OPN/OPNA SSG channels 1-3
+50..52	OPN/OPNA FM channels 1-3
+53..55	OPNA FM channels 4-6
+70..78	OPL2/OPL3 channels 1-9
+79..81	OPL3 channels 10-18
+F0..F2	OPN/OPNA channels for Special FM3 mode
+FE..FF	"control" channel (does only basic processing)
+The default channel mode after loading a song is FF.
+
+
+v4 track RAM layout
+-------------------
+addr	len	data
+00	02	current sequence data offset
+02	02	current sequence data segment
+04	01	Note Format (00 - 4 bytes, 01 - 3 bytes, 02..FF - same as 00)
+05	01	loop stack offset
+06-2D		loop RAM (5 bytes per slot: 2 bytes offset, 2 bytes segment, 1 byte loop counter)
+2F	02	pitch bend (8.8 fixed point)
+31	02	Pitch Slide state (8.8 fixed point, added to pitch bend value)
+33	02	Pitch Slide step (8.8 fixed point, added or subtracted to PS state every tick until PS destination is reached)
+35	02	Pitch Slide destination (8.8 fixed point)
+37	01	velocity
+38	01	remaining delay ticks
+39	01	channel ID
+3A	01	Subroutine status flag (01 - in subroutine)
+3B	01	Subroutine Return backup byte (During command 83 the driver writes command 84 into the sound data. This is the value of the overritten byte, which is restored when executing command 84.)
+3C	02	Subroutine Return offset
+3E	02	Subroutine Return segment
+40	01	remaining ticks OPNA rhythm mode
+41	02	FM frequency detune
+43	02	final FM frequency value (without octave bits)
+46	01	current note (value of command 00..7F)
+47	01	current octave
+5A	02	some frequency
+76	01	OPNA Pan/AMS/FMS bits
+77	01	Special FM3 key on operator mask
+
+C1	01	SysEx Device ID
+C2	01	SysEx Model ID
+C3	01	SysEx Address High
+C4	01	SysEx Address Mid
+C5	01	??
+C6	01	??
+-> C7h bytes per track
