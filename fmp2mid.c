@@ -41,6 +41,13 @@ typedef struct _track_info
 	UINT16 LoopTimes;
 } TRK_INFO;
 
+typedef struct _event_list
+{
+	UINT32 evtAlloc;
+	UINT32 evtCount;
+	UINT32* data[2];	// data[][0] = tick time, data[][1] = event data
+} EVENT_LIST;
+
 
 UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData);
 static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf);
@@ -67,6 +74,8 @@ static RUN_NOTE RunNotes[MAX_RUN_NOTES];
 static UINT16 MIDI_RES = 48;
 static UINT16 NUM_LOOPS = 2;
 static UINT8 NO_LOOP_EXT = 0;
+
+static UINT8 MIDI_MODE = 0x02;
 
 int main(int argc, char* argv[])
 {
@@ -158,6 +167,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	UINT16 mstLoopCount;
 	UINT16 LoopCount[8];
 	UINT16 LoopPos[8];
+	UINT8 tickMult;
 	
 	UINT32 tempLng;
 	//UINT16 tempSht;
@@ -165,7 +175,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	UINT8 tempArr[4];
 	
 	UINT8 curNote;
-	UINT8 curNoteLen;
+	UINT16 curNoteLen;
 	UINT8 curNoteVol;
 	
 	UINT32 sysExAlloc;
@@ -207,6 +217,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	if (! NO_LOOP_EXT)
 		GuessLoopTimes(trkCnt, trkInf);
 	
+	tickMult = 1;
 	for (curTrk = 0x00; curTrk < trkCnt; curTrk ++)
 	{
 		inPos = trkInf[curTrk].StartOfs;
@@ -225,7 +236,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 			curCmd = SongData[inPos];
 			if (curCmd < 0x80)
 			{
-				curNoteLen = SongData[inPos + 0x01];
+				curNoteLen = (UINT16)SongData[inPos + 0x01] * tickMult;
 				inPos += 0x02;
 				
 				curNote = curCmd;
@@ -268,11 +279,20 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos += 0x02;
 					break;
 				case 0x82:	// Tempo
-					tempLng = ReadLE24(&SongData[inPos + 0x01]);
-					tempLng = (UINT32)((UINT64)500000 * tempLng / 0x32F000);
+					if (0)	// FMP v3
+					{
+						tempLng = ReadLE24(&SongData[inPos + 0x01]);
+						tempLng = (UINT32)((UINT64)500000 * tempLng / 0x32F000);
+						inPos += 0x06;
+					}
+					else	// FMP v2
+					{
+						tempLng = ReadLE16(&SongData[inPos + 0x01]);
+						tempLng = (UINT32)((UINT64)500000 * tempLng / 0x32F0);
+						inPos += 0x05;
+					}
 					WriteBE32(tempArr, tempLng);
 					WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
-					inPos += 0x06;
 					break;
 				case 0x83:	// Set Note Velocity
 					tempByt = SongData[inPos + 0x01];
@@ -297,8 +317,16 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos += 0x01;
 					break;
 				case 0x88:	// Loop Start
-					tempByt = SongData[inPos + 0x03];
-					inPos += 0x04;
+					if (0)	// FMP v3
+					{
+						tempByt = SongData[inPos + 0x03];
+						inPos += 0x04;
+					}
+					else	// FMP v2
+					{
+						tempByt = SongData[inPos + 0x01];
+						inPos += 0x02;
+					}
 					
 					LoopPos[LoopIdx] = inPos;
 					LoopCount[LoopIdx] = tempByt;
@@ -358,12 +386,24 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					if (sysExData[sysExLen] == 0xF7)
 					{
 						sysExLen ++;	// count end SysEx End command
-						WriteLongEvent(&midFileInf, &MTS, 0xF0, sysExLen, sysExData);
+						tempByt = 1;
+						if (1)
+						{
+							// comfort option: ignore SysEx messages that don't fit the device
+							// The actual driver sends them regardless.
+							if (MIDI_MODE == 0x01 && (sysExData[0x02] & 0xF0) != 0x10)	// check for MT-32 ID (0x16)
+								tempByt = 0;
+							else if (MIDI_MODE == 0x02 && (sysExData[0x02] & 0xF0) != 0x40)	// check for SC-55 ID (0x42/0x45)
+								tempByt = 0;
+						}
+						if (tempByt)
+							WriteLongEvent(&midFileInf, &MTS, 0xF0, sysExLen, sysExData);
 					}
 					inPos += sysExLen;
 					break;
 				case 0x8E:	// set MIDI Channel
-					MTS.midChn = SongData[inPos + 0x01] & 0x0F;
+					if (SongData[inPos + 0x01] != 0xFF)
+						MTS.midChn = SongData[inPos + 0x01] & 0x0F;
 					inPos += 0x02;
 					break;
 				case 0x8F:	// Set Expression
@@ -373,11 +413,6 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					break;
 				case 0x90:	// MIDI Controller
 					WriteEvent(&midFileInf, &MTS, 0xB0, SongData[inPos + 0x01], SongData[inPos + 0x02]);
-					inPos += 0x03;
-					break;
-				case 0xA1:
-					printf("Ignored event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
 					inPos += 0x03;
 					break;
 				case 0xB6:	// Tempo/Timing?
@@ -395,6 +430,118 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					trkEnd = 1;
 					inPos += 0x01;
 					break;
+				case 0x93:	// MT-32 MIDI channel
+					if (MIDI_MODE == 0x02)
+						MTS.midChn = SongData[inPos + 0x01] & 0x0F;
+					inPos += 0x02;
+					break;
+				case 0x95:	// SC-55 MIDI channel
+					if (MIDI_MODE == 0x02)
+						MTS.midChn = SongData[inPos + 0x01] & 0x0F;
+					inPos += 0x02;
+					break;
+				case 0x96:	// MT-32 Expression
+					if (MIDI_MODE == 0x01)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0B, SongData[inPos + 0x01]);
+					inPos += 0x02;
+					break;
+				case 0x98:	// SC-55 Expression
+					if (MIDI_MODE == 0x02)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0B, SongData[inPos + 0x01]);
+					inPos += 0x02;
+					break;
+				case 0x99:	// MT-32 Volume
+					if (MIDI_MODE == 0x01)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, SongData[inPos + 0x01]);
+					inPos += 0x02;
+					break;
+				case 0x9B:	// SC-55 Volume
+					if (MIDI_MODE == 0x02)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, SongData[inPos + 0x01]);
+					inPos += 0x02;
+					break;
+				case 0x9C:	// MT-32 Stop Track
+					printf("Event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
+					if (MIDI_MODE == 0x01)
+						trkEnd = 1;
+					inPos += 0x01;
+					break;
+				case 0x9E:	// SC-55 Stop Track
+					printf("Event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
+					if (MIDI_MODE == 0x02)
+						trkEnd = 1;
+					inPos += 0x01;
+					break;
+				case 0xA1:	// SC-55 MIDI controller
+					//printf("Event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
+					if (MIDI_MODE == 0x02)
+						WriteEvent(&midFileInf, &MTS, 0xB0, SongData[inPos + 0x01], SongData[inPos + 0x02]);
+					inPos += 0x03;
+					break;
+				case 0xA2:	// MT-32 instrument
+					if (MIDI_MODE == 0x01)
+						WriteEvent(&midFileInf, &MTS, 0xC0, SongData[inPos + 0x01], 0x00);
+					inPos += 0x02;
+					break;
+				case 0xA4:	// SC-55 instrument
+					if (MIDI_MODE == 0x02)
+						WriteEvent(&midFileInf, &MTS, 0xC0, SongData[inPos + 0x01], 0x00);
+					inPos += 0x02;
+					break;
+				case 0xA5:	// MT-32 Pan
+					if (MIDI_MODE == 0x01)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, SongData[inPos + 0x01]);
+					inPos += 0x02;
+					break;
+				case 0xA7:	// SC-55 Pan
+					if (MIDI_MODE == 0x02)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, SongData[inPos + 0x01]);
+					inPos += 0x02;
+					break;
+				case 0xA8:	// Send MT-32 SysEx Data
+				case 0xAA:	// Send MT-32 SysEx Data
+					sysExData[0x00] = 0x41;			// Roland ID
+					for (sysExLen = 0x01; inPos + sysExLen < SongLen; sysExLen ++)
+					{
+						if (sysExAlloc <= sysExLen)
+						{
+							sysExAlloc *= 2;
+							sysExData = (UINT8*)realloc(sysExData, sysExAlloc);
+						}
+						sysExData[sysExLen] = SongData[inPos + sysExLen];
+						if (sysExData[sysExLen] == 0xF7)
+							break;
+					}
+					if (sysExData[sysExLen] == 0xF7)
+					{
+						sysExLen ++;	// count end SysEx End command
+						if ((curCmd == 0xA8 && MIDI_MODE == 0x01) || (curCmd == 0xAA && MIDI_MODE == 0x02))
+							WriteLongEvent(&midFileInf, &MTS, 0xF0, sysExLen, sysExData);
+					}
+					inPos += sysExLen;
+					break;
+				case 0xB0:	// MT-32 Pitch Bend
+					if (MIDI_MODE == 0x01)
+						WriteEvent(&midFileInf, &MTS, 0xE0, SongData[inPos + 0x01], SongData[inPos + 0x02]);
+					inPos += 0x03;
+					break;
+				case 0xB2:	// SC-55 Pitch Bend
+					if (MIDI_MODE == 0x02)
+						WriteEvent(&midFileInf, &MTS, 0xE0, SongData[inPos + 0x01], SongData[inPos + 0x02]);
+					inPos += 0x03;
+					break;
+				case 0xB3:
+					printf("Event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
+					inPos += 0x02;
+					break;
+				case 0xAD:	// set global Tick Multiplier
+					tickMult = SongData[inPos + 0x01];
+					printf("Track %X at %04X: Set Tick Multiplier = %u\n", curTrk, inPos, tickMult);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SongData[inPos + 0x01]);
+					inPos += 0x02;
+					break;
 				default:
 					printf("Unknown event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
@@ -407,7 +554,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 				break;
 			
 			tempByt = SongData[inPos];	inPos ++;
-			MTS.curDly += tempByt;
+			MTS.curDly += (UINT16)tempByt * tickMult;
 		}
 		FlushRunningNotes(&midFileInf, &MTS);
 		
