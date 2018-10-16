@@ -46,7 +46,7 @@ I recommend VGMTrans to convert Squaresoft SPCs to MIDI. It uses an improved ver
 ## fmp2mid
 This tool converts FMP songs to MIDI.
 
-I developed the tool using songs from Variable Geo and other GIGA games that use FMP v3. It might work with FMP v1 and v2 sequences, but I haven't verified this yet.
+I developed the tool using songs from Variable Geo and other GIGA games that use FMP v3. I also tested it with the TGL game "Edge", which uses FMP v2. FMP v1 sequences don't work yet.
 
 ## gems2mid
 This tool converts songs from the GEMS sound driver to MIDI.
@@ -125,6 +125,16 @@ This tool converts MT-32 sound data from early SCUMM games (like Monkey Island 1
 The tool needs "RO" files ripped from ScummVM's RAM as I couldn't figure out the format of the "WA" files that you can extract from the actual game.
 The "RO" signature must be at byte 0x0C. (I apparently ripped some bytes from the memory block header.)  
 MI1-Midi_Data.7z contains the files that I used with the converter.
+
+## msdrv2mid
+This tool converts songs from PC-98 games that use the MsDRV sound driver to MIDI.
+
+The tool was originally called twinkle2mid and was written to convert the songs from Bunretsu Shugo Shin Twinkle Star, which uses an early version of MsDRV. It was since updated to work with more versions of the sound format.
+
+Early versions of MsDRV have the code embedded in the main executable. Later version come with a separate sound driver executable that is usually called "MSDRV4.EXE" or "MSDRV4L.EXE". In any case you can find a copyright notice by the author "KENJI" in side the executable.
+
+Common file extensions for MsDRV music files are MF1, MF2, and MUS.
+Bunretsu Shugo Shin Twinkle Star has one .MF2 archive per song. Eacho .MF2 archive contains all variants (OPN, OPNA, MT-32, SC-55) of a song and you need to unpack/decompress it to get the actual music file.
 
 ## mucom2mid
 This converts songs in PC-8801 Mucom format to MIDI.
@@ -216,13 +226,6 @@ This tool converts songs from Turbo OutRun (Arcade) to MIDI.
 
 The tool is written based on a sound driver disassembly of Turbo OutRun.
 
-## twinkle2mid
-This tool converts songs from PC-98 Twinkle Soft games to MIDI.
-
-The tool was written to convert the songs from Bunretsu Shugo Shin Twinkle Star. It may or may not work with other games.
-
-BSSTS stores all versions of the songs (OPN, OPNA, MT-32, SC-55) in .MF2 archives. So you need to decompress those archives first, before you can use twinkle2mid.
-
 ## wtmd2mid
 This tool converts songs from MegaDrive Wolfteam games to MIDI.
 
@@ -230,6 +233,13 @@ I wrote this tool to convert music from late MegaDrive Wolfteam games. (The ones
 Right now the tool uses hardcoded instrument mappings - which interestingly worked across all MegaDrive and X68000 games I tested.
 
 For Wolfteam MegaDrive games with PCM drums, it can autodetect the song list and will batch-convert all songs. (compile with `PLMode = 0x01;` to enable it)
+
+## yong2mid
+This tool converts songs from Yong Yong games to MIDI.
+
+Yes, it's the result of reverse-engineering the sound driver of the Game Boy games Sonic 3D Blast 5 and Sonic Adventure 7. It works with the raw ROMs.
+
+The sound engine is very basic and has only very few features. It still doesn't justify the terrible sound of those unlicensed games, though.
 
 ## ys2mid
 This tool converts songs from Ys II (PC-8801 version) to MIDI.
