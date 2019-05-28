@@ -44,9 +44,13 @@ Nowadways you shouldn't use ffmq2mid. loveemu wrote a tool called akaospc with t
 I recommend VGMTrans to convert Squaresoft SPCs to MIDI. It uses an improved version of akaospc to do the conversion.
 
 ## fmp2mid
-This tool converts FMP songs to MIDI.
+This tool converts TGL FMP songs to MIDI.
 
-I developed the tool using songs from Variable Geo and other GIGA games that use FMP v3. I also tested it with the TGL game "Edge", which uses FMP v2. FMP v1 sequences don't work yet.
+I developed the tool using songs from Variable Geo and other GIGA games that use FMP v3. I also tested it with the TGL game "Edge", which uses FMP v2. I haven't seen games that use FMP v1 so far, so I couldn't test support for those.
+
+Currently the tool supports only MIDI FMP songs. OPN/OPNA FMP songs are unsupported as they use a different set of sequence commands.
+
+Please note that TGL FMP is *not* the popular FMP format that uses files with .OPI/.OVI/.OZI extension.
 
 ## gems2mid
 This tool converts songs from the GEMS sound driver to MIDI.
@@ -134,7 +138,7 @@ The tool was originally called twinkle2mid and was written to convert the songs 
 Early versions of MsDRV have the code embedded in the main executable. Later version come with a separate sound driver executable that is usually called "MSDRV4.EXE" or "MSDRV4L.EXE". In any case you can find a copyright notice by the author "KENJI" in side the executable.
 
 Common file extensions for MsDRV music files are MF1, MF2, and MUS.
-Bunretsu Shugo Shin Twinkle Star has one .MF2 archive per song. Eacho .MF2 archive contains all variants (OPN, OPNA, MT-32, SC-55) of a song and you need to unpack/decompress it to get the actual music file.
+Bunretsu Shugo Shin Twinkle Star has one .MF2 archive per song. Each .MF2 archive contains all variants (OPN, OPNA, MT-32, SC-55) of a song and you need to unpack/decompress it to get the actual music file.
 
 ## mucom2mid
 This converts songs in PC-8801 Mucom format to MIDI.
@@ -159,6 +163,16 @@ P.M.D. is the Professional Music Driver written by Masahiro Kajihara. It is comm
 
 The tool was made with the help of the PMDWin 0.36 source code. But due to the huge number of features P.M.D. supports, not all sequence commands are supported by pmd2mid currently.  
 During the development process the songs from PC-9801 Rusty served as a main test case. I used the IBM PC version of Rusty to quickly test how PMD-IBM works, so the tool can deal with PMD-IBM songs as well.
+
+## rcp2mid
+This tool converts Recomposer song files to MIDI.
+
+Recomposer is a MIDI sequencer that was very popular in Japan, especially on the PC-9801 and X68000. Some games (like Granada on the X68000) even used raw RCP files in their games.
+
+This is based on an RCP reader that I wrote for a custom MIDI player that I wanted to use under Linux. But unfortunately, all RCP -> MID converters I found were relying on RCPCV.DLL, with no source for it available.
+So wrote my own RCP reader, partly by using kuma4649's MDPlayer as a reference and partly by reverse-engineering the RCP format by myself.
+
+So far the tool converts all RCP and G36 files I tested well. I haven't seen any R38 or G18 files so far, so those might or might not work.
 
 ## sbm52mid
 This tool converts SPCs from Super Bomberman 5 to MIDI.
@@ -247,6 +261,15 @@ This tool converts songs from Ys II (PC-8801 version) to MIDI.
 I only wrote the tool to work with Ys II. I haven't check what other games it works with so far. (The chance for it to work with Ys I and III is probably high.)
 
 Now what song do you think was the main test case for the tool? Right, it's *To Make The End of Battle*. I wanted to make an 8-bit version of the song and vgm2mid didn't satisfy me.
+
+## zmd2mid
+This tool converts songs from (compiled) ZmuSiC format to MIDI.
+
+The main focus of this tool is to accurately convert MIDI-based songs. OPM-based songs are known to not convert properly.
+
+Currently, only ZMD v1 files are supported. The games I used for testing were Cyber Block Metal Orange EX and Magical Block Carat on the X68000.
+ZMD v2 (Asuka 120% Burning Fest.) doesn't work correctly yet due to unknown commands.
+ZMD v3 is quite different from v1/v2, so that might be done by a separate tool.
 
 
 # Libraries
