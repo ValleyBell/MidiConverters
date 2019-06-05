@@ -397,6 +397,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	UINT32 trkLen;
 	TRK_INFO trkInf;
 	UINT32 parentPos;
+	UINT16 repMeasure;
 	UINT8 trkID;
 	UINT8 rhythmMode;
 	UINT8 midiDev;
@@ -417,6 +418,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	UINT16 cmdP0Delay;
 	UINT16 cmdDurat;
 	UINT8 loopIdx;
+	UINT32 loopPPos[8];
 	UINT32 loopPos[8];
 	UINT16 loopCnt[8];
 	UINT8 gsParams[6];	// 0 device ID, 1 model ID, 2 address high, 3 address low
@@ -474,15 +476,15 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 		WriteMetaEvent(fInf, MTS, 0x20, 1, &midChn);	// Meta Event: MIDI Channel Prefix
 	}
 	if (rhythmMode != 0)
-		printf("Warning: RCP Track %u: Rhythm Mode %u!\n", trkID, rhythmMode);
+		printf("Warning Track %u: Rhythm Mode %u!\n", trkID, rhythmMode);
 	if (transp > 0x80)
 	{
 		// known values are: 0x00..0x3F (+0 .. +63), 0x40..0x7F (-64 .. -1), 0x80 (drums)
-		printf("Warning: RCP Track %u: Key 0x%02X!\n", trkID, transp);
+		printf("Warning Track %u: Key 0x%02X!\n", trkID, transp);
 		transp = 0x00;
 	}
 	if (startTick != 0)
-		printf("Warning: RCP Track %u: Start Tick %+d!\n", trkID, startTick);
+		printf("Warning Track %u: Start Tick %+d!\n", trkID, startTick);
 	
 	measPosAlloc = 0x100;
 	measPosCount = 0x00;
@@ -494,6 +496,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	memset(xgParams, 0x00, 6);
 	trkEnd = 0;
 	parentPos = 0x00;
+	repMeasure = 0xFFFF;
 	RunNoteCnt = 0x00;
 	MTS->midChn = midChn;
 	MTS->curDly = 0;
@@ -665,10 +668,10 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			WriteEvent(fInf, MTS, 0xC0, cmdP1, 0x00);
 			break;
 		case 0xE5:	// "Key Scan"
-			printf("Key Scan command found on track %u, offset 0x%04X\n", trkID, prevPos);
+			printf("Warning Track %u: Key Scan command found at 0x%04X\n", trkID, prevPos);
 			break;
 		case 0xE6:	// MIDI channel
-			//printf("Set MIDI Channel command found on track %u, offset 0x%04X\n", trkID, prevPos);
+			//printf("Warning Track %u: Set MIDI Channel command found at 0x%04X\n", trkID, prevPos);
 			cmdP1 --;	// It's same as in the track header, except 1 added.
 			if (cmdP1 != 0xFF)
 			{
@@ -684,7 +687,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 				UINT32 tempoVal;
 				
 				if (cmdP2)
-					printf("Warning: Interpolated Tempo Change at 0x%04X!\n", prevPos);
+					printf("Warning Track %u: Interpolated Tempo Change at 0x%04X!\n", trkID, prevPos);
 				tempoVal = (UINT32)(60000000.0 / (rcpInf->tempoBPM * cmdP1 / 64.0) + 0.5);
 				tempArr[0] = (tempoVal >> 16) & 0xFF;
 				tempArr[1] = (tempoVal >>  8) & 0xFF;
@@ -709,7 +712,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			break;
 		case 0xF5:	// Key Signature Change
 			// TODO: find a file that uses this
-			printf("Warning: Key Signature Change at 0x%04X!\n", prevPos);
+			printf("Warning Track %u: Key Signature Change at 0x%04X!\n", trkID, prevPos);
 			RcpKeySig2Mid(tempArr, (UINT8)cmdP0Delay);
 			WriteMetaEvent(fInf, MTS, 0x59, 0x02, tempArr);
 			break;
@@ -732,12 +735,17 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			cmdP0Delay = 0;
 			break;
 		case 0xF7:	// continuation of previous command
-			printf("Warning: Unexpected continuation command at 0x%04X!\n", prevPos);
+			printf("Warning Track %u: Unexpected continuation command at 0x%04X!\n", trkID, prevPos);
 			break;
 		case 0xF8:	// Loop End
 			if (loopIdx == 0)
 			{
-				printf("Warning: Loop End without Loop Start at 0x%04X!\n", prevPos);
+				printf("Warning Track %u: Loop End without Loop Start at 0x%04X!\n", trkID, prevPos);
+				if (BAR_MARKERS)
+				{
+					UINT32 txtLen = sprintf((char*)tempArr, "Bad Loop End");
+					WriteMetaEvent(fInf, MTS, 0x07, txtLen, tempArr);
+				}
 			}
 			else
 			{
@@ -760,8 +768,15 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 					if (loopCnt[loopIdx] < cmdP0Delay)
 						takeLoop = 1;
 				}
+				if (BAR_MARKERS)
+				{
+					UINT32 txtLen = sprintf((char*)tempArr, "Loop %u End (%u/%u)",
+						1 + loopIdx, loopCnt[loopIdx], cmdP0Delay);
+					WriteMetaEvent(fInf, MTS, 0x07, txtLen, tempArr);
+				}
 				if (takeLoop)
 				{
+					parentPos = loopPPos[loopIdx];
 					inPos = loopPos[loopIdx];
 					loopIdx ++;
 				}
@@ -769,17 +784,26 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			cmdP0Delay = 0;
 			break;
 		case 0xF9:	// Loop Start
+			if (BAR_MARKERS)
+			{
+				UINT32 txtLen = sprintf((char*)tempArr, "Loop %u Start", 1 + loopIdx);
+				WriteMetaEvent(fInf, MTS, 0x07, txtLen, tempArr);
+			}
+			
 			if (loopIdx >= 8)
 			{
-				printf("Error: Trying to do more than 8 nested loops at 0x%04X!\n", prevPos);
+				printf("Error Track %u: Trying to do more than 8 nested loops at 0x%04X!\n", trkID, prevPos);
 			}
 			else
 			{
 				if (inPos == trkInf.loopOfs)
 					WriteEvent(fInf, MTS, 0xB0, 0x6F, 0);
 				
+				loopPPos[loopIdx] = parentPos;	// required by YS-2･018.RCP
 				loopPos[loopIdx] = inPos;
 				loopCnt[loopIdx] = 0;
+				if (loopIdx > 0 && loopPos[loopIdx] == loopPos[loopIdx - 1])
+					loopIdx --;	// ignore loop command (required by YS-2･018.RCP)
 				loopIdx ++;
 			}
 			cmdP0Delay = 0;
@@ -811,26 +835,44 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 				
 				if (measureID >= measPosCount)
 				{
-					printf("Warning: Trying to repeat invalid bar %u (have %u bars) at 0x%04X!\n",
-						measureID, curBar + 1, prevPos);
+					printf("Warning Track %u: Trying to repeat invalid bar %u (have %u bars) at 0x%04X!\n",
+						trkID, measureID, curBar + 1, prevPos);
 					break;
 				}
+				if (measureID == repMeasure)
+					break;	// prevent recursion (just for safety)
+				
 				cachedPos = measurePos[measureID] - trkBasePos;
 				if (cachedPos != repeatPos)
-					printf("Warning: Repeat Measure %u: offset mismatch (0x%04X != 0x%04X) at 0x%04X!\n",
-						measureID, repeatPos, cachedPos, prevPos);
+					printf("Warning Track %u: Repeat Measure %u: offset mismatch (0x%04X != 0x%04X) at 0x%04X!\n",
+						trkID, measureID, repeatPos, cachedPos, prevPos);
 				
 				if (! parentPos)	// this check was verified to be necessary for some files
 					parentPos = inPos;
-				// using cachedPos here, just in case the offsets are incorrect
-				inPos = trkBasePos + cachedPos;
+				repMeasure = measureID;
+				if (rcpInf->fileVer == 2)
+				{
+					// YS3-25.RCP relies on using the actual offset. (*Some* of its measure numbers are off by 1.)
+					inPos = trkBasePos + repeatPos;
+				}
+				else
+				{
+					// For RCP v3 I'm not 100% that the offset calculation is correct, so I'm using cachedPos here.
+					inPos = trkBasePos + cachedPos;
+				}
 			}
 			break;
 		case 0xFD:	// measure end
+			if (measPosCount >= 0x8000)	// prevent infinite loops (and seg. fault due to overflow in measPosAlloc)
+			{
+				trkEnd = 1;
+				break;
+			}
 			if (parentPos)
 			{
 				inPos = parentPos;
 				parentPos = 0x00;
+				repMeasure = 0xFFFF;
 			}
 			if (measPosCount >= measPosAlloc)
 			{
@@ -853,7 +895,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			cmdP0Delay = 0;
 			break;
 		default:
-			printf("Unhandled RCP command 0x%02X at position 0x%04X!\n", cmdType, prevPos);
+			printf("Warning Track %u: Unhandled RCP command 0x%02X at position 0x%04X!\n", trkID, cmdType, prevPos);
 			break;
 		}	// end if (cmdType >= 0x80) / switch(cmdType)
 		MTS->curDly += cmdP0Delay;
@@ -873,6 +915,7 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 	UINT32 trkEndPos;
 	UINT32 trkLen;
 	UINT32 parentPos;
+	UINT16 repMeasure;
 	UINT16 measPosAlloc;
 	UINT16 measPosCount;
 	UINT32* measurePos;
@@ -883,6 +926,7 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 	UINT16 cmdP0Delay;
 	UINT16 cmdDurat;
 	UINT8 loopIdx;
+	UINT32 loopPPos[8];
 	UINT32 loopPos[8];
 	UINT32 loopTick[8];
 	UINT16 loopCnt[8];
@@ -922,6 +966,7 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 	trkEnd = 0;
 	parentPos = 0x00;
 	loopIdx = 0x00;
+	repMeasure = 0xFFFF;
 	
 	measurePos[measPosCount] = inPos;
 	measPosCount ++;
@@ -961,6 +1006,7 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 				}
 				else if (loopCnt[loopIdx] < cmdP0Delay)
 				{
+					parentPos = loopPPos[loopIdx];
 					inPos = loopPos[loopIdx];
 					loopIdx ++;
 				}
@@ -970,9 +1016,12 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 		case 0xF9:	// Loop Start
 			if (loopIdx < 8)
 			{
+				loopPPos[loopIdx] = parentPos;
 				loopPos[loopIdx] = inPos;
 				loopTick[loopIdx] = trkInf->tickCnt;
 				loopCnt[loopIdx] = 0;
+				if (loopIdx > 0 && loopPos[loopIdx] == loopPos[loopIdx - 1])
+					loopIdx --;	// ignore loop command
 				loopIdx ++;
 			}
 			cmdP0Delay = 0;
@@ -984,17 +1033,26 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 				cmdP0Delay = 0;
 				if (measureID >= measPosCount)
 					break;
+				if (measureID == repMeasure)
+					break;	// prevent recursion
 				
 				if (! parentPos)	// this check was verified to be necessary for some files
 					parentPos = inPos;
+				repMeasure = measureID;
 				inPos = measurePos[measureID];
 			}
 			break;
 		case 0xFD:	// measure end
+			if (measPosCount >= 0x8000)
+			{
+				trkEnd = 1;
+				break;
+			}
 			if (parentPos)
 			{
 				inPos = parentPos;
 				parentPos = 0x00;
+				repMeasure = 0xFFFF;
 			}
 			if (measPosCount >= measPosAlloc)
 			{
