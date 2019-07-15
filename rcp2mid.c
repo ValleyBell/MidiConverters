@@ -108,6 +108,11 @@ static void FlushRunningNotes(FILE_INF* fInf, MID_TRK_STATE* MTS);
 static UINT16 ReadLE16(const UINT8* data);
 static UINT32 ReadLE32(const UINT8* data);
 
+
+static const UINT8 MT32_PATCH_CHG[0x10] =
+	{0x41, 0x10, 0x16, 0x12, 0x03, 0x00, 0x00, 0xFF, 0xFF, 0x18, 0x32, 0x0C, 0x00, 0x01, 0xCC, 0xF7};
+
+
 static UINT32 ROMLen;
 static UINT8* ROMData;
 static UINT32 MidLen;
@@ -643,16 +648,17 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			
 			{
 				UINT8 chkSum;
+				UINT8 curParam;
 				
 				tempArr[0] = 0x41;	// Roland ID
 				tempArr[1] = gsParams[0];
 				tempArr[2] = gsParams[1];
 				tempArr[3] = 0x12;
 				chkSum = 0x00;	// initialize checksum
-				for (cmdP1 = 0; cmdP1 < 4; cmdP1 ++)
+				for (curParam = 0; curParam < 4; curParam ++)
 				{
-					tempArr[4 + cmdP1] = gsParams[2 + cmdP1];
-					chkSum += gsParams[2 + cmdP1];	// add to checksum
+					tempArr[4 + curParam] = gsParams[2 + curParam];
+					chkSum += gsParams[2 + curParam];	// add to checksum
 				}
 				tempArr[8] = (0x100 - chkSum) & 0x7F;
 				tempArr[9] = 0xF7;
@@ -702,7 +708,27 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			WriteEvent(fInf, MTS, 0xB0, cmdP1, cmdP2);
 			break;
 		case 0xEC:	// Instrument
-			WriteEvent(fInf, MTS, 0xC0, cmdP1, 0x00);
+			if (cmdP1 < 0x80)
+			{
+				WriteEvent(fInf, MTS, 0xC0, cmdP1, 0x00);
+			}
+			else if (cmdP1 < 0xC0 && (midChn >= 1 && midChn < 9))
+			{
+				// set MT-32 instrument from user bank
+				// used by RCP files from Granada X68000
+				UINT8 chkSum;
+				UINT8 curPos;
+				
+				memcpy(tempArr, MT32_PATCH_CHG, 0x10);
+				tempArr[0x06] = (midChn - 1) << 4;
+				tempArr[0x07] = (cmdP1 >> 6) & 0x03;
+				tempArr[0x08] = (cmdP1 >> 0) & 0x3F;
+				chkSum = 0x00;	// initialize checksum
+				for (curPos = 0x04; curPos < 0x0E; curPos ++)
+					chkSum += tempArr[curPos];	// add to checksum
+				tempArr[0x0E] = (0x100 - chkSum) & 0x7F;
+				WriteLongEvent(fInf, MTS, 0xF0, 0x10, tempArr);
+			}
 			break;
 		case 0xED:	// Note Aftertouch
 			WriteEvent(fInf, MTS, 0xA0, cmdP1, cmdP2);
