@@ -1,6 +1,7 @@
 // RCP -> Midi Converter
 // ---------------------
 // Written by Valley Bell
+// based on FMP -> Midi Converter
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -125,6 +126,8 @@ static RUN_NOTE RunNotes[MAX_RUN_NOTES];
 static UINT16 NUM_LOOPS = 2;
 static UINT8 NO_LOOP_EXT = 0;
 static UINT8 BAR_MARKERS = 0;
+static UINT8 WOLFTEAM_LOOP = 0;
+static UINT8 KEEP_DUMMY_CH = 0;
 
 int main(int argc, char* argv[])
 {
@@ -135,11 +138,14 @@ int main(int argc, char* argv[])
 	printf("RCP -> Midi Converter\n---------------------\n");
 	if (argc < 3)
 	{
-		printf("Usage: Fmp2Mid.exe [options] input.bin output.mid\n");
+		printf("Usage: rcp2mid.exe [options] input.bin output.mid\n");
 		printf("Options:\n");
 		printf("    -Loops n    Loop each track at least n times. (default: 2)\n");
-	//	printf("    -NoLpExt    No Loop Extention\n");
+	//	printf("    -NoLpExt    No Loop Extension\n");
 	//	printf("                Do not fill short tracks to the length of longer ones.\n");
+		printf("    -WtLoop     Wolfteam Loop mode (loop from measure 2 on)\n");
+		printf("    -KeepDummyCh convert data with MIDI channel set to -1\n");
+		printf("                channel -1 is invalid, some RCPs use it for muting\n");
 		return 0;
 	}
 	
@@ -160,6 +166,10 @@ int main(int argc, char* argv[])
 		}
 		else if (! stricmp(argv[argbase] + 1, "NoLpExt"))
 			NO_LOOP_EXT = 1;
+		else if (! stricmp(argv[argbase] + 1, "WtLoop"))
+			WOLFTEAM_LOOP = 1;
+		else if (! stricmp(argv[argbase] + 1, "KeepDummyCh"))
+			KEEP_DUMMY_CH = 1;
 		else
 			break;
 		argbase ++;
@@ -459,7 +469,9 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	midChn = rcpData[inPos + 0x02];		// MIDI channel
 	if (midChn == 0xFF)
 	{
-		midiDev = 0xFF;
+		// When the KeepDummyCh option is off, prevent events from being
+		// written to the MIDI by setting midiDev to 0xFF.
+		midiDev = KEEP_DUMMY_CH ? 0x00 : 0xFF;
 		midChn = 0x00;
 	}
 	else
@@ -553,7 +565,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			}
 			
 			// duration == 0 -> no note
-			if (cmdDurat > 0)
+			if (cmdDurat > 0 && midiDev != 0xFF)
 			{
 				WriteEvent(fInf, MTS, 0x90, curNote, cmdP2);
 				if (RunNoteCnt < MAX_RUN_NOTES)
@@ -569,6 +581,8 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 		{
 		case 0x90: case 0x91: case 0x92: case 0x93:	// send User SysEx (defined via header)
 		case 0x94: case 0x95: case 0x96: case 0x97:
+			if (midiDev == 0xFF)
+				break;
 			{
 				const USER_SYX_DATA* usrSyx = &rcpInf->usrSyx[cmdType & 0x07];
 				UINT16 syxLen = ProcessRcpSysEx(usrSyx->dataLen, usrSyx->data, tempArr, cmdP1, cmdP2, midChn);
@@ -589,6 +603,8 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 				}
 				// then read input data
 				syxLen = ReadMultiCmdData(rcpLen, rcpData, rcpInf, &inPos, txtBufSize, txtBuffer, MCMD_INI_EXCLUDE);
+				if (midiDev == 0xFF)
+					break;
 				syxLen = ProcessRcpSysEx(syxLen, txtBuffer, txtBuffer, cmdP1, cmdP2, midChn);
 				WriteLongEvent(fInf, MTS, 0xF0, syxLen, txtBuffer);
 			}
@@ -620,6 +636,8 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 		case 0xD2:	// YAMAHA Address / Parameter
 			xgParams[4] = cmdP1;
 			xgParams[5] = cmdP2;
+			if (midiDev == 0xFF)
+				break;
 			
 			tempArr[0] = 0x43;	// YAMAHA ID
 			memcpy(&tempArr[1], &xgParams[0], 6);
@@ -629,6 +647,8 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 		case 0xD3:	// YAMAHA XG Address / Parameter
 			xgParams[4] = cmdP1;
 			xgParams[5] = cmdP2;
+			if (midiDev == 0xFF)
+				break;
 			
 			tempArr[0] = 0x43;	// YAMAHA ID
 			tempArr[1] = 0x10;	// Parameter Change
@@ -645,6 +665,8 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 		case 0xDE:	// Roland Parameter
 			gsParams[4] = cmdP1;
 			gsParams[5] = cmdP2;
+			if (midiDev == 0xFF)
+				break;
 			
 			{
 				UINT8 chkSum;
@@ -670,6 +692,8 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			gsParams[1] = cmdP2;
 			break;
 		case 0xE2:	// set GS instrument
+			if (midiDev == 0xFF)
+				break;
 			WriteEvent(fInf, MTS, 0xB0, 0x00, cmdP2);
 			WriteEvent(fInf, MTS, 0xC0, cmdP1, 0x00);
 			break;
@@ -679,14 +703,24 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 		case 0xE6:	// MIDI channel
 			//printf("Warning Track %u: Set MIDI Channel command found at 0x%04X\n", trkID, prevPos);
 			cmdP1 --;	// It's same as in the track header, except 1 added.
-			if (cmdP1 != 0xFF)
+			if (cmdP1 == 0xFF)
+			{
+				// When the KeepDummyCh option is off, ignore the event.
+				// Else set midiDev to 0xFF to prevent events from being written.
+				if (! KEEP_DUMMY_CH)
+				{
+					midiDev = 0xFF;
+					midChn = 0x00;
+				}
+			}
+			else
 			{
 				midiDev = cmdP1 >> 4;	// port ID
 				midChn = cmdP1 & 0x0F;	// channel ID
 				WriteMetaEvent(fInf, MTS, 0x21, 1, &midiDev);	// Meta Event: MIDI Port Prefix
 				WriteMetaEvent(fInf, MTS, 0x20, 1, &midChn);	// Meta Event: MIDI Channel Prefix
-				MTS->midChn = midChn;
 			}
+			MTS->midChn = midChn;
 			break;
 		case 0xE7:	// Tempo Modifier
 			{
@@ -702,12 +736,18 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			}
 			break;
 		case 0xEA:	// Channel Aftertouch
+			if (midiDev == 0xFF)
+				break;
 			WriteEvent(fInf, MTS, 0xD0, cmdP1, 0x00);
 			break;
 		case 0xEB:	// Control Change
+			if (midiDev == 0xFF)
+				break;
 			WriteEvent(fInf, MTS, 0xB0, cmdP1, cmdP2);
 			break;
 		case 0xEC:	// Instrument
+			if (midiDev == 0xFF)
+				break;
 			if (cmdP1 < 0x80)
 			{
 				WriteEvent(fInf, MTS, 0xC0, cmdP1, 0x00);
@@ -731,9 +771,13 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			}
 			break;
 		case 0xED:	// Note Aftertouch
+			if (midiDev == 0xFF)
+				break;
 			WriteEvent(fInf, MTS, 0xA0, cmdP1, cmdP2);
 			break;
 		case 0xEE:	// Pitch Bend
+			if (midiDev == 0xFF)
+				break;
 			WriteEvent(fInf, MTS, 0xE0, cmdP1, cmdP2);
 			break;
 		case 0xF5:	// Key Signature Change
@@ -783,7 +827,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 				if (cmdP0Delay == 0)
 				{
 					// infinite loop
-					if (loopCnt[loopIdx] < 0x80)
+					if (loopCnt[loopIdx] < 0x80 && midiDev != 0xFF)
 						WriteEvent(fInf, MTS, 0xB0, 0x6F, (UINT8)loopCnt[loopIdx]);
 					
 					if (loopCnt[loopIdx] < NUM_LOOPS)
@@ -822,7 +866,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			}
 			else
 			{
-				if (inPos == trkInf.loopOfs)
+				if (inPos == trkInf.loopOfs && midiDev != 0xFF)
 					WriteEvent(fInf, MTS, 0xB0, 0x6F, 0);
 				
 				loopPPos[loopIdx] = parentPos;	// required by YS-2･018.RCP
@@ -915,10 +959,34 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 				UINT32 txtLen = sprintf((char*)tempArr, "Bar %u", 1 + curBar);
 				WriteMetaEvent(fInf, MTS, 0x07, txtLen, tempArr);
 			}
+			if (WOLFTEAM_LOOP && measPosCount == 2)
+			{
+				loopIdx = 0;
+				if (midiDev != 0xFF)
+					WriteEvent(fInf, MTS, 0xB0, 0x6F, 0);
+				loopPPos[loopIdx] = parentPos;
+				loopPos[loopIdx] = inPos;
+				loopCnt[loopIdx] = 0;
+				loopIdx ++;
+			}
 			break;
 		case 0xFE:	// track end
 			trkEnd = 1;
 			cmdP0Delay = 0;
+			if (WOLFTEAM_LOOP)
+			{
+				loopIdx = 0;
+				loopCnt[loopIdx] ++;
+				if (loopCnt[loopIdx] < 0x80 && midiDev != 0xFF)
+					WriteEvent(fInf, MTS, 0xB0, 0x6F, (UINT8)loopCnt[loopIdx]);
+				if (loopCnt[loopIdx] < NUM_LOOPS)
+				{
+					parentPos = loopPPos[loopIdx];
+					inPos = loopPos[loopIdx];
+					loopIdx ++;
+					trkEnd = 0;
+				}
+			}
 			break;
 		default:
 			printf("Warning Track %u: Unhandled RCP command 0x%02X at position 0x%04X!\n", trkID, cmdType, prevPos);
@@ -928,6 +996,8 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	}	// end while(! trkEnd)
 	free(txtBuffer);
 	free(measurePos);
+	if (midiDev == 0xFF)
+		MTS->curDly = 0;
 	
 	*rcpInPos = trkBasePos + trkLen;
 	return 0x00;
@@ -1088,10 +1158,25 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 			measurePos[measPosCount] = inPos;
 			measPosCount ++;
 			cmdP0Delay = 0;
+			if (WOLFTEAM_LOOP && measPosCount == 2)
+			{
+				loopIdx = 0;
+				loopPPos[loopIdx] = parentPos;
+				loopPos[loopIdx] = inPos;
+				loopTick[loopIdx] = trkInf->tickCnt;
+				loopCnt[loopIdx] = 0;
+				loopIdx ++;
+			}
 			break;
 		case 0xFE:	// track end
 			trkEnd = 1;
 			cmdP0Delay = 0;
+			if (WOLFTEAM_LOOP)
+			{
+				loopIdx = 0;
+				trkInf->loopOfs = loopPos[loopIdx];
+				trkInf->loopTick = loopTick[loopIdx];
+			}
 			break;
 		}	// end switch(cmdType)
 		
