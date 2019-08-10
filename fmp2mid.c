@@ -1,10 +1,31 @@
-// FMP -> Midi Converter
-// ---------------------
+// TGL FMP -> Midi Converter
+// -------------------------
 // Written by Valley Bell, 27 August 2017
 // based on Twinkle Soft -> Midi Converter
 // Updated with FMP v2 support and module-specific commands on 06 August 2018
 //
-// Note: CM-64 specific commands are pure guesswork, thus they are disabled for now.
+// known games and driver versions:
+//	- Appare Den: Fukuryuu no Sho: FMP v3.??
+//	- Briganty: The Roots of Darkness: FMP v3.95
+//	- Edge: FMP v2.1
+//	- Farland Story: Tooikuni no Monogatari: FMP v3.??
+//	- Farland Story 2: Arc no Ensei: FMP v3.??
+//	- Farland Story 3: Tenshi no Namida: FMP v3.??
+//	- Farland Story 4: Hakugin no Tsubasa: FMP v3.??
+//	- Farland Story 5: Daichi no Kizuna: FMP v3.??
+//	- Farland Story 6: Kamigami no Isen: FMP v3.??
+//	- Farland Story 7: Shishi Ou no Akashi: FMP v3.??
+//	- Harlem Blade: The Greatest of All Time: FMP v3.95
+//	- Kisoushinden Genkaizer: FMP v3.??
+//	- Steam-Heart's: FMP v3.04
+//	- [sdg98] Sword Dancer: Goddess of Evil Blade: FMP v3.??
+//	- Sword Dancer Zoukango: FMP v2.0
+//	- Sword Dancer Zoukango 93: FMP v2.2b
+//	- V.G.: Variable Geo: FMP v3.04
+//	- V.G. II: The Bout of Cabalistic Goddess: FMP v3.05
+
+// FMP v2 supports MT-32/CM-64/SC-55 specific commands. Those don't work anymore in FMP v3.
+// FMP v2 supports only commands 0x80 .. 0xB4.
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -67,20 +88,34 @@ static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay);
 static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay);
 static void FlushRunningNotes(FILE_INF* fInf, MID_TRK_STATE* MTS);
 static UINT8 WriteFileData(UINT32 dataLen, const UINT8* data, const char* fileName);
+INLINE UINT32 PCTimer2MidTempo(UINT32 period, UINT32 baseClock);
+INLINE UINT32 YMTimerB2MidTempo(UINT8 timerB, UINT32 baseClock);
 
-static UINT16 ReadLE16(const UINT8* data);
-static UINT32 ReadLE24(const UINT8* data);
-static UINT32 ReadLE32(const UINT8* data);
+INLINE UINT16 ReadLE16(const UINT8* data);
+INLINE UINT32 ReadLE24(const UINT8* data);
+INLINE UINT32 ReadLE32(const UINT8* data);
 
 
-static const UINT8 MIDI_MOD_MASKS[0x04] =
+static const UINT8 MIDI_MOD_MASKS[0x05] =
 {
 	0x00,	// omit module-specific events
 	1<<0,	// MT-32 mode
-//	1<<1,	// CM-64 mode
+	1<<1,	// CM-64 mode
 	1<<2,	// SC-55 mode
 	0xFF,	// keep module-specific events
 };
+
+#define PC98_BASECLK_FM		1996800	// FM base clock
+#define PC98_BASECLK_5MHZ	2457600	// base clock in 5 MHz mode according to Neko Project 2
+#define PC98_BASECLK_8MHZ	1996800	// base clock in 8 MHz mode according to Neko Project 2
+
+// clock values used for creating FMP v2 songs (reverse-engineered using songs from Edge)
+#define FMP2_BASECLK_5MHZ	2458000
+#define FMP2_BASECLK_8MHZ	1998000
+// clock values used for creating FMP v3 songs (reverse-engineered using songs from V.G. II)
+#define FMP3_BASECLK_FM		2005600
+#define FMP3_BASECLK_5MHZ	2467400
+#define FMP3_BASECLK_8MHZ	2005600
 
 
 static UINT32 ROMLen;
@@ -97,7 +132,7 @@ static UINT16 NUM_LOOPS = 2;
 static UINT8 NO_LOOP_EXT = 0;
 
 static UINT8 FMP_VER = 3;
-static UINT8 MIDI_MODE = 0x02;
+static UINT8 MIDI_MODE = 0x03;
 static UINT8 MODULE_MASK = 0x00;
 
 int main(int argc, char* argv[])
@@ -106,20 +141,20 @@ int main(int argc, char* argv[])
 	FILE* hFile;
 	UINT8 retVal;
 	
-	printf("FMP -> Midi Converter\n---------------------\n");
+	printf("TGL FMP -> Midi Converter\n-------------------------\n");
 	if (argc < 3)
 	{
 		printf("Usage: Fmp2Mid.exe [options] input.bin output.mid\n");
 		printf("Options:\n");
-		printf("    -Ver n      set FMP version (2 or 3, default: 3)\n");
-		printf("    -Module n   set MIDI module mode (0 to 3, default: 2)\n");
+		printf("    -Ver n      set FMP version (2 or 3, default: %u)\n", FMP_VER);
+		printf("    -Module n   set MIDI module mode (0 to 4, default: %u)\n", MIDI_MODE);
 		printf("                0 - omit module-specific events\n");
 		printf("                1 - convert MT-32 specific events\n");
-		//printf("                2 - convert CM-64 specific events\n");
-		printf("                2 - convert SC-55 specific events\n");
-		printf("                3 - convert all module-specific events\n");
-		printf("    -Loops n    Loop each track at least n times. (default: 2)\n");
-		printf("    -NoLpExt    No Loop Extention\n");
+		printf("                2 - convert CM-64 specific events\n");
+		printf("                3 - convert SC-55 specific events\n");
+		printf("                4 - convert all module-specific events\n");
+		printf("    -Loops n    Loop each track at least n times. (default: %u)\n", NUM_LOOPS);
+		printf("    -NoLpExt    No Loop Extension\n");
 		printf("                Do not fill short tracks to the length of longer ones.\n");
 		printf("Verified games:\n");
 		printf("    FMP v2: Edge\n");
@@ -171,7 +206,7 @@ int main(int argc, char* argv[])
 		return 0;
 	}
 	
-	if (MIDI_MODE >= 0x04)
+	if (MIDI_MODE >= sizeof(MIDI_MOD_MASKS))
 		MIDI_MODE = 0x00;
 	MODULE_MASK = MIDI_MOD_MASKS[MIDI_MODE];
 	
@@ -203,7 +238,7 @@ int main(int argc, char* argv[])
 	free(ROMData);	ROMData = NULL;
 	
 #ifdef _DEBUG
-	getchar();
+	//getchar();
 #endif
 	
 	return 0;
@@ -367,24 +402,59 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos += 0x02;
 					break;
 				case 0x82:	// Tempo
-					if (FMP_VER == 3)	// FMP v3
 					{
-						tempLng = ReadLE24(&SongData[inPos + 0x01]);
-						tempLng = (UINT32)((UINT64)500000 * tempLng / 0x32F000);
-						inPos += 0x06;
+						UINT8 tmrValYM;		// YM2203 timer value
+						UINT16 tmrPeriod5;	// timer value for 5 MHz mode
+						UINT16 tmrPeriod8;	// timer value for 8 MHz mode
+						UINT32 midiTempo;
+						char* tempBuf = (char*)sysExData;
+						
+						if (FMP_VER == 3)
+						{
+							// FMP v3:
+							//	- inPos+1 = OPN Timer B value
+							//	- inPos+2..3 = uPD8253-5 timer value (5 MHz mode)
+							//	- inPos+4..5 = uPD8253-5 timer value (8 MHz mode)
+							// The FM Timer B value results in approximate the same tempo, but due to rounding and
+							// the lower resolution of the timer, it's always a bit faster.
+							tmrValYM = SongData[inPos + 0x01];
+							tmrPeriod5 = ReadLE16(&SongData[inPos + 0x02]);
+							tmrPeriod8 = ReadLE16(&SongData[inPos + 0x04]);
+							inPos += 0x06;
+						
+							//tempLng = sprintf(tempBuf, "YM Tempo: %.3f BPM", 60000000.0 / YMTimerB2MidTempo(tmrValYM, FMP3_BASECLK_FM));
+							//WriteMetaEvent(&midFileInf, &MTS, 0x06, tempLng, tempBuf);
+							//tempLng = sprintf(tempBuf, "T5 Tempo: %.3f BPM", 60000000.0 / PCTimer2MidTempo(tmrPeriod5, FMP3_BASECLK_5MHZ));
+							//WriteMetaEvent(&midFileInf, &MTS, 0x06, tempLng, tempBuf);
+							//tempLng = sprintf(tempBuf, "T8 Tempo: %.3f BPM", 60000000.0 / PCTimer2MidTempo(tmrPeriod8, FMP3_BASECLK_8MHZ));
+							//WriteMetaEvent(&midFileInf, &MTS, 0x06, tempLng, tempBuf);
+							
+							midiTempo = PCTimer2MidTempo(tmrPeriod5, FMP3_BASECLK_5MHZ);
+							//midiTempo = PCTimer2MidTempo(tmrPeriod8, FMP3_BASECLK_8MHZ);
+						}
+						else
+						{
+							// FMP v2:
+							//	- inPos+1..2 = uPD8253-5 timer value (5 MHz mode)
+							//	- inPos+3..4 = uPD8253-5 timer value (8 MHz mode)
+							tmrPeriod5 = ReadLE16(&SongData[inPos + 0x01]);
+							tmrPeriod8 = ReadLE16(&SongData[inPos + 0x03]);
+							inPos += 0x05;
+						
+							//tempLng = sprintf(tempBuf, "T5 Tempo: %.3f BPM", 60000000.0 / PCTimer2MidTempo(tmrPeriod5, FMP2_BASECLK_5MHZ));
+							//WriteMetaEvent(&midFileInf, &MTS, 0x06, tempLng, tempBuf);
+							//tempLng = sprintf(tempBuf, "T8 Tempo: %.3f BPM", 60000000.0 / PCTimer2MidTempo(tmrPeriod8, FMP2_BASECLK_8MHZ));
+							//WriteMetaEvent(&midFileInf, &MTS, 0x06, tempLng, tempBuf);
+							
+							midiTempo = PCTimer2MidTempo(tmrPeriod5, FMP2_BASECLK_5MHZ);
+							//midiTempo = PCTimer2MidTempo(tmrPeriod8, FMP2_BASECLK_8MHZ);
+						}
+						WriteBE32(tempArr, midiTempo);
+						WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
 					}
-					else	// FMP v2
-					{
-						tempLng = ReadLE16(&SongData[inPos + 0x01]);
-						tempLng = (UINT32)((UINT64)500000 * tempLng / 0x32F0);
-						inPos += 0x05;
-					}
-					WriteBE32(tempArr, tempLng);
-					WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
 					break;
 				case 0x83:	// Set Note Velocity
-					tempByt = SongData[inPos + 0x01];
-					curNoteVol = tempByt;
+					curNoteVol = SongData[inPos + 0x01];
 					inPos += 0x02;
 					break;
 				case 0x84:	// Set Modulation
@@ -428,7 +498,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 				case 0x89:	// Loop End
 					if (! LoopIdx)
 					{
-						printf("Warning: Loop End without Loop Start!\n");
+						printf("Warning: Loop End without Loop Start on track %X at %04X\n", curTrk, inPos);
 						trkEnd = 1;
 						break;
 					}
@@ -453,6 +523,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos = LoopPos[LoopIdx];
 					LoopIdx ++;
 					break;
+				//case 0x8A:	// Loop Exit
 				case 0x8B:	// Set Pan
 					tempByt = SongData[inPos + 0x01];
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, tempByt);
@@ -504,7 +575,16 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					WriteEvent(&midFileInf, &MTS, 0xB0, SongData[inPos + 0x01], SongData[inPos + 0x02]);
 					inPos += 0x03;
 					break;
+				case 0x91:	// set unused value
+					printf("Event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					inPos += 0x02;
+					break;
+				case 0x92:	// set unused value (invalid in FMP v2, working in FMP v3)
+					printf("Event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					inPos += 0x02;
+					break;
 				case 0x93:	// MT-32 MIDI channel
+				case 0x94:	// CM-64 MIDI channel
 				case 0x95:	// SC-55 MIDI channel
 					cmdModMask = 1 << (curCmd - 0x93);
 					if (MODULE_MASK & cmdModMask)
@@ -515,6 +595,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos += 0x02;
 					break;
 				case 0x96:	// MT-32 Expression
+				case 0x97:	// CM-64 Expression
 				case 0x98:	// SC-55 Expression
 					cmdModMask = 1 << (curCmd - 0x96);
 					if (MODULE_MASK & cmdModMask)
@@ -522,6 +603,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos += 0x02;
 					break;
 				case 0x99:	// MT-32 Volume
+				case 0x9A:	// CM-64 Volume
 				case 0x9B:	// SC-55 Volume
 					cmdModMask = 1 << (curCmd - 0x99);
 					if (MODULE_MASK & cmdModMask)
@@ -529,8 +611,9 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos += 0x02;
 					break;
 				case 0x9C:	// MT-32 Stop Track
+				case 0x9D:	// CM-64 Stop Track
 				case 0x9E:	// SC-55 Stop Track
-					//printf("Event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
+					//printf("Event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
 					cmdModMask = 1 << (curCmd - 0x9C);
 					// The masking here is slightly different, because I want to:
 					//  1. stop the track when MIDI_MODE == command_mode
@@ -540,6 +623,8 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 						trkEnd = 1;
 					inPos += 0x01;
 					break;
+				case 0x9F:	// MT-32 MIDI controller
+				case 0xA0:	// CM-64 MIDI controller
 				case 0xA1:	// SC-55 MIDI controller
 					cmdModMask = 1 << (curCmd - 0x9F);
 					if (MODULE_MASK & cmdModMask)
@@ -547,6 +632,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos += 0x03;
 					break;
 				case 0xA2:	// MT-32 instrument
+				case 0xA3:	// CM-64 instrument
 				case 0xA4:	// SC-55 instrument
 					cmdModMask = 1 << (curCmd - 0xA2);
 					if (MODULE_MASK & cmdModMask)
@@ -554,6 +640,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos += 0x02;
 					break;
 				case 0xA5:	// MT-32 Pan
+				case 0xA6:	// CM-64 Pan
 				case 0xA7:	// SC-55 Pan
 					cmdModMask = 1 << (curCmd - 0xA5);
 					if (MODULE_MASK & cmdModMask)
@@ -561,6 +648,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos += 0x02;
 					break;
 				case 0xA8:	// Send MT-32 SysEx Data
+				case 0xA9:	// Send CM-64 SysEx Data
 				case 0xAA:	// Send SC-55 SysEx Data
 					sysExData[0x00] = 0x41;			// Roland ID
 					for (sysExLen = 0x01; inPos + sysExLen < SongLen; sysExLen ++)
@@ -583,43 +671,71 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					}
 					inPos += sysExLen;
 					break;
+				case 0xAB:	// increase Note Velocity
+					curNoteVol ++;
+					inPos += 0x01;
+					break;
+				case 0xAC:	// decrease Note Velocity
+					curNoteVol --;
+					inPos += 0x01;
+					break;
 				case 0xAD:	// set global Tick Multiplier
 					// The tick multiplier is handled separately using gblEvts.
 					//printf("Track %X at %04X: Set Tick Multiplier = %u\n", curTrk, inPos, tickMult);
-					//WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
-					//WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SongData[inPos + 0x01]);
 					inPos += 0x02;
 					break;
+				case 0xAE:	// set OPN Timer A/B
+					printf("Setting OPN timer on track %X at %04X\n", curTrk, inPos);
+					if (FMP_VER == 3)	// FMP v3
+					{
+						// set OPN Timer A
+						// SongData[inPos + 0x01] -> register 24h
+						// SongData[inPos + 0x02] -> register 25h
+						inPos += 0x03;
+					}
+					else
+					{
+						// set OPN Timer B
+						// SongData[inPos + 0x01] -> register 26h
+						inPos += 0x02;
+					}
+					break;
+				//case 0xAF:	// ?? modifies file pointer
+				//	inPos = 0xFFFF - 1 + [some global value]
+				//	break;
 				case 0xB0:	// MT-32 Pitch Bend
+				case 0xB1:	// CM-64 Pitch Bend
 				case 0xB2:	// SC-55 Pitch Bend
 					cmdModMask = 1 << (curCmd - 0xB0);
 					if (MODULE_MASK & cmdModMask)
 						WriteEvent(&midFileInf, &MTS, 0xE0, SongData[inPos + 0x01], SongData[inPos + 0x02]);
 					inPos += 0x03;
 					break;
-				case 0xB3:
-					printf("Event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
+				case 0xB3:	// SC-55 something (yes, SC-55 first and no MT-32 variant)
+				case 0xB4:	// CM-64 something
+					// It sets a global variable that defaults to 0x0E and is used to send a Note Off.
+					printf("Event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					//WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
 					inPos += 0x02;
 					break;
-				case 0xB6:	// Tempo/Timing?
-					// TODO: read [inPos + 0x02] to get actual base timing
-					tempLng = ReadLE24(&SongData[inPos + 0x03]);
-					tempLng = (UINT32)((UINT64)500000 * tempLng / 0x32F000);
-					WriteBE32(tempArr, tempLng);
-					WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
-					inPos += 0x08;
+				//case 0xB5:	// unused/invald in FMP v2.1 and v3.04
+				case 0xB6:
+					// set unknown flag to 0
+					printf("Event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					inPos += 0x01;
 					break;
-				case 0xB7:	// ?Timing related? (set OPN Timer A?)
-					inPos += 0x04;
+				case 0xB7:
+					// set unknown flag to 1
+					printf("Event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					inPos += 0x01;
 					break;
 				case 0xFF:	// Track End
 					trkEnd = 1;
 					inPos += 0x01;
 					break;
 				default:
-					printf("Unknown event %02X on track %X at %04X\n", SongData[inPos + 0x00], curTrk, inPos);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
+					printf("Unknown event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					//WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
 					inPos += 0x01;
 					trkEnd = 1;
 					break;
@@ -696,6 +812,10 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 			{
 			case 0x86:	// Sustain Pedal On
 			case 0x87:	// Sustain Pedal Off
+			case 0xAB:	// increase Note Velocity
+			case 0xAC:	// decrease Note Velocity
+			case 0xB6:
+			case 0xB7:
 				cmdLen = 0x01;
 				break;
 			case 0x80:	// Set Instrument
@@ -715,12 +835,13 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 			case 0x9A:	// CM-64 Volume
 			case 0x9B:	// SC-55 Volume
 			case 0xA2:	// MT-32 instrument
-			case 0xA3:	// CM-324 instrument
+			case 0xA3:	// CM-64 instrument
 			case 0xA4:	// SC-55 instrument
 			case 0xA5:	// MT-32 Pan
 			case 0xA6:	// CM-64 Pan
 			case 0xA7:	// SC-55 Pan
-			case 0xB3:
+			case 0xB3:	// SC-55 something
+			case 0xB4:	// CM-64 something
 				cmdLen = 0x02;
 				break;
 			case 0x85:	// Pitch Bend
@@ -733,17 +854,11 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 			case 0xB2:	// SC-55 Pitch Bend
 				cmdLen = 0x03;
 				break;
-			case 0xB7:	// ?Timing related?
-				cmdLen = 0x04;
-				break;
 			case 0x82:	// Tempo
 				if (FMP_VER == 3)	// FMP v3
 					cmdLen = 0x06;
 				else	// FMP v2
 					cmdLen = 0x05;
-				break;
-			case 0xB6:	// Tempo/Timing?
-				cmdLen = 0x08;
 				break;
 			case 0x88:	// Loop Start
 				if (FMP_VER == 3)	// FMP v3
@@ -817,6 +932,13 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 				//printf("Track %X at %04X: Set Tick Multiplier = %u\n", curTrk, inPos, tickMult);
 				cmdLen = 0x02;
 				break;
+			case 0xAE:	// set OPN Timer A/B
+				if (FMP_VER == 3)	// FMP v3
+					cmdLen = 0x03;
+				else	// FMP v2
+					cmdLen = 0x02;
+				break;
+			//case 0xAF:	// ?? modifies file pointer
 			case 0xFF:	// Track End
 				trkEnd = 1;
 				cmdLen = 0x01;
@@ -981,18 +1103,32 @@ static UINT8 WriteFileData(UINT32 dataLen, const UINT8* data, const char* fileNa
 	return 0;
 }
 
+INLINE UINT32 PCTimer2MidTempo(UINT32 period, UINT32 baseClock)
+{
+	// BPM = 60 * (baseClock / 2) / period / MIDI_RES;
+	// MIDI tempo = 60000000 / BPM
+	return (UINT32)((UINT64)1000000 * MIDI_RES * period * 2 / baseClock);
+}
 
-static UINT16 ReadLE16(const UINT8* data)
+INLINE UINT32 YMTimerB2MidTempo(UINT8 timerB, UINT32 baseClock)
+{
+	UINT16 timerPeriod = (0x100 - timerB) << 4;
+	double ticksPerSec = baseClock * 2.0 / (6 * 12 * timerPeriod);
+	return (UINT32)(1000000 * MIDI_RES / ticksPerSec + 0.5);
+}
+
+
+INLINE UINT16 ReadLE16(const UINT8* data)
 {
 	return (data[0x01] << 8) | (data[0x00] << 0);
 }
 
-static UINT32 ReadLE24(const UINT8* data)
+INLINE UINT32 ReadLE24(const UINT8* data)
 {
 	return (data[0x02] << 16) | (data[0x01] <<  8) | (data[0x00] <<  0);
 }
 
-static UINT32 ReadLE32(const UINT8* data)
+INLINE UINT32 ReadLE32(const UINT8* data)
 {
 	return	(data[0x03] << 24) | (data[0x02] << 16) |
 			(data[0x01] <<  8) | (data[0x00] <<  0);
