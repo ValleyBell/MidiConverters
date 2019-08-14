@@ -1,8 +1,10 @@
 // TGL FMP -> Midi Converter
 // -------------------------
+// TODO: FMP v2.x vs. 3.0 vs. 3.x
 // Written by Valley Bell, 27 August 2017
 // based on Twinkle Soft -> Midi Converter
 // Updated with FMP v2 support and module-specific commands on 06 August 2018
+// Updated with correct tempo calculation and disassembly information on 10 August 2019
 //
 // known games and driver versions:
 //	- Appare Den: Fukuryuu no Sho: FMP v3.??
@@ -22,10 +24,19 @@
 //	- Sword Dancer Zoukango: FMP v2.0
 //	- Sword Dancer Zoukango 93: FMP v2.2b
 //	- V.G.: Variable Geo: FMP v3.04
+//	- V.G.: Variable Geo [demo]: FMP v3.0
 //	- V.G. II: The Bout of Cabalistic Goddess: FMP v3.05
+//	- V.G. II: The Bout of Cabalistic Goddess [demo]: FMP v3.04a
 
-// FMP v2 supports MT-32/CM-64/SC-55 specific commands. Those don't work anymore in FMP v3.
-// FMP v2 supports only commands 0x80 .. 0xB4.
+// Misc notes:
+//	- Timing:
+//		FMP v2.x doesn't support the OPN Timer for song timing. (command 0x82 is 5 bytes long)
+//		FMP v3.0 (used by V.G. demo) supports *only* the OPN Timer for song timing. (command 0x82 is 2 bytes long)
+//		FMP v3.04 and later supports OPN and PC98 timers for song timing. (command 0x82 is 6 bytes long)
+//	- Commands:
+//		FMP v2.1 supports commands 0x80 .. 0xB4. (0xB5 is missing for some reason)
+//		FMP v3.04 adds commands 0xB6/0xB7; only in this version module specific commands (0x93..0xAA, 0xB0..0xB5) don't work
+//		FMP v3.05 adds command 0xB8
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -130,6 +141,8 @@ static RUN_NOTE RunNotes[MAX_RUN_NOTES];
 static UINT16 MIDI_RES = 48;
 static UINT16 NUM_LOOPS = 2;
 static UINT8 NO_LOOP_EXT = 0;
+static UINT8 FIX_SYX_CHKSUM = 0;
+static UINT8 USE_PC98_CLK = 0;
 
 static UINT8 FMP_VER = 3;
 static UINT8 MIDI_MODE = 0x03;
@@ -156,6 +169,10 @@ int main(int argc, char* argv[])
 		printf("    -Loops n    Loop each track at least n times. (default: %u)\n", NUM_LOOPS);
 		printf("    -NoLpExt    No Loop Extension\n");
 		printf("                Do not fill short tracks to the length of longer ones.\n");
+		printf("    -FixSyxSum  Fix an erroneous Roland SysEx checksum of 0x80 to 0x00.\n");
+		printf("    -UsePC98Clk Use actual PC-98 clock for tempo calculation.\n");
+		printf("                By default, clock values reversed from existing songs are used that\n");
+		printf("                result in accurate BPM values and were likely used by the devs.\n");
 		printf("Verified games:\n");
 		printf("    FMP v2: Edge\n");
 		printf("    FMP v3: V.G. 1/2, Briganty, Steam-Heart's\n");
@@ -196,6 +213,10 @@ int main(int argc, char* argv[])
 		}
 		else if (! stricmp(argv[argbase] + 1, "NoLpExt"))
 			NO_LOOP_EXT = 1;
+		else if (! stricmp(argv[argbase] + 1, "FixSyxSum"))
+			FIX_SYX_CHKSUM = 1;
+		else if (! stricmp(argv[argbase] + 1, "UsePC98Clk"))
+			USE_PC98_CLK = 1;
 		else
 			break;
 		argbase ++;
@@ -238,7 +259,7 @@ int main(int argc, char* argv[])
 	free(ROMData);	ROMData = NULL;
 	
 #ifdef _DEBUG
-	//getchar();
+	getchar();
 #endif
 	
 	return 0;
@@ -259,7 +280,8 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	UINT8 LoopIdx;
 	UINT16 mstLoopCount;
 	UINT16 LoopCount[8];
-	UINT16 LoopPos[8];
+	UINT16 LoopStPos[8];
+	UINT16 LoopEndPos[8];
 	UINT8 tickMult;
 	UINT8 tickDelay;
 	EVENT_LIST gblEvts;
@@ -287,7 +309,10 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 		return 0x80;
 	}
 	
-	trkCnt = 20;
+	if (FMP_VER == 2)
+		trkCnt = 18;	// FMP v2 has 18 tracks
+	else
+		trkCnt = 20;	// FMP v2 has 20 tracks (though the header has space reserved for 28)
 	
 	midFileInf.alloc = 0x20000;	// 128 KB should be enough
 	midFileInf.data = (UINT8*)malloc(midFileInf.alloc);
@@ -302,10 +327,18 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	WriteMidiHeader(&midFileInf, 0x0001, trkCnt, MIDI_RES);
 	
 	inPos = 0x04;
+	tempLng = 0xFFFF;
 	for (curTrk = 0; curTrk < trkCnt; curTrk ++, inPos += 0x02)
 	{
+		if (inPos >= tempLng)	// just for safety
+		{
+			trkCnt = curTrk;
+			break;
+		}
 		tempTInf = &trkInf[curTrk];
 		tempTInf->StartOfs = ReadLE16(&SongData[inPos]);
+		if (tempLng > tempTInf->StartOfs)
+			tempLng = tempTInf->StartOfs;
 		tempTInf->LoopOfs = 0x0000;
 		tempTInf->TickCnt = 0;
 		tempTInf->LoopTimes = NUM_LOOPS;
@@ -328,7 +361,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 		LoopIdx = 0x00;
 		mstLoopCount = 0;
 		MTS.midChn = curTrk;
-		curNoteVol = 0x7F;
+		curNoteVol = 0x00;	// values other than 0 cause stray notes in VG2_07.MGS/MG2
 		RunNoteCnt = 0;
 		
 		tickMult = 1;
@@ -347,7 +380,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					tempLng = curTrkTick - gblEvts.data[curGblEvt][0];
 					MTS.curDly -= tempLng * tickMult;
 					//if (gblEvts.data[curGblEvt][0] != curTrkTick)
-					//	printf("Warning: Mid-Delay Tick Multiplier Change on track %X at %04X\n", curTrk, inPos);
+					//	printf("Warning: Mid-Delay Tick Multiplier Change on track %u at %04X\n", curTrk, inPos);
 					
 					tickMult = (gblEvts.data[curGblEvt][1] >> 8) & 0xFF;
 					
@@ -363,7 +396,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 				inPos += 0x02;
 				
 				curNote = curCmd;
-				if (! curNoteLen)	// length == 0 -> rest (confirmed with MIDI log of sound driver)
+				if (! curNote || ! curNoteLen)	// rest for note 0 or length 0 (confirmed disassembly)
 					curNote = 0xFF;
 				
 				CheckRunningNotes(&midFileInf, &MTS.curDly);
@@ -409,7 +442,22 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 						UINT32 midiTempo;
 						char* tempBuf = (char*)sysExData;
 						
-						if (FMP_VER == 3)
+						if (FMP_VER == 0)
+						{
+							// weird variant of FMP v3.0, found in V.G. demo
+							//	- inPos+1 = OPN Timer B value
+							tmrValYM = SongData[inPos + 0x01];
+							inPos += 0x02;
+						
+							//tempLng = sprintf(tempBuf, "YM Tempo: %.3f BPM", 60000000.0 / YMTimerB2MidTempo(tmrValYM, FMP3_BASECLK_FM));
+							//WriteMetaEvent(&midFileInf, &MTS, 0x06, tempLng, tempBuf);
+							
+							if (USE_PC98_CLK)
+								midiTempo = YMTimerB2MidTempo(tmrValYM, PC98_BASECLK_FM);
+							else
+								midiTempo = YMTimerB2MidTempo(tmrValYM, FMP3_BASECLK_FM);
+						}
+						else if (FMP_VER == 3)
 						{
 							// FMP v3:
 							//	- inPos+1 = OPN Timer B value
@@ -429,8 +477,16 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 							//tempLng = sprintf(tempBuf, "T8 Tempo: %.3f BPM", 60000000.0 / PCTimer2MidTempo(tmrPeriod8, FMP3_BASECLK_8MHZ));
 							//WriteMetaEvent(&midFileInf, &MTS, 0x06, tempLng, tempBuf);
 							
-							midiTempo = PCTimer2MidTempo(tmrPeriod5, FMP3_BASECLK_5MHZ);
-							//midiTempo = PCTimer2MidTempo(tmrPeriod8, FMP3_BASECLK_8MHZ);
+							if (USE_PC98_CLK)
+							{
+								midiTempo = PCTimer2MidTempo(tmrPeriod5, PC98_BASECLK_5MHZ);
+								//midiTempo = PCTimer2MidTempo(tmrPeriod8, PC98_BASECLK_8MHZ);
+							}
+							else
+							{
+								midiTempo = PCTimer2MidTempo(tmrPeriod5, FMP3_BASECLK_5MHZ);
+								//midiTempo = PCTimer2MidTempo(tmrPeriod8, FMP3_BASECLK_8MHZ);
+							}
 						}
 						else
 						{
@@ -446,8 +502,16 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 							//tempLng = sprintf(tempBuf, "T8 Tempo: %.3f BPM", 60000000.0 / PCTimer2MidTempo(tmrPeriod8, FMP2_BASECLK_8MHZ));
 							//WriteMetaEvent(&midFileInf, &MTS, 0x06, tempLng, tempBuf);
 							
-							midiTempo = PCTimer2MidTempo(tmrPeriod5, FMP2_BASECLK_5MHZ);
-							//midiTempo = PCTimer2MidTempo(tmrPeriod8, FMP2_BASECLK_8MHZ);
+							if (USE_PC98_CLK)
+							{
+								midiTempo = PCTimer2MidTempo(tmrPeriod5, PC98_BASECLK_5MHZ);
+								//midiTempo = PCTimer2MidTempo(tmrPeriod8, PC98_BASECLK_8MHZ);
+							}
+							else
+							{
+								midiTempo = PCTimer2MidTempo(tmrPeriod5, FMP2_BASECLK_5MHZ);
+								//midiTempo = PCTimer2MidTempo(tmrPeriod8, FMP2_BASECLK_8MHZ);
+							}
 						}
 						WriteBE32(tempArr, midiTempo);
 						WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
@@ -477,17 +541,27 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 				case 0x88:	// Loop Start
 					if (FMP_VER == 3)	// FMP v3
 					{
-						tempByt = SongData[inPos + 0x03];
+						// The Loop End offset is an absolute file offset that must point at the
+						// delay byte *before* the Loop End command in order to work properly.
+						// I assume that this is the reason, that most Loop End commands are
+						// preceded by the bytes "40 00 00". (dummy note + 0 tick delay)
+						// However, none of the files I've seen sets this offset correctly, so I'll just ignore it
+						// and handle it the FMP v3 way. (I haven't seen any file use the Loop Exit command though.)
+						//LoopEndPos[LoopIdx] = ReadLE16(&SongData[inPos + 0x01]);
+						LoopEndPos[LoopIdx] = 0x0000;
+						LoopCount[LoopIdx] = SongData[inPos + 0x03];
 						inPos += 0x04;
 					}
 					else	// FMP v2
 					{
-						tempByt = SongData[inPos + 0x01];
+						// In FMP v2, the Loop End offset is always set when encountering the respective Loop End command.
+						// However, it's broken and the driver ends up processing the command byte as delay.
+						LoopEndPos[LoopIdx] = 0x0000;
+						LoopCount[LoopIdx] = SongData[inPos + 0x01];
 						inPos += 0x02;
 					}
+					LoopStPos[LoopIdx] = inPos;
 					
-					LoopPos[LoopIdx] = inPos;
-					LoopCount[LoopIdx] = tempByt;
 					if (LoopCount[LoopIdx] == 0x00)
 					{
 						mstLoopCount = 0;
@@ -498,13 +572,15 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 				case 0x89:	// Loop End
 					if (! LoopIdx)
 					{
-						printf("Warning: Loop End without Loop Start on track %X at %04X\n", curTrk, inPos);
+						printf("Warning: Loop End without Loop Start on track %u at %04X\n", curTrk, inPos);
 						trkEnd = 1;
 						break;
 					}
 					inPos += 0x01;
 					
 					LoopIdx --;
+					if (! LoopEndPos[LoopIdx])
+						LoopEndPos[LoopIdx] = inPos - 0x02;
 					if (! LoopCount[LoopIdx])
 					{
 						// master loop
@@ -520,16 +596,31 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 							break;
 					}
 					// loop back
-					inPos = LoopPos[LoopIdx];
+					inPos = LoopStPos[LoopIdx];
 					LoopIdx ++;
 					break;
-				//case 0x8A:	// Loop Exit
+				case 0x8A:	// Loop Exit
+					if (! LoopIdx)
+					{
+						printf("Warning: Loop Exit without Loop Start on track %u at %04X\n", curTrk, inPos);
+						trkEnd = 1;
+						break;
+					}
+					inPos += 0x01;
+					
+					if (LoopCount[LoopIdx - 1] == 1)
+					{
+						// output warning, because I have yet to find a file that uses this
+						printf("Warning: Loop Exit on track %u at %04X\n", curTrk, inPos);
+						inPos = LoopEndPos[LoopIdx - 1];	// jump to Loop End command
+					}
+					break;
 				case 0x8B:	// Set Pan
 					tempByt = SongData[inPos + 0x01];
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, tempByt);
 					inPos += 0x02;
 					break;
-				case 0x8C:	// Send SysEx Data
+				case 0x8C:	// send Roland SysEx Data
 					sysExData[0x00] = 0x41;			// Roland ID
 					for (sysExLen = 0x01; inPos + sysExLen < SongLen; sysExLen ++)
 					{
@@ -542,23 +633,36 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 						if (sysExData[sysExLen] == 0xF7)
 							break;
 					}
-					if (sysExData[sysExLen] == 0xF7)
+					if (FIX_SYX_CHKSUM && sysExLen > 1)
 					{
-						sysExLen ++;	// count end SysEx End command
-						tempByt = 1;
-						if (1)
-						{
-							// comfort option: ignore SysEx messages that don't fit the device
-							// The actual driver sends them regardless.
-							// (Commands A8..AA have to be used for device-specific messages.)
-							if ((MODULE_MASK == 0x01) && (sysExData[0x02] & 0xF0) != 0x10)	// check for MT-32 ID (0x16)
-								tempByt = 0;
-							else if ((MODULE_MASK == 0x04) && (sysExData[0x02] & 0xF0) != 0x40)	// check for SC-55 ID (0x42/0x45)
-								tempByt = 0;
-						}
-						if (tempByt)
-							WriteLongEvent(&midFileInf, &MTS, 0xF0, sysExLen, sysExData);
+						if (sysExData[sysExLen - 1] == 0x80)
+							sysExData[sysExLen - 1] = 0x00;
 					}
+					if (sysExData[sysExLen] == 0xF7)
+						sysExLen ++;	// count end SysEx End command
+					tempByt = 1;
+					if (1)
+					{
+						// comfort option: ignore SysEx messages that don't fit the device
+						// The actual driver sends them regardless.
+						// (Commands A8..AA have to be used for device-specific messages.)
+						if ((MODULE_MASK == 0x01) && (sysExData[0x02] & 0xF0) != 0x10)	// check for MT-32 ID (0x16)
+							tempByt = 0;
+						else if ((MODULE_MASK == 0x04) && (sysExData[0x02] & 0xF0) != 0x40)	// check for SC-55 ID (0x42/0x45)
+							tempByt = 0;
+					}
+					if (tempByt)
+						WriteLongEvent(&midFileInf, &MTS, 0xF0, sysExLen, sysExData);
+					inPos += sysExLen;
+					break;
+				case 0x8D:	// send Raw Data
+					printf("Sending raw MIDI data on track %u at %04X\n", curCmd, curTrk, inPos);
+					for (sysExLen = 0x01; inPos + sysExLen < SongLen; sysExLen ++)
+					{
+						if (SongData[inPos + sysExLen] == 0xFF)
+							break;
+					}
+					sysExLen ++;
 					inPos += sysExLen;
 					break;
 				case 0x8E:	// set MIDI Channel
@@ -576,11 +680,11 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos += 0x03;
 					break;
 				case 0x91:	// set unused value
-					printf("Event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
 					inPos += 0x02;
 					break;
 				case 0x92:	// set unused value (invalid in FMP v2, working in FMP v3)
-					printf("Event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
 					inPos += 0x02;
 					break;
 				case 0x93:	// MT-32 MIDI channel
@@ -613,7 +717,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 				case 0x9C:	// MT-32 Stop Track
 				case 0x9D:	// CM-64 Stop Track
 				case 0x9E:	// SC-55 Stop Track
-					//printf("Event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					//printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
 					cmdModMask = 1 << (curCmd - 0x9C);
 					// The masking here is slightly different, because I want to:
 					//  1. stop the track when MIDI_MODE == command_mode
@@ -647,9 +751,9 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, SongData[inPos + 0x01]);
 					inPos += 0x02;
 					break;
-				case 0xA8:	// Send MT-32 SysEx Data
-				case 0xA9:	// Send CM-64 SysEx Data
-				case 0xAA:	// Send SC-55 SysEx Data
+				case 0xA8:	// send MT-32 SysEx Data
+				case 0xA9:	// send CM-64 SysEx Data
+				case 0xAA:	// send SC-55 SysEx Data
 					sysExData[0x00] = 0x41;			// Roland ID
 					for (sysExLen = 0x01; inPos + sysExLen < SongLen; sysExLen ++)
 					{
@@ -662,13 +766,16 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 						if (sysExData[sysExLen] == 0xF7)
 							break;
 					}
-					if (sysExData[sysExLen] == 0xF7)
+					if (FIX_SYX_CHKSUM && sysExLen > 1)
 					{
-						sysExLen ++;	// count end SysEx End command
-						cmdModMask = 1 << (curCmd - 0xA8);
-						if (MODULE_MASK & cmdModMask)
-							WriteLongEvent(&midFileInf, &MTS, 0xF0, sysExLen, sysExData);
+						if (sysExData[sysExLen - 1] == 0x80)
+							sysExData[sysExLen - 1] = 0x00;
 					}
+					if (sysExData[sysExLen] == 0xF7)
+						sysExLen ++;	// count end SysEx End command
+					cmdModMask = 1 << (curCmd - 0xA8);
+					if (MODULE_MASK & cmdModMask)
+						WriteLongEvent(&midFileInf, &MTS, 0xF0, sysExLen, sysExData);
 					inPos += sysExLen;
 					break;
 				case 0xAB:	// increase Note Velocity
@@ -681,11 +788,11 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					break;
 				case 0xAD:	// set global Tick Multiplier
 					// The tick multiplier is handled separately using gblEvts.
-					//printf("Track %X at %04X: Set Tick Multiplier = %u\n", curTrk, inPos, tickMult);
+					//printf("Track %u at %04X: Set Tick Multiplier = %u\n", curTrk, inPos, tickMult);
 					inPos += 0x02;
 					break;
 				case 0xAE:	// set OPN Timer A/B
-					printf("Setting OPN timer on track %X at %04X\n", curTrk, inPos);
+					printf("Setting OPN timer on track %u at %04X\n", curTrk, inPos);
 					if (FMP_VER == 3)	// FMP v3
 					{
 						// set OPN Timer A
@@ -700,9 +807,10 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 						inPos += 0x02;
 					}
 					break;
-				//case 0xAF:	// ?? modifies file pointer
-				//	inPos = 0xFFFF - 1 + [some global value]
-				//	break;
+				case 0xAF:	// some sort of Track End command?
+					printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
+					inPos = 0xFFFF - 1;	// this is exactly what the driver does
+					break;
 				case 0xB0:	// MT-32 Pitch Bend
 				case 0xB1:	// CM-64 Pitch Bend
 				case 0xB2:	// SC-55 Pitch Bend
@@ -711,30 +819,57 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 						WriteEvent(&midFileInf, &MTS, 0xE0, SongData[inPos + 0x01], SongData[inPos + 0x02]);
 					inPos += 0x03;
 					break;
-				case 0xB3:	// SC-55 something (yes, SC-55 first and no MT-32 variant)
+				case 0xB3:	// SC-55 something (yes, SC-55 first)
 				case 0xB4:	// CM-64 something
-					// It sets a global variable that defaults to 0x0E and is used to send a Note Off.
-					printf("Event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
-					//WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
+				case 0xB5:	// MT-32 something
+					printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
+					cmdModMask = 1 << (0xB5 - curCmd);
+					if (MODULE_MASK & cmdModMask)
+					{
+						// It sets a global variable that defaults to 0x0E and is used to send a Note Off.
+						//WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
+					}
 					inPos += 0x02;
 					break;
-				//case 0xB5:	// unused/invald in FMP v2.1 and v3.04
 				case 0xB6:
 					// set unknown flag to 0
-					printf("Event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
 					inPos += 0x01;
 					break;
 				case 0xB7:
 					// set unknown flag to 1
-					printf("Event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
 					inPos += 0x01;
+					break;
+				case 0xB8:	// send SysEx Data
+					// for generic SysEx Data (no enforced Roland ID)
+					for (sysExLen = 0x00; inPos + 0x01 + sysExLen < SongLen; sysExLen ++)
+					{
+						if (sysExAlloc <= sysExLen)
+						{
+							sysExAlloc *= 2;
+							sysExData = (UINT8*)realloc(sysExData, sysExAlloc);
+						}
+						sysExData[sysExLen] = SongData[inPos + 0x01 + sysExLen];
+						if (sysExData[sysExLen] == 0xF7)
+							break;
+					}
+					if (FIX_SYX_CHKSUM && sysExLen > 1)
+					{
+						if (sysExData[sysExLen - 1] == 0x80)
+							sysExData[sysExLen - 1] = 0x00;
+					}
+					if (sysExData[sysExLen] == 0xF7)
+						sysExLen ++;	// count end SysEx End command
+					WriteLongEvent(&midFileInf, &MTS, 0xF0, sysExLen, sysExData);
+					inPos += 0x01 + sysExLen;
 					break;
 				case 0xFF:	// Track End
 					trkEnd = 1;
 					inPos += 0x01;
 					break;
 				default:
-					printf("Unknown event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					printf("Unknown event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
 					//WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
 					inPos += 0x01;
 					trkEnd = 1;
@@ -791,7 +926,8 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 	UINT8 curCmd;
 	UINT8 LoopIdx;
 	UINT16 LoopCount[8];
-	UINT16 LoopPos[8];
+	UINT16 LoopStPos[8];
+	UINT16 LoopEndPos[8];
 	UINT8 tempByt;
 	
 	trkEnd = 0;
@@ -863,17 +999,18 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 			case 0x88:	// Loop Start
 				if (FMP_VER == 3)	// FMP v3
 				{
-					tempByt = SongData[inPos + 0x03];
+					LoopEndPos[LoopIdx] = ReadLE16(&SongData[inPos + 0x01]);
+					LoopCount[LoopIdx] = SongData[inPos + 0x03];
 					cmdLen = 0x04;
 				}
 				else	// FMP v2
 				{
-					tempByt = SongData[inPos + 0x01];
+					LoopEndPos[LoopIdx] = 0x0000;
+					LoopCount[LoopIdx] = SongData[inPos + 0x01];
 					cmdLen = 0x02;
 				}
 				
-				LoopPos[LoopIdx] = inPos + cmdLen;
-				LoopCount[LoopIdx] = tempByt;
+				LoopStPos[LoopIdx] = inPos + cmdLen;
 				if (LoopCount[LoopIdx] == 0x00)
 					TrkInf->LoopOfs = inPos;
 				LoopIdx ++;
@@ -887,22 +1024,46 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 				cmdLen = 0x01;
 				
 				LoopIdx --;
+				if (! LoopEndPos[LoopIdx])
+					LoopEndPos[LoopIdx] = inPos;
 				if (LoopCount[LoopIdx])
 					LoopCount[LoopIdx] --;
 				if (LoopCount[LoopIdx])
 				{
 					// loop back
-					inPos = LoopPos[LoopIdx];
+					inPos = LoopStPos[LoopIdx];
 					cmdLen = 0x00;
 					LoopIdx ++;
 				}
 				break;
-			case 0x8C:	// Send SysEx Data
+			case 0x8A:	// Loop Exit
+				if (! LoopIdx)
+				{
+					trkEnd = 1;
+					break;
+				}
+				inPos += 0x01;
+					
+				if (LoopCount[LoopIdx - 1] == 1)
+					inPos = LoopEndPos[LoopIdx - 1];	// jump to Loop End command
+				break;
+			case 0x8C:	// send Roland SysEx Data
+			case 0xB8:	// send SysEx Data
 				for (cmdLen = 0x01; inPos + cmdLen < SongLen; cmdLen ++)
 				{
 					if (SongData[inPos + cmdLen] == 0xF7)
 					{
-						cmdLen ++;	// count end SysEx End command
+						cmdLen ++;	// count SysEx End command
+						break;
+					}
+				}
+				break;
+			case 0x8D:	// send Raw Data
+				for (cmdLen = 0x01; inPos + cmdLen < SongLen; cmdLen ++)
+				{
+					if (SongData[inPos + cmdLen] == 0xFF)
+					{
+						cmdLen ++;	// count terminator byte
 						break;
 					}
 				}
@@ -915,9 +1076,9 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 					trkEnd = 1;
 				cmdLen = 0x01;
 				break;
-			case 0xA8:	// Send MT-32 SysEx Data
-			case 0xA9:	// Send CM-64 SysEx Data
-			case 0xAA:	// Send SC-55 SysEx Data
+			case 0xA8:	// send MT-32 SysEx Data
+			case 0xA9:	// send CM-64 SysEx Data
+			case 0xAA:	// send SC-55 SysEx Data
 				for (cmdLen = 0x01; inPos + cmdLen < SongLen; cmdLen ++)
 				{
 					if (SongData[inPos + cmdLen] == 0xF7)
@@ -929,7 +1090,7 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 				break;
 			case 0xAD:	// set global Tick Multiplier
 				AddEventToList(gblEvts, TrkInf->TickCnt, (curCmd << 0) | (SongData[inPos + 0x01] << 8));
-				//printf("Track %X at %04X: Set Tick Multiplier = %u\n", curTrk, inPos, tickMult);
+				//printf("Track %u at %04X: Set Tick Multiplier = %u\n", curTrk, inPos, tickMult);
 				cmdLen = 0x02;
 				break;
 			case 0xAE:	// set OPN Timer A/B
@@ -938,7 +1099,9 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 				else	// FMP v2
 					cmdLen = 0x02;
 				break;
-			//case 0xAF:	// ?? modifies file pointer
+			case 0xAF:	// ??
+				trkEnd = 1;
+				break;
 			case 0xFF:	// Track End
 				trkEnd = 1;
 				cmdLen = 0x01;
@@ -1042,6 +1205,7 @@ static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay)
 				tempDly = 0;
 				
 				File_CheckRealloc(fInf, 0x03);
+				// FMP actually sends 80 note 00
 				fInf->data[fInf->pos + 0x00] = 0x90 | tempNote->midChn;
 				fInf->data[fInf->pos + 0x01] = tempNote->note;
 				fInf->data[fInf->pos + 0x02] = 0x00;
