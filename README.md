@@ -46,7 +46,7 @@ I recommend VGMTrans to convert Squaresoft SPCs to MIDI. It uses an improved ver
 ## fmp2mid
 This tool converts TGL FMP songs to MIDI.
 
-I developed the tool using songs from Variable Geo and other GIGA games that use FMP v3. I also tested it with the TGL game "Edge", which uses FMP v2. I haven't seen games that use FMP v1 so far, so I couldn't test support for those.
+I developed the tool using songs from various GIGA and TGL games that use the FMP sound driver. I disassembled a few versions of the FMP sound driver (v2.1, v3.04 and v3.95) while developing the tool.
 
 Currently the tool supports only MIDI FMP songs. OPN/OPNA FMP songs are unsupported as they use a different set of sequence commands.
 
@@ -247,6 +247,14 @@ I wrote this tool to convert music from late MegaDrive Wolfteam games. (The ones
 Right now the tool uses hardcoded instrument mappings - which interestingly worked across all MegaDrive and X68000 games I tested.
 
 For Wolfteam MegaDrive games with PCM drums, it can autodetect the song list and will batch-convert all songs. (compile with `PLMode = 0x01;` to enable it)
+
+## wtmf2mid
+This tool converts Wolfteam MIDI music files to standard MIDIs.
+
+I made this tool to get MIDIs of songs from Arcus Odyssey (because its MT-32 soundtrack is awesome). I disassembled AO's sound driver during the development of this tool.
+
+Wolfteam MIDIs are often stored in larger archives that have a .MID or .MDI extension. The files begin with "MF".
+The format seems to have Little Endian and Big Endian variants. Right now the tool works only with he Big Endian variant used by Wolfteam games on the X68000.
 
 ## yong2mid
 This tool converts songs from Yong Yong games to MIDI.
