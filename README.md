@@ -35,6 +35,13 @@ Despite its name, this tool converts songs from Sonic Spinball on the Sega Maste
 
 I did a quick hack of de2mid to support Sonic Spinball's sound format, which is the cause of the name. I kept the tool for historical purposes. You should use smps2mid if you want to convert songs from Sonic Spinball (8-bit) to MIDI.
 
+## eash2mid
+This tool converts songs from MegaDrive ROMs that uses the EA/Steve Hayes sound driver to MIDI.
+
+I wrote this tool on request by lordskylark. The format uses MIDI commands internally, so the format was easy to reverse-enginneer.
+
+I tested it with songs from Might and Magic 2/3, King's Bounty, Rolo to the Rescue and Populous.
+
 ## ffmq2mid
 This tool converts SPC files from Final Fantasy: Mystic Quest (and other games that use the SNES AKAO format) to MIDI.
 
