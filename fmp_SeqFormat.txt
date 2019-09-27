@@ -1,28 +1,49 @@
-FMP3 Sequence Format (TGL/GIGA)
-====================
-(.M?? files)
+TGL FMP Sequence Format
+=======================
 
-Extentions
+Extensions
 ----------
-MFM - OPN/YM2203
-MF2 - OPNA/YM2608
+M - OPN (YM2203)
+MD - MT-32 / CM-64 / SC-55
+MFM - OPN (YM2203)
+MF2 - OPNA (YM2608)
 MMT - MT-32
 MCM - CM-64
 MGS - SC-55
-MG2 - SC-88
+MG2 - SC-55 mkII or SC-88
 
-Header
+Early games use M/MD files, later games use MFM/MF2/... as file extension.
+MD files contain data for MT-32, CM-64 and SC-55. There are special sequence commands that are only executed when a certain MIDI device is selected.
+
+
+Header v1
+------
+xx*2 bytes - track pointers
+	FM: 17h pointers (.M files)
+	MIDI: 1Ch pointers (.MD files)
+
+Header v2/v3
 ------
 Note: Unused data in the header is dummied out using byte 2E.
 01 byte - FM / MIDI Mode
 	01 - FM mode (OPN/OPNA)
-	02 - MIDI mode (MT-32/SC-55/SC-88)
-01 byte - [FM only] ??
-02 bytes - [FM only] pointer to ?? (instrument data??)
+	02 - MIDI mode (MT-32/CM-64/SC-55/SC-88)
+01 byte - [FM only] number of FM instruments
+02 bytes - [FM only] pointer to instrument data
 xx*2 bytes - track pointers
 	FM: 0Ch pointers
-	MIDI: 14h pointers
+	MIDI: 12h pointers (FMP v2) / 14h pointers (FMP v3)
 10h bytes - space padded with byte 2E
+
+
+Possible ways of version detection
+----------------------------------
+FMP v1 OPN: The first track pointer (at offset 0000h) is always 002Eh.
+FMP v1 MIDI: The first track pointer (at offset 0000h) is always 0038h.
+FMP v2 OPN: The first byte is always 01h. The first track pointer (at offset 0004h) is always 0010h.
+FMP v2 MIDI: The first byte is always 02h. The first track pointer (at offset 0004h) is always 0038h.
+FMP v3 OPN/OPNA: The first byte is always 01h. The first track pointer (at offset 0004h) is often 002Ch. (seems to be vary a lot in V.G. II)
+FMP v3 MIDI: The first byte is always 02h. The first track pointer (at offset 0004h) is always 003Ch.
 
 
 
@@ -33,33 +54,94 @@ command, delay, command, delay, ...
 
 Commands:
 00-7F ll - play note with length ll
-80 ii - set instrument ii
+80 ii - set Instrument ii
 81 vv - set Volume
-82 a1 a2 a3 b1 b2 - set Tempo
+82 a1 a2 b1 b2 - [FMP v1/v2] set Tempo
+	a2a1 = uPD8253-5 timer period, 5 MHz mode
+	b2b1 = uPD8253-5 timer period, 8 MHz mode
+82 yy a1 a2 b1 b2 - [FMP v3.x] set Tempo
+	a2a1 = uPD8253-5 timer period, 5 MHz mode
+	b2b1 = uPD8253-5 timer period, 8 MHz mode
+	yy = OPN timer B value
+82 yy - [FMP v3.0 only] set Tempo
+	yy = OPN timer B value
 83 vv - set Note Velocity
 84 vv - set Modulation
-85 ll mm - Pitch Bend
+85 ll mm - Pitch Bend (ll and mm are raw 7-bit parameters for the MIDI pitch bend command)
 86 - Sustain Pedal On (send MIDI controller 64, value 64)
 87 - Sustain Pedal Off (send MIDI controller 64, value 0)
-88 o1 o2 tt - Loop Start, loop tt times (o2o1 = file offset for Loop End)
+88 tt - [FMP v1/2] Loop Start, loop tt times
+88 o1 o2 tt - [FMP v3] Loop Start, loop tt times (o2o1 = file offset for Loop End, for Loop Exit command)
 89 - Loop End
+8A - Loop Exit - jump to Loop End command during last loop
+	Note: Broken in all FMP driver versions.
 8B pp - set Pan
-8C ... F7 - send SysEx message
+8C ... F7 - send Roland SysEx message (sends F0 41 [data] F7)
+8D ... FF - send raw MIDI data (can be used for any sort of raw MIDI data, including SysEx, notes, etc.)
 8E 0c - set MIDI Channel to cc
 8F vv - set Expression
 90 cc vv - MIDI Controller cc, value vv
-
-A1 a1 a2 - set Tempo? [seen in Briganty]
-
-B6 00 yy a1 a2 a3 b1 b2 - set Tempo [seen in V.G.II]
-	yy - OPN Timer B value? (usually 82h, setting for 48 Ticks per Quarter?)
-	a3a2a1 - ??
-	b2b1 - ?? (b = a / 314.95)
-	Examples:
-		B6 0082 E0A32D 1925 - ~134 BPM
-		B6 0082 E2D529 0122 - ~144 BPM
-	MIDI Tempo = 500 000 * a3a2a1 / 32F000h
-B7 00 y1 y2 - set OPN Timer A value? [seen in V.G.]
-
+91 vv - set Marker 1 value
+92 vv - set Marker 2 value (used for game synchronization in Sword Dancer: BGMA.MD)
+93 cc - [MT-32] set MIDI Channel to cc
+94 cc - [CM-64] set MIDI Channel to cc
+95 cc - [SC-55] set MIDI Channel to cc
+96 vv - [MT-32] set Expression
+97 vv - [CM-64] set Expression
+98 vv - [SC-55] set Expression
+99 vv - [MT-32] set Volume
+9A vv - [CM-64] set Volume
+9B vv - [SC-55] set Volume
+9C - [MT-32] Stop Track
+9D - [CM-64] Stop Track
+9E - [SC-55] Stop Track
+9F cc vv - [MT-32] MIDI Controller cc, value vv
+A0 cc vv - [CM-64] MIDI Controller cc, value vv
+A1 cc vv - [SC-55] MIDI Controller cc, value vv
+A2 ii - [MT-32] set Instrument ii
+A3 ii - [CM-64] set Instrument ii
+A4 ii - [SC-55] set Instrument ii
+A5 pp - [MT-32] set Pan
+A6 pp - [CM-64] set Pan
+A7 pp - [SC-55] set Pan
+A8 ... F7 - [MT-32] send Roland SysEx message (sends F0 41 [data] F7)
+A9 ... F7 - [CM-64] send Roland SysEx message (sends F0 41 [data] F7)
+AA ... F7 - [SC-55] send Roland SysEx message (sends F0 41 [data] F7)
+AB - increase Note Velocity by 1
+AC - decrease Note Velocity by 1
+AD nn - set global tick rate (update once every nn frames, default is 1)
+AE vv - [FMP v1/2] set OPN Timer B (register 26h = vv)
+AE v1 v2 - [FMP v3] set OPN Timer A (register 24h = v1, register 25h = v2)
+AF - ?? (always jumps to song position 0xFFFE)
+B0 ll mm - [MT-32] Pitch Bend
+B1 ll mm - [CM-64] Pitch Bend
+B2 ll mm - [SC-55] Pitch Bend
+B3 vv - [SC-55] ?? (sets some global variable that is used for some Note Off command)
+B4 vv - [CM-64] ??
+B5 vv - [MT-32] ??
+	Note: The order is indeed reversed (SC-55 first) compare to all other device-specific commands.
+B6 - set unused flag to 0 (for game synchronization?)
+B7 - set unused flag to 1
+B8 ... F7 - send (generic) SysEx message (sends F0 [data] F7)
+B9 vv - Bank Select related
+	driver implementation:
+		set GS Variation - send Bank MSB vv, Bank LSB 0
+	usage in sequences:
+		reset Bank Select - send MIDI Controller cc with value 0
 FF - Track End
 	Note: Tracks often end with FF 01 FF.
+
+
+You can caculate BPM (beats per minute) from the FMP tempo values as follows:
+	uPD timer: BPM = 60 / ticksPerBeat * timerBaseClock / 2 / timerPeriod
+	OPN timer: BPM = 60 / ticksPerBeat * 3993600 / (72 * ((0x100 - timerB) * 0x10))
+
+
+ticksPerBeat is 48 for FMP v2/v3 and 24 for FMP v1.
+timerBaseClock is 2457600 (5 MHz mode) or 1996800 (8 MHz mode).
+
+However, the developers seemed to use slightly different values for their tempo calculation when creating the FMP files.
+These values result in integer BPM values:
+FMP v1: seems to use FMP v2 values, but BPMs are often not integer values (like 166.67)
+FMP v2: 2458000 (5 MHz mode), 1998000 (8 MHz mode)
+FMP v3: 2467584 (5 MHz mode), 2005632 (8 MHz mode), these values were verified using MIDIs from Variable Geo Custom.

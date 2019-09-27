@@ -1,27 +1,28 @@
 // TGL FMP -> Midi Converter
 // -------------------------
-// TODO: FMP v2.x vs. 3.0 vs. 3.x
 // Written by Valley Bell, 27 August 2017
 // based on Twinkle Soft -> Midi Converter
 // Updated with FMP v2 support and module-specific commands on 06 August 2018
 // Updated with correct tempo calculation and disassembly information on 10 August 2019
+// Updated with FMP v1 support on 01 September 2019
 //
 // known games and driver versions:
-//	- Appare Den: Fukuryuu no Sho: FMP v3.??
+//	- Appare Den: Fukuryuu no Sho: FMP v3.95b (code says "3.95", but it's newer than Briganty)
 //	- Briganty: The Roots of Darkness: FMP v3.95
 //	- Edge: FMP v2.1
-//	- Farland Story: Tooikuni no Monogatari: FMP v3.??
-//	- Farland Story 2: Arc no Ensei: FMP v3.??
-//	- Farland Story 3: Tenshi no Namida: FMP v3.??
-//	- Farland Story 4: Hakugin no Tsubasa: FMP v3.??
-//	- Farland Story 5: Daichi no Kizuna: FMP v3.??
-//	- Farland Story 6: Kamigami no Isen: FMP v3.??
-//	- Farland Story 7: Shishi Ou no Akashi: FMP v3.??
+//	- Farland Story: Tooikuni no Monogatari: FMP v3.04a
+//	- Farland Story 2: Arc no Ensei: FMP v3.04a
+//	- Farland Story 3: Tenshi no Namida: FMP v3.04a
+//	- Farland Story 4: Hakugin no Tsubasa: FMP v3.04a
+//	- Farland Story 5: Daichi no Kizuna: FMP v3.05
+//	- Farland Story 6: Kamigami no Isen: FMP v3.05
+//	- Farland Story 7: Shishi Ou no Akashi: FMP v3.05
 //	- Harlem Blade: The Greatest of All Time: FMP v3.95
-//	- Kisoushinden Genkaizer: FMP v3.??
+//	- Kisoushinden Genkaizer: FMP v3.05
 //	- Steam-Heart's: FMP v3.04
-//	- [sdg98] Sword Dancer: Goddess of Evil Blade: FMP v3.??
-//	- Sword Dancer Zoukango: FMP v2.0
+//	- Sword Dancer: FMP v1 (MIDIBS.COM v1)
+//	- Sword Dancer: Goddess of Evil Blade: FMP v3.04a
+//	- Sword Dancer Zoukango: FMP v1 (MIDI.COM v2)
 //	- Sword Dancer Zoukango 93: FMP v2.2b
 //	- V.G.: Variable Geo: FMP v3.04
 //	- V.G.: Variable Geo [demo]: FMP v3.0
@@ -29,6 +30,10 @@
 //	- V.G. II: The Bout of Cabalistic Goddess [demo]: FMP v3.04a
 
 // Misc notes:
+//	- Header:
+//		FMP v1 begins right with the 28 track pointers. FMP v2/3 have an additional 4-byte header with the first byte being a version number.
+//		FMP v2 has 18 track pointers.
+//		FMP v3 has 20 track pointers. However, the file header has space for 28 tracks reserved.
 //	- Timing:
 //		FMP v2.x doesn't support the OPN Timer for song timing. (command 0x82 is 5 bytes long)
 //		FMP v3.0 (used by V.G. demo) supports *only* the OPN Timer for song timing. (command 0x82 is 2 bytes long)
@@ -37,6 +42,7 @@
 //		FMP v2.1 supports commands 0x80 .. 0xB4. (0xB5 is missing for some reason)
 //		FMP v3.04 adds commands 0xB6/0xB7; only in this version module specific commands (0x93..0xAA, 0xB0..0xB5) don't work
 //		FMP v3.05 adds command 0xB8
+//		FMP v3.95b adds command 0xB9
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -124,9 +130,9 @@ static const UINT8 MIDI_MOD_MASKS[0x05] =
 #define FMP2_BASECLK_5MHZ	2458000
 #define FMP2_BASECLK_8MHZ	1998000
 // clock values used for creating FMP v3 songs (reverse-engineered using songs from V.G. II)
-#define FMP3_BASECLK_FM		2005600
-#define FMP3_BASECLK_5MHZ	2467400
-#define FMP3_BASECLK_8MHZ	2005600
+#define FMP3_BASECLK_FM		2005632
+#define FMP3_BASECLK_5MHZ	2467584
+#define FMP3_BASECLK_8MHZ	2005632
 
 
 static UINT32 ROMLen;
@@ -138,11 +144,12 @@ static UINT8* MidData;
 static UINT8 RunNoteCnt;
 static RUN_NOTE RunNotes[MAX_RUN_NOTES];
 
-static UINT16 MIDI_RES = 48;
+static UINT16 MIDI_RES = 0;
 static UINT16 NUM_LOOPS = 2;
 static UINT8 NO_LOOP_EXT = 0;
 static UINT8 FIX_SYX_CHKSUM = 0;
 static UINT8 USE_PC98_CLK = 0;
+static UINT8 NO_LOOP_DELAY = 0;
 
 static UINT8 FMP_VER = 3;
 static UINT8 MIDI_MODE = 0x03;
@@ -159,7 +166,9 @@ int main(int argc, char* argv[])
 	{
 		printf("Usage: Fmp2Mid.exe [options] input.bin output.mid\n");
 		printf("Options:\n");
-		printf("    -Ver n      set FMP version (2 or 3, default: %u)\n", FMP_VER);
+		printf("    -Ver n      set FMP version (default: %u)\n", FMP_VER);
+		printf("                1/2/3 - version 1.x / 2.x / 3.x\n");
+		printf("                30 - version 3.0 (for V.G. demo)\n");
 		printf("    -Module n   set MIDI module mode (0 to 4, default: %u)\n", MIDI_MODE);
 		printf("                0 - omit module-specific events\n");
 		printf("                1 - convert MT-32 specific events\n");
@@ -173,6 +182,7 @@ int main(int argc, char* argv[])
 		printf("    -UsePC98Clk Use actual PC-98 clock for tempo calculation.\n");
 		printf("                By default, clock values reversed from existing songs are used that\n");
 		printf("                result in accurate BPM values and were likely used by the devs.\n");
+		printf("    -NoLoopDly  ignore 1-tick-delay after Loop Start commands (some games do that)\n");
 		printf("Verified games:\n");
 		printf("    FMP v2: Edge\n");
 		printf("    FMP v3: V.G. 1/2, Briganty, Steam-Heart's\n");
@@ -217,6 +227,8 @@ int main(int argc, char* argv[])
 			FIX_SYX_CHKSUM = 1;
 		else if (! stricmp(argv[argbase] + 1, "UsePC98Clk"))
 			USE_PC98_CLK = 1;
+		else if (! stricmp(argv[argbase] + 1, "NoLoopDly"))
+			NO_LOOP_DELAY = 1;
 		else
 			break;
 		argbase ++;
@@ -267,7 +279,7 @@ int main(int argc, char* argv[])
 
 UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 {
-	TRK_INFO trkInf[20];
+	TRK_INFO trkInf[28];
 	TRK_INFO* tempTInf;
 	UINT8 trkCnt;
 	UINT8 curTrk;
@@ -287,6 +299,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	EVENT_LIST gblEvts;
 	UINT32 curGblEvt;
 	UINT32 curTrkTick;
+	UINT8 dlyIgnore;
 	
 	UINT32 tempLng;
 	//UINT16 tempSht;
@@ -301,18 +314,13 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	UINT32 sysExLen;
 	UINT8* sysExData;
 	
-	if (SongData[0x00] != 0x02)
+	if (FMP_VER >= 2 && SongData[0x00] != 0x02)
 	{
 		printf("Unsupported FMP format!\n");
 		MidData = NULL;
 		MidLen = 0x00;
 		return 0x80;
 	}
-	
-	if (FMP_VER == 2)
-		trkCnt = 18;	// FMP v2 has 18 tracks
-	else
-		trkCnt = 20;	// FMP v2 has 20 tracks (though the header has space reserved for 28)
 	
 	midFileInf.alloc = 0x20000;	// 128 KB should be enough
 	midFileInf.data = (UINT8*)malloc(midFileInf.alloc);
@@ -324,9 +332,25 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	gblEvts.evtCount = 0;
 	gblEvts.data = NULL;
 	
-	WriteMidiHeader(&midFileInf, 0x0001, trkCnt, MIDI_RES);
+	if (FMP_VER == 1)
+	{
+		MIDI_RES = 24;
+		trkCnt = 28;	// FMP v1 has space for 28 tracks reserved (FM+MIDI?)
+		inPos = 0x00;	// FMP v1 starts right with the track pointers
+	}
+	else if (FMP_VER == 2)
+	{
+		MIDI_RES = 48;
+		trkCnt = 18;	// FMP v2 has 18 MIDI tracks
+		inPos = 0x04;	// skip FM/MIDI mode, FM instrument count / FM instrument data pointer
+	}
+	else
+	{
+		MIDI_RES = 48;
+		trkCnt = 20;	// FMP v3 has 20 MIDI tracks (though the header has space reserved for 28)
+		inPos = 0x04;	// skip FM/MIDI mode, FM instrument count / FM instrument data pointer
+	}
 	
-	inPos = 0x04;
 	tempLng = 0xFFFF;
 	for (curTrk = 0; curTrk < trkCnt; curTrk ++, inPos += 0x02)
 	{
@@ -351,6 +375,8 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	if (! NO_LOOP_EXT)
 		GuessLoopTimes(trkCnt, trkInf);
 	
+	WriteMidiHeader(&midFileInf, 0x0001, trkCnt, MIDI_RES);
+	
 	for (curTrk = 0; curTrk < trkCnt; curTrk ++)
 	{
 		inPos = trkInf[curTrk].StartOfs;
@@ -367,7 +393,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 		tickMult = 1;
 		curGblEvt = 0;
 		curTrkTick = 0;
-		tickDelay = 0;
+		dlyIgnore = 0;
 		while(inPos < SongLen)
 		{
 			while(curGblEvt < gblEvts.evtCount && gblEvts.data[curGblEvt][0] <= curTrkTick)
@@ -442,7 +468,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 						UINT32 midiTempo;
 						char* tempBuf = (char*)sysExData;
 						
-						if (FMP_VER == 0)
+						if (FMP_VER == 30)
 						{
 							// weird variant of FMP v3.0, found in V.G. demo
 							//	- inPos+1 = OPN Timer B value
@@ -490,7 +516,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 						}
 						else
 						{
-							// FMP v2:
+							// FMP v1/2:
 							//	- inPos+1..2 = uPD8253-5 timer value (5 MHz mode)
 							//	- inPos+3..4 = uPD8253-5 timer value (8 MHz mode)
 							tmrPeriod5 = ReadLE16(&SongData[inPos + 0x01]);
@@ -539,14 +565,14 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					inPos += 0x01;
 					break;
 				case 0x88:	// Loop Start
-					if (FMP_VER == 3)	// FMP v3
+					if (FMP_VER >= 3)	// FMP v3
 					{
 						// The Loop End offset is an absolute file offset that must point at the
 						// delay byte *before* the Loop End command in order to work properly.
 						// I assume that this is the reason, that most Loop End commands are
 						// preceded by the bytes "40 00 00". (dummy note + 0 tick delay)
 						// However, none of the files I've seen sets this offset correctly, so I'll just ignore it
-						// and handle it the FMP v3 way. (I haven't seen any file use the Loop Exit command though.)
+						// and handle it the FMP v2 way. (I haven't seen any file use the Loop Exit command though.)
 						//LoopEndPos[LoopIdx] = ReadLE16(&SongData[inPos + 0x01]);
 						LoopEndPos[LoopIdx] = 0x0000;
 						LoopCount[LoopIdx] = SongData[inPos + 0x03];
@@ -568,6 +594,8 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)mstLoopCount);
 					}
 					LoopIdx ++;
+					if (NO_LOOP_DELAY)
+						dlyIgnore = 1;
 					break;
 				case 0x89:	// Loop End
 					if (! LoopIdx)
@@ -598,6 +626,8 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					// loop back
 					inPos = LoopStPos[LoopIdx];
 					LoopIdx ++;
+					if (NO_LOOP_DELAY)
+						dlyIgnore = 1;
 					break;
 				case 0x8A:	// Loop Exit
 					if (! LoopIdx)
@@ -679,12 +709,14 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					WriteEvent(&midFileInf, &MTS, 0xB0, SongData[inPos + 0x01], SongData[inPos + 0x02]);
 					inPos += 0x03;
 					break;
-				case 0x91:	// set unused value
+				case 0x91:	// set Marker 1 value
 					printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x6C, SongData[inPos + 0x01] & 0x7F);
 					inPos += 0x02;
 					break;
-				case 0x92:	// set unused value (invalid in FMP v2, working in FMP v3)
+				case 0x92:	// set Marker 2 value (used for game sync in Sword Dancer: BGMA.MD)
 					printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, SongData[inPos + 0x01] & 0x7F);
 					inPos += 0x02;
 					break;
 				case 0x93:	// MT-32 MIDI channel
@@ -793,7 +825,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					break;
 				case 0xAE:	// set OPN Timer A/B
 					printf("Setting OPN timer on track %u at %04X\n", curTrk, inPos);
-					if (FMP_VER == 3)	// FMP v3
+					if (FMP_VER >= 3)	// FMP v3
 					{
 						// set OPN Timer A
 						// SongData[inPos + 0x01] -> register 24h
@@ -864,6 +896,21 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 					WriteLongEvent(&midFileInf, &MTS, 0xF0, sysExLen, sysExData);
 					inPos += 0x01 + sysExLen;
 					break;
+				case 0xB9:
+					// Note: The driver's implementation and how the sequences use it differ.
+#if 0
+					// GS variation sound
+					// This is how the driver implements it.
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x00, SongData[inPos + 0x01]);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x20, 0x00);
+#else
+					// reset Bank Select
+					// This is how it seems to be used by the sequences in "Appare Den". (the only game to use support)
+					// It is used in: OR_12.MGS, OR_18.MGS, OR_24.MGS, OR_27.MGS, OR_29.MGS
+					WriteEvent(&midFileInf, &MTS, 0xB0, SongData[inPos + 0x01], 0x00);
+#endif
+					inPos += 0x02;
+					break;
 				case 0xFF:	// Track End
 					trkEnd = 1;
 					inPos += 0x01;
@@ -881,7 +928,13 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 			
 			tickDelay = SongData[inPos];	inPos ++;
 			curTrkTick += tickDelay;
-			MTS.curDly += (UINT16)tickDelay * tickMult;
+			if (! dlyIgnore)
+				MTS.curDly += (UINT16)tickDelay * tickMult;
+			else
+			{
+				printf("Ignoring loop delay of %u %s on track %u at %04X\n", tickDelay, (tickDelay == 1) ? "tick" : "ticks", curTrk, inPos - 1);
+				dlyIgnore = 0;
+			}
 		}
 		FlushRunningNotes(&midFileInf, &MTS);
 		
@@ -978,6 +1031,7 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 			case 0xA7:	// SC-55 Pan
 			case 0xB3:	// SC-55 something
 			case 0xB4:	// CM-64 something
+			case 0xB9:	// GS variation sound
 				cmdLen = 0x02;
 				break;
 			case 0x85:	// Pitch Bend
@@ -991,13 +1045,15 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 				cmdLen = 0x03;
 				break;
 			case 0x82:	// Tempo
-				if (FMP_VER == 3)	// FMP v3
+				if (FMP_VER == 30)	// FMP v3.0
+					cmdLen = 0x02;
+				else if (FMP_VER == 3)	// FMP v3
 					cmdLen = 0x06;
 				else	// FMP v2
 					cmdLen = 0x05;
 				break;
 			case 0x88:	// Loop Start
-				if (FMP_VER == 3)	// FMP v3
+				if (FMP_VER >= 3)	// FMP v3
 				{
 					LoopEndPos[LoopIdx] = ReadLE16(&SongData[inPos + 0x01]);
 					LoopCount[LoopIdx] = SongData[inPos + 0x03];
@@ -1094,7 +1150,7 @@ static void PreparseFmp(UINT32 SongLen, const UINT8* SongData, TRK_INFO* TrkInf,
 				cmdLen = 0x02;
 				break;
 			case 0xAE:	// set OPN Timer A/B
-				if (FMP_VER == 3)	// FMP v3
+				if (FMP_VER >= 3)	// FMP v3
 					cmdLen = 0x03;
 				else	// FMP v2
 					cmdLen = 0x02;
@@ -1131,6 +1187,7 @@ static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf)
 	TRK_INFO* TempTInf;
 	UINT32 TrkLen;
 	UINT32 TrkLoopLen;
+	UINT32 TotalLoopLen;
 	UINT32 MaxTrkLen;
 	
 	MaxTrkLen = 0x00;
@@ -1157,8 +1214,9 @@ static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf)
 		if (TrkLoopLen < 0x20)
 			continue;
 		
-		TrkLen = TempTInf->TickCnt + TrkLoopLen * (TempTInf->LoopTimes - 1);
-		if (TrkLen * 5 / 4 < MaxTrkLen)
+		TrkLen = TempTInf->TickCnt - TrkLoopLen;	// track length without loop
+		TotalLoopLen = TrkLoopLen * TempTInf->LoopTimes;
+		if (TrkLen + TotalLoopLen * 5 / 4 < MaxTrkLen)
 		{
 			// TrkLen = desired length of the loop
 			TrkLen = MaxTrkLen - TempTInf->LoopTick;
