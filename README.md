@@ -261,7 +261,7 @@ This tool converts Wolfteam MIDI music files to standard MIDIs.
 I made this tool to get MIDIs of songs from Arcus Odyssey (because its MT-32 soundtrack is awesome). I disassembled AO's sound driver during the development of this tool.
 
 Wolfteam MIDIs are often stored in larger archives that have a .MID or .MDI extension. The files begin with "MF".
-The format seems to have Little Endian and Big Endian variants. Right now the tool works only with he Big Endian variant used by Wolfteam games on the X68000.
+The format seems to have Little Endian and Big Endian variants. Right now the tool works only with the Big Endian variant used by Wolfteam games on the X68000.
 
 ## yong2mid
 This tool converts songs from Yong Yong games to MIDI.
@@ -297,6 +297,13 @@ The approach I use here is to merge all tracks simultaneously. This might perfor
 
 ## midi_funcs.h
 This is a small header-only library that allows you to easily write MIDI files. It automatically resizes the data buffer if it gets too small.
+
+## midi_utils.h
+This file contains a useful MIDI utility functions used by various converters.
+
+Features:
+- "running note" processing: add a note + its length to a list and the respective Note Off event will be written after X ticks
+- balance track times: for looping tracks, modify the loop counter so that every track ends at the approximately same spot
 
 ## Soundfont.c/.h
 This library can help you to generate SF2 soundfont files. It only does the chunk management and file writing though, so you still need to do most of the work by yourself.
