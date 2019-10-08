@@ -130,6 +130,17 @@ Notes:
 
 **Compilation note:** Needs to be linked to Soundfont.c.
 
+## mdc2mid
+This tool converts MCDRV songs to MIDI.
+
+I wrote this tool to get clean MIDI rips of Super Real Mahjong PIV on the Sharp X68000.
+The format has a few interesting quirks regarding portamento and note chords, so I disassembled the driver in order to understand it better.
+Conversions should be very accurate, except that it has better event sorting than the original driver. (which puts Expression/Pitch Bend events *after* Note On events)
+
+I focused on converting the MIDI songs (CM-32/SC-55), so converting FM songs will probably fail due to unimplemented commands.
+
+MCDRV seems to be used by only a few games and SRMP4 seems to be the only one that has MIDI songs.
+
 ## MI1-Midi
 This tool converts MT-32 sound data from early SCUMM games (like Monkey Island 1) to MIDI.
 
