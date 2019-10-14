@@ -235,6 +235,15 @@ It is a slightly modified version of M2MidiDec.
 
 So far only SegaSonic the Hedgehog and OutRunners are supported. You need to select between those games by enabling a #define at compile time. It will then try to read the respective ROM files from the current directory.
 
+## syx2mid
+This tool takes SYX files (raw binary files containing SysEx data dumps) and converts them to MIDI.
+
+It takes the actual data transfer time into account and inserts delays between commands respectively.
+The transfer time is calculated as follows:
+time in seconds = number of bytes * 8 bits/byte / 31250 bits/second
+
+The SYX files may also contain other commands like Control Changes.
+
 ## TG100_DemoSongDump
 This tool can be used to dump the TG100 demo song from its firmware ROM.
 
