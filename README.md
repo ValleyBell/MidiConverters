@@ -224,6 +224,11 @@ It is a slightly modified version of M2MidiDec.
 
 So far only SegaSonic the Hedgehog and OutRunners are supported. You need to select between those games by enabling a #define at compile time. It will then try to read the respective ROM files from the current directory.
 
+## TaitoZoom
+This tool converts songs from Taito FX-1B (Zoom ZSG-2) arcade games to MIDI. Written by superctr
+
+Use this tool with the script `TaitoZoomConv.sh`, see the script source for more information on how to use.
+
 ## TG100_DemoSongDump
 This tool can be used to dump the TG100 demo song from its firmware ROM.
 

@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <stdtype.h>
+#include "stdtype.h"
 
 typedef struct _midi_track_state
 {
