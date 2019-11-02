@@ -148,13 +148,20 @@ void ConvertMucom2MID(void)
 	UINT32 TempLng;
 	
 	TrkHdrPos = 0x0000;
-	for (SeqPos = 0x00; SeqPos < 0x08; SeqPos ++)
+	if (!memcmp(SeqData, "MUB8", 4))
 	{
-		TempPos = ReadLE16(&SeqData[SeqPos + 0x01]);
-		if (TempPos == 0x002F)
+		TrkHdrPos = ReadLE16(&SeqData[4]) + 5;
+	}
+	else
+	{
+		for (SeqPos = 0x00; SeqPos < 0x08; SeqPos ++)
 		{
-			TrkHdrPos = SeqPos;
-			break;
+			TempPos = ReadLE16(&SeqData[SeqPos + 0x01]);
+			if (TempPos == 0x002F)
+			{
+				TrkHdrPos = SeqPos;
+				break;
+			}
 		}
 	}
 	if (! TrkHdrPos)
@@ -166,10 +173,8 @@ void ConvertMucom2MID(void)
 	
 	TrkCnt = 11;
 	SeqPos = 0x01;
-	FMInsPos = (SeqPos < TrkHdrPos) ? ReadLE16(&SeqData[SeqPos]) : 0x0000;
-	SeqPos += 0x02;
-	SSGInsPos = (SeqPos < TrkHdrPos) ? ReadLE16(&SeqData[SeqPos]) : 0x0000;
-	SeqPos += 0x02;
+	FMInsPos = ReadLE16(&SeqData[TrkHdrPos]);
+	SSGInsPos = ReadLE16(&SeqData[TrkHdrPos+2]);
 	
 	SeqPos = TrkHdrPos;
 	
