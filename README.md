@@ -130,6 +130,17 @@ Notes:
 
 **Compilation note:** Needs to be linked to Soundfont.c.
 
+## mdc2mid
+This tool converts MCDRV songs to MIDI.
+
+I wrote this tool to get clean MIDI rips of Super Real Mahjong PIV on the Sharp X68000.
+The format has a few interesting quirks regarding portamento and note chords, so I disassembled the driver in order to understand it better.
+Conversions should be very accurate, except that it has better event sorting than the original driver. (which puts Expression/Pitch Bend events *after* Note On events)
+
+I focused on converting the MIDI songs (CM-32/SC-55), so converting FM songs will probably fail due to unimplemented commands.
+
+MCDRV seems to be used by only a few games and SRMP4 seems to be the only one that has MIDI songs.
+
 ## MI1-Midi
 This tool converts MT-32 sound data from early SCUMM games (like Monkey Island 1) to MIDI.
 
@@ -224,8 +235,17 @@ It is a slightly modified version of M2MidiDec.
 
 So far only SegaSonic the Hedgehog and OutRunners are supported. You need to select between those games by enabling a #define at compile time. It will then try to read the respective ROM files from the current directory.
 
+## syx2mid
+This tool takes SYX files (raw binary files containing SysEx data dumps) and converts them to MIDI.
+
+It takes the actual data transfer time into account and inserts delays between commands respectively.
+The transfer time is calculated as follows:
+time in seconds = number of bytes * 8 bits/byte / 31250 bits/second
+
+The SYX files may also contain other commands like Control Changes.
+
 ## TaitoZoom
-This tool converts songs from Taito FX-1B (Zoom ZSG-2) arcade games to MIDI. Written by superctr
+This tool converts songs from Taito FX-1B (Zoom ZSG-2) arcade games to MIDI. Written by superctr.
 
 Use this tool with the script `TaitoZoomConv.sh`, see the script source for more information on how to use.
 
@@ -263,10 +283,13 @@ For Wolfteam MegaDrive games with PCM drums, it can autodetect the song list and
 ## wtmf2mid
 This tool converts Wolfteam MIDI music files to standard MIDIs.
 
-I made this tool to get MIDIs of songs from Arcus Odyssey (because its MT-32 soundtrack is awesome). I disassembled AO's sound driver during the development of this tool.
+I initially made this tool to get MIDIs of songs from Arcus Odyssey (because its MT-32 soundtrack is awesome).
+I disassembled a few sound drivers during the development of this tool: Arcus Odyssey, D: European Mirage, Span of Dream.
 
-Wolfteam MIDIs are often stored in larger archives that have a .MID or .MDI extension. The files begin with "MF".
-The format seems to have Little Endian and Big Endian variants. Right now the tool works only with he Big Endian variant used by Wolfteam games on the X68000.
+The files begin with "MF" and the format has Little Endian (for PC-9801) and Big Endian (for X68000) variants.
+It has also support for multiple songs within one file, but no game seems to use that.
+
+In games on the X68000, Wolfteam MIDIs are usually stored LZSS-compressed in larger archives that have an .MID or .MDI extension.
 
 ## yong2mid
 This tool converts songs from Yong Yong games to MIDI.
@@ -302,6 +325,13 @@ The approach I use here is to merge all tracks simultaneously. This might perfor
 
 ## midi_funcs.h
 This is a small header-only library that allows you to easily write MIDI files. It automatically resizes the data buffer if it gets too small.
+
+## midi_utils.h
+This file contains a useful MIDI utility functions used by various converters.
+
+Features:
+- "running note" processing: add a note + its length to a list and the respective Note Off event will be written after X ticks
+- balance track times: for looping tracks, modify the loop counter so that every track ends at the approximately same spot
 
 ## Soundfont.c/.h
 This library can help you to generate SF2 soundfont files. It only does the chunk management and file writing though, so you still need to do most of the work by yourself.
