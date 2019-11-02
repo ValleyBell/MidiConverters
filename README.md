@@ -244,6 +244,11 @@ time in seconds = number of bytes * 8 bits/byte / 31250 bits/second
 
 The SYX files may also contain other commands like Control Changes.
 
+## TaitoZoom
+This tool converts songs from Taito FX-1B (Zoom ZSG-2) arcade games to MIDI. Written by superctr.
+
+Use this tool with the script `TaitoZoomConv.sh`, see the script source for more information on how to use.
+
 ## TG100_DemoSongDump
 This tool can be used to dump the TG100 demo song from its firmware ROM.
 
