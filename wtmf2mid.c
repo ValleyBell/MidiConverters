@@ -1,8 +1,8 @@
 // Wolfteam MF -> Midi Converter
 // -----------------------------
 // Written by Valley Bell, 06 August 2019
+// Updated with Little Endian support on 24 October 2019
 // based on TGL FMP -> Midi Converter
-
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -32,13 +32,6 @@
 #include "midi_funcs.h"
 
 
-typedef struct running_note
-{
-	UINT8 midChn;
-	UINT8 note;
-	UINT32 remLen;
-} RUN_NOTE;
-
 typedef struct _track_info
 {
 	UINT16 startOfs;
@@ -47,34 +40,52 @@ typedef struct _track_info
 	UINT32 loopTick;
 	UINT16 loopTimes;
 	UINT8 midChn;
-} TRK_INFO;
+} TRK_INF;
 
 
+#define RUNNING_NOTES
+#define BALANCE_TRACK_TIMES
+#include "midi_utils.h"
+
+
+static UINT8 ReadMFHeader(UINT32 songLen, const UINT8* songData);
 UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData);
-static void PreparseWtMTrk(UINT32 songLen, const UINT8* songData, TRK_INFO* trkInf);
-static void GuessLoopTimes(UINT8 trkCnt, TRK_INFO* trkInf);
-static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay);
+static void PreparseWtMTrk(UINT32 songLen, const UINT8* songData, TRK_INF* trkInf);
 static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay);
-static void FlushRunningNotes(FILE_INF* fInf, MID_TRK_STATE* MTS);
 static UINT8 WriteFileData(UINT32 dataLen, const UINT8* data, const char* fileName);
-INLINE UINT32 Tempo2Mid(UINT16 bpm);
+INLINE UINT32 Tempo2Mid(UINT16 bpm, UINT8 scale);
 
+INLINE UINT16 ReadLE16(const UINT8* data);
 INLINE UINT16 ReadBE16(const UINT8* data);
+INLINE UINT16 ReadUInt16(const UINT8* data);
+INLINE UINT32 ReadLE32(const UINT8* data);
+INLINE UINT32 ReadBE32(const UINT8* data);
+INLINE UINT32 ReadUInt32(const UINT8* data);
+static const char* GetLastDirSepPos(const char* fileName);
+INLINE const char* GetFileTitle(const char* fileName);
 
 
 static UINT32 ROMLen;
 static UINT8* ROMData;
 static UINT32 MidLen;
+static UINT32 MidAlloc;
 static UINT8* MidData;
 
 #define MAX_RUN_NOTES	0x20	// should be plenty, the driver can only store up to 8 simultaneous notes
-static UINT8 RunNoteCnt;
+static UINT16 RunNoteCnt;
 static RUN_NOTE RunNotes[MAX_RUN_NOTES];
 
-static UINT16 MIDI_RES = 24;
+static UINT16 MIDI_RES = 0;
 static UINT16 NUM_LOOPS = 2;
 static UINT8 NO_LOOP_EXT = 0;
 static UINT8 DRV_BUGS = 0;
+
+// MF sub-song flags
+//	bit 0 (01): Endianess (0 - little, 1 - big)
+//	others are unknown, but the X68000 sound drivers enforce 0x28
+static UINT8 mfFlags = 0x00;
+static UINT8 mfSongs = 0;
+static UINT32 mfSize = 0;
 
 int main(int argc, char* argv[])
 {
@@ -90,7 +101,8 @@ int main(int argc, char* argv[])
 		printf("    -Loops n    Loop each track at least n times. (default: %u)\n", NUM_LOOPS);
 		printf("    -NoLpExt    No Loop Extension\n");
 		printf("                Do not fill short tracks to the length of longer ones.\n");
-		printf("    -TpQ n      convert with n ticks per quarter. (default: %u)\n", MIDI_RES);
+		printf("    -TpQ n      convert with n ticks per quarter.\n");
+		printf("                default: 48 (PC-98) / 24 (X68000)\n");
 		printf("    -Bugs       Replicate sound driver bugs.\n");
 		return 0;
 	}
@@ -116,11 +128,7 @@ int main(int argc, char* argv[])
 		{
 			argbase ++;
 			if (argbase < argc)
-			{
 				MIDI_RES = (UINT16)strtoul(argv[argbase], NULL, 0);
-				if (! MIDI_RES)
-					MIDI_RES = 24;
-			}
 		}
 		else if (! stricmp(argv[argbase] + 1, "Bugs"))
 			DRV_BUGS = 1;
@@ -143,8 +151,8 @@ int main(int argc, char* argv[])
 	
 	fseek(hFile, 0x00, SEEK_END);
 	ROMLen = ftell(hFile);
-	if (ROMLen > 0xFFFFF)	// 1 MB
-		ROMLen = 0xFFFFF;
+	if (ROMLen > 0x100000)	// 1 MB
+		ROMLen = 0x100000;
 	
 	fseek(hFile, 0x00, SEEK_SET);
 	ROMData = (UINT8*)malloc(ROMLen);
@@ -152,10 +160,58 @@ int main(int argc, char* argv[])
 	
 	fclose(hFile);
 	
-	retVal = WtM2Mid(ROMLen, ROMData);
+	retVal = ReadMFHeader(ROMLen, ROMData);
 	if (! retVal)
-		WriteFileData(MidLen, MidData, argv[argbase + 1]);
-	free(MidData);	MidData = NULL;
+	{
+		const char* fileName = argv[argbase + 1];
+		const char* fileExt;
+		char* outName;
+		char* outExt;
+		UINT32 curPos;
+		UINT8 curSong;
+		UINT16 songLen;
+		
+		fileExt = strrchr(GetFileTitle(fileName), '.');
+		if (fileExt == NULL)
+			fileExt = fileName + strlen(fileName);
+		outName = (char*)malloc(strlen(fileName) + 0x10);
+		strcpy(outName, fileName);
+		outExt = outName + (fileExt - fileName);
+		
+		if (mfSongs == 0)
+			printf("Info: The file contains no songs.\n");
+		else if (mfSongs > 1)
+			printf("Info: Converting %u songs.\n", mfSongs);
+		if (mfSize > ROMLen)
+			mfSize = ROMLen;	// just for safety
+		
+		MidAlloc = 0x20000;	// 128 KB should be enough
+		MidData = (UINT8*)malloc(MidAlloc);
+		curPos = 0x08;
+		// I haven't seen any files that contain multiple songs so far.
+		// But the format and sound driver both support it.
+		for (curSong = 0; curSong < mfSongs; curSong ++)
+		{
+			if (curPos >= mfSize)
+				break;
+			
+			songLen = ReadUInt16(&ROMData[curPos]);
+			if ((UINT32)songLen > mfSize - curPos)
+				songLen = (UINT16)(mfSize - curPos);
+			
+			retVal = WtM2Mid(songLen, &ROMData[curPos]);
+			if (! retVal)
+			{
+				// generate file name(ABC.ext -> ABC_00.ext)
+				if (mfSongs > 1)
+					sprintf(outExt, "_%02X%s", curSong, fileExt);
+				WriteFileData(MidLen, MidData, outName);
+			}
+			curPos += songLen;
+		}
+		free(MidData);	MidData = NULL;
+		free(outName);	outName = NULL;
+	}
 	
 	printf("Done.\n");
 	
@@ -168,10 +224,31 @@ int main(int argc, char* argv[])
 	return 0;
 }
 
+static UINT8 ReadMFHeader(UINT32 songLen, const UINT8* songData)
+{
+	UINT32 valLE;
+	UINT32 valBE;
+	
+	if (memcmp(&songData[0x00], "MF", 0x02))
+	{
+		printf("Not a Wolfteam MF file!\n");
+		return 0x80;
+	}
+	valLE = ReadLE32(&songData[0x04]);
+	valBE = ReadBE32(&songData[0x04]);
+	mfFlags = (valLE < valBE) ? 0x00 : 0x01;	// bit 0 = Endianess
+	
+	mfSongs = songData[0x02];
+	// 0x03 is unknown (always 0)
+	mfSize = ReadUInt32(&songData[0x04]);	// archive size
+	
+	return 0x00;
+}
+
 UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 {
-	TRK_INFO trkInf[32];
-	TRK_INFO* tempTInf;
+	TRK_INF trkInf[32];
+	TRK_INF* tempTInf;
 	UINT8 trkCnt;
 	UINT8 curTrk;
 	UINT16 segPos;
@@ -199,42 +276,40 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 	UINT8 tempByt;
 	UINT8 tempArr[4];
 	
-	if (memcmp(&songData[0x00], "MF", 0x02))
-	{
-		printf("Not a Wolfteam MF file!\n");
-		MidData = NULL;
-		MidLen = 0x00;
-		return 0x80;
-	}
-	// TODO: sub-songs??
-	songData += 0x08;	songLen -= 0x08;
-	
-	midFileInf.alloc = 0x20000;	// 128 KB should be enough
-	midFileInf.data = (UINT8*)malloc(midFileInf.alloc);
+	midFileInf.alloc = MidAlloc;
+	midFileInf.data = MidData;
 	midFileInf.pos = 0x00;
 	
 	inPos = 0x00;
-	songTempo = songData[inPos + 0x06];
-	trkCnt = songData[inPos + 0x07];
-	inPos += 0x08;
+	mfFlags = songData[0x05];	// read flags first
+	segPos = ReadUInt16(&songData[0x00]);
+	if (songLen > segPos)
+		songLen = segPos;
+	//tempSht = ReadUInt16(&songData[0x02]);	// unknown
+	//tempByt = songData[0x04];	// unknown
+	songTempo = songData[0x06];
+	trkCnt = songData[0x07];
 	
+	inPos = 0x08;
 	for (curTrk = 0; curTrk < trkCnt; curTrk ++, inPos += 0x04)
 	{
 		tempTInf = &trkInf[curTrk];
-		tempTInf->startOfs = ReadBE16(&songData[inPos + 0x00]);
+		tempTInf->startOfs = ReadUInt16(&songData[inPos + 0x00]);
 		tempTInf->loopOfs = 0x0000;
 		tempTInf->tickCnt = 0;
-		tempTInf->loopTimes = NUM_LOOPS;
 		tempTInf->loopTick = 0;
 		tempTInf->midChn = songData[inPos + 0x02];
 		
 		PreparseWtMTrk(songLen, songData, tempTInf);
+		tempTInf->loopTimes = tempTInf->loopOfs ? NUM_LOOPS : 0;
 	}
 	
+	if (! MIDI_RES)
+		MIDI_RES = (mfFlags & 0x01) ? 24 : 48;	// different default based on Endianess flag
 	WriteMidiHeader(&midFileInf, 0x0001, trkCnt, MIDI_RES);
 	
 	if (! NO_LOOP_EXT)
-		GuessLoopTimes(trkCnt, trkInf);
+		BalanceTrackTimes(trkCnt, trkInf, 1);
 	
 	for (curTrk = 0; curTrk < trkCnt; curTrk ++)
 	{
@@ -244,7 +319,7 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 		
 		if (curTrk == 0)
 		{
-			tempLng = Tempo2Mid(songTempo);
+			tempLng = Tempo2Mid(songTempo, 0x40);
 			WriteBE32(tempArr, tempLng);
 			WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
 		}
@@ -274,7 +349,7 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 		{
 			if (! inPos)
 			{
-				inPos = ReadBE16(&songData[segPos]);
+				inPos = ReadUInt16(&songData[segPos]);
 				segPos += 0x02;
 				if (inPos < 0x0010)
 				{
@@ -294,15 +369,15 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 						loopCount[loopIdx] = 0;
 						loopMeasure[loopIdx] = measureID;
 						loopSegPos[loopIdx] = segPos;
-						loopIdx = 0;
 						if (segPos == tempTInf->loopOfs)
 							WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)loopCount[loopIdx]);
+						loopIdx ++;
 						break;
 					case 2:	// master loop end
 						{
 							UINT16 numLoops;
 							
-							numLoops = ReadBE16(&songData[segPos]);
+							numLoops = ReadUInt16(&songData[segPos]);
 							segPos += 0x02;
 							if (loopIdx == 0)	// the driver actually checks this
 							{
@@ -354,12 +429,12 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 					}
 					else
 					{
-						// possible overflow intended (confirmed via driver disassembly)
+						// possible underflow intended (confirmed via driver disassembly)
 						curNoteLen = curDelay - earlyNoteOff;
 					}
 				}
-				CheckRunningNotes(&midFileInf, &MTS.curDly);
 				
+				CheckRunningNotes(&midFileInf, &MTS.curDly, &RunNoteCnt, RunNotes);
 				for (tempByt = 0; tempByt < RunNoteCnt; tempByt ++)
 				{
 					if (RunNotes[tempByt].note == curNote)
@@ -373,13 +448,8 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 				if (tempByt >= RunNoteCnt && curNote != 0xFF)
 				{
 					WriteEvent(&midFileInf, &MTS, 0x90, curNote, curNoteVol);
-					if (RunNoteCnt < MAX_RUN_NOTES)
-					{
-						RunNotes[RunNoteCnt].midChn = MTS.midChn;
-						RunNotes[RunNoteCnt].note = curNote;
-						RunNotes[RunNoteCnt].remLen = curNoteLen;
-						RunNoteCnt ++;
-					}
+					AddRunningNote(MAX_RUN_NOTES, &RunNoteCnt, RunNotes,
+									MTS.midChn, curNote, 0x00, curNoteLen);	// The sound driver sends 8# note 00.
 				}
 				
 				MTS.curDly += curDelay;
@@ -389,17 +459,17 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 				// I should proably turn this if-else block into a LUT, but... can't be bothered.
 				if (curCmd >= 0x80 && curCmd <= 0xAF)
 				{
-					curCmdType = 0x00 + ((curCmd & 0x78) >> 3);
+					curCmdType = curCmd & ~0x07;
 					curDelay = ((curCmd & 0x07) == 0x07) ? 0xFF : (curCmd & 0x07);
 				}
 				else if (curCmd >= 0xB0 && curCmd <= 0xDF)
 				{
-					curCmdType = 0x06 - 0x03 + ((curCmd & 0x70) >> 4);
+					curCmdType = curCmd & ~0x0F;
 					curDelay = ((curCmd & 0x0F) == 0x0F) ? 0xFF : (curCmd & 0x0F);
 				}
 				else if (curCmd >= 0xE0 && curCmd <= 0xE7)
 				{
-					curCmdType = 0x09 + ((curCmd & 0x06) >> 1);
+					curCmdType = curCmd & ~0x01;
 					curDelay = ((curCmd & 0x01) == 0x01) ? 0xFF : (curCmd & 0x0F);
 				}
 				else
@@ -415,55 +485,65 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 				
 				switch(curCmdType)
 				{
-				case 0x00:	// Modulation
+				case 0x80:	// Modulation
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x01, songData[inPos]);
 					inPos ++;
 					break;
-				case 0x01:	// Volume
+				case 0x88:	// Volume
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, songData[inPos]);
 					inPos ++;
 					break;
-				case 0x02:	// Pan
+				case 0x90:	// Pan
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, songData[inPos]);
 					inPos ++;
 					break;
-				case 0x03:	// Expression
+				case 0x98:	// Expression
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x0B, songData[inPos]);
 					inPos ++;
 					break;
-				case 0x04:	// Instrument
+				case 0xA0:	// Instrument
 					WriteEvent(&midFileInf, &MTS, 0xC0, songData[inPos], 0x00);
 					inPos ++;
 					break;
-				case 0x05:	// Control Change
+				case 0xA8:	// Control Change
 					WriteEvent(&midFileInf, &MTS, 0xB0, songData[inPos + 0x00], songData[inPos + 0x01]);
 					inPos += 0x02;
 					break;
-				case 0x06:	// Pitch Bend (8-bit)
+				case 0xB0:	// Pitch Bend (8-bit)
 					pbVal = 0x2000 + songData[inPos];	inPos ++;
 					WriteEvent(&midFileInf, &MTS, 0xE0, (pbVal >> 0) & 0x7F, (pbVal >> 7) & 0x7F);
 					break;
-				case 0x07:	// Pitch Bend (16-bit)
-					pbVal = 0x2000 + ReadBE16(&songData[inPos]);	inPos += 0x02;
+				case 0xC0:	// Pitch Bend (16-bit)
+					pbVal = 0x2000 + ReadUInt16(&songData[inPos]);	inPos += 0x02;
 					WriteEvent(&midFileInf, &MTS, 0xE0, (pbVal >> 0) & 0x7F, (pbVal >> 7) & 0x7F);
 					break;
-				case 0x08:	// set Early Note Stop
+				case 0xD0:	// set Early Note Stop
 					if ((curCmd & 0x0F) == 0xFF)
 						earlyNoteOff = curDelay;	// use parameter byte directly
 					else
-						earlyNoteOff = curDelay - 1;	// overflow from 0x00 to 0xFF intended and in original driver
+						earlyNoteOff = curDelay - 1;	// underflow from 0x00 to 0xFF intended and in original driver
 					curDelay = 0;
 					break;
-				case 0x09:	// Tempo
-					printf("Tempo Change: %u, %u\n", songData[inPos + 0x00], songData[inPos + 0x01]);
+				case 0xE0:	// Tempo
+					//printf("Tempo Change: %u, %u\n", songData[inPos + 0x00], songData[inPos + 0x01]);
 					tempByt = songData[inPos + 0x00];
-					inPos += 0x02;	// 2nd byte unknown
+					inPos += 0x02;	// 2nd byte is unknown and ignored by all drivers
 					
-					tempLng = Tempo2Mid(tempByt);
-					WriteBE32(tempArr, tempLng);
-					WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
+					// Note: Some songs in spanof98 (e.g. 0EE_MI03 and 0EF_MI04) use this command.
+					// Its first parameter is a 2.6 fixed point scale factor.
+					// (i.e. 0x40 = 100%, 0x20 = 50%, just like in RCP files)
+					//
+					// However, in the PC-9801 and X68000 sound drivers I checked, they just store the
+					// parameter into the "song tempo" value - and then don't touch it again.
+					// So the command has no effect.
+					if (! DRV_BUGS)
+					{
+						tempLng = Tempo2Mid(songTempo, tempByt);
+						WriteBE32(tempArr, tempLng);
+						WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
+					}
 					break;
-				case 0x0A:	// set MIDI channel
+				case 0xE2:	// set MIDI channel
 					tempByt = songData[inPos];	inPos ++;
 					if (tempByt == 0xFF)
 					{
@@ -475,11 +555,11 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 						WriteMetaEvent(&midFileInf, &MTS, 0x20, 0x01, &MTS.midChn);
 					}
 					break;
-				case 0x0B:	// set Channel Aftertouch
+				case 0xE4:	// set Channel Aftertouch
 					WriteEvent(&midFileInf, &MTS, 0xD0, songData[inPos], 0x00);
 					inPos ++;
 					break;
-				case 0x0C:	// set Note Aftertouch
+				case 0xE6:	// set Note Aftertouch
 					WriteEvent(&midFileInf, &MTS, 0xA0, songData[inPos + 0x00], songData[inPos + 0x01]);
 					inPos += 0x02;
 					break;
@@ -495,7 +575,7 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 						tempByt = 0x40;
 					if (! DRV_BUGS)
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, tempByt);
-					else
+					else	// typo bug present in X68000 driver (good in PC-98 version)
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x10, tempByt);	// yes, it *really* does this (typo: 10 vs $10)
 					break;
 				case 0xF0:	// delay
@@ -531,14 +611,20 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 					inPos ++;
 					break;
 				case 0xFC:	// delay + more?
+					// I haven't found any file that uses this.
+					//printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
 					// The sound driver ignores all parameters but this one.
 					curDelay = songData[inPos + 0x01];
 					inPos += 0x04;
 					break;
 				case 0xFD:	// increment measure ID
+					// I haven't found any file that uses this.
+					//printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
 					measureID ++;
 					break;
 				case 0xFE:	// measure quit
+					// This command is often used to "split" a measure in order to set a loop point.
+					//printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
 					// load new measure pointer
 					inPos = 0x0000;
 					break;
@@ -548,7 +634,7 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 					inPos = 0x0000;
 					break;
 				default:
-					printf("Unknown event %02X on track %X at %04X\n", curCmd, curTrk, inPos);
+					printf("Unknown event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
 					inPos += 0x01;
 					trkEnd = 1;
@@ -557,19 +643,20 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 				MTS.curDly += curDelay;
 			}
 		}
-		FlushRunningNotes(&midFileInf, &MTS);
+		FlushRunningNotes(&midFileInf, &MTS.curDly, &RunNoteCnt, RunNotes, 0);
 		
 		WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
 		
 		WriteMidiTrackEnd(&midFileInf, &MTS);
 	}
+	MidAlloc = midFileInf.alloc;
 	MidData = midFileInf.data;
 	MidLen = midFileInf.pos;
 	
 	return 0x00;
 }
 
-static void PreparseWtMTrk(UINT32 songLen, const UINT8* songData, TRK_INFO* trkInf)
+static void PreparseWtMTrk(UINT32 songLen, const UINT8* songData, TRK_INF* trkInf)
 {
 	UINT16 segPos;
 	UINT16 inPos;
@@ -593,7 +680,7 @@ static void PreparseWtMTrk(UINT32 songLen, const UINT8* songData, TRK_INFO* trkI
 	{
 		if (! inPos)
 		{
-			inPos = ReadBE16(&songData[segPos]);
+			inPos = ReadUInt16(&songData[segPos]);
 			segPos += 0x02;
 			if (inPos < 0x0010)
 			{
@@ -612,13 +699,13 @@ static void PreparseWtMTrk(UINT32 songLen, const UINT8* songData, TRK_INFO* trkI
 					loopCount[loopIdx] = 0;
 					loopSegPos[loopIdx] = segPos;
 					loopTick[loopIdx] = trkInf->tickCnt;
-					loopIdx = 0;
+					loopIdx ++;
 					break;
 				case 2:	// master loop end
 					{
 						UINT16 numLoops;
 						
-						numLoops = ReadBE16(&songData[segPos]);
+						numLoops = ReadUInt16(&songData[segPos]);
 						segPos += 0x02;
 						if (loopIdx == 0)
 						{
@@ -632,7 +719,10 @@ static void PreparseWtMTrk(UINT32 songLen, const UINT8* songData, TRK_INFO* trkI
 						{
 							// master loop
 							if (! trkInf->loopOfs)
-								trkInf->loopOfs = inPos;
+							{
+								trkInf->loopOfs = loopSegPos[loopIdx];
+								trkInf->loopTick = loopTick[loopIdx];
+							}
 						}
 						if (loopCount[loopIdx] < numLoops)
 						{
@@ -660,17 +750,17 @@ static void PreparseWtMTrk(UINT32 songLen, const UINT8* songData, TRK_INFO* trkI
 			inPos ++;
 			if (curCmd >= 0x80 && curCmd <= 0xAF)
 			{
-				curCmdType = 0x00 + ((curCmd & 0x78) >> 3);
+				curCmdType = curCmd & ~0x07;
 				cmdDelay = ((curCmd & 0x07) == 0x07) ? 0xFF : (curCmd & 0x07);
 			}
 			else if (curCmd >= 0xB0 && curCmd <= 0xDF)
 			{
-				curCmdType = 0x06 - 0x03 + ((curCmd & 0x70) >> 4);
+				curCmdType = curCmd & ~0x0F;
 				cmdDelay = ((curCmd & 0x0F) == 0x0F) ? 0xFF : (curCmd & 0x0F);
 			}
 			else if (curCmd >= 0xE0 && curCmd <= 0xE7)
 			{
-				curCmdType = 0x09 + ((curCmd & 0x06) >> 1);
+				curCmdType = curCmd & ~0x01;
 				cmdDelay = ((curCmd & 0x01) == 0x01) ? 0xFF : (curCmd & 0x0F);
 			}
 			else
@@ -685,29 +775,32 @@ static void PreparseWtMTrk(UINT32 songLen, const UINT8* songData, TRK_INFO* trkI
 			}
 			switch(curCmdType)
 			{
-			case 0x08:	// set Early Note Stop
+			case 0xD0:	// set Early Note Stop
+				// the value used as delay for all other events is the actual parameter here
+				cmdDelay = 0;
+				break;
 			case 0xEC:	// Pan Centre
 			case 0xED:	// Pan Right
 			case 0xEE:	// Pan Left
 			case 0xEF:	// Pan Centre
 				break;
-			case 0x00:	// Modulation
-			case 0x01:	// Volume
-			case 0x02:	// Pan
-			case 0x03:	// Expression
-			case 0x04:	// Instrument
-			case 0x06:	// Pitch Bend (8-bit)
-			case 0x0B:	// set Channel Aftertouch
+			case 0x80:	// Modulation
+			case 0x88:	// Volume
+			case 0x90:	// Pan
+			case 0x98:	// Expression
+			case 0xA0:	// Instrument
+			case 0xB0:	// Pitch Bend (8-bit)
+			case 0xE4:	// set Channel Aftertouch
 			case 0xF1:	// set Note Velocity
 				inPos ++;
 				break;
-			case 0x05:	// Control Change
-			case 0x07:	// Pitch Bend (16-bit)
-			case 0x09:	// Tempo
-			case 0x0C:	// set Note Aftertouch
+			case 0xA8:	// Control Change
+			case 0xC0:	// Pitch Bend (16-bit)
+			case 0xE0:	// Tempo
+			case 0xE6:	// set Note Aftertouch
 				inPos += 0x02;
 				break;
-			case 0x0A:	// set MIDI channel
+			case 0xE2:	// set MIDI channel
 				if (songData[inPos] == 0xFF)
 					trkEnd = 1;	// confirmed via driver disassembly
 				inPos ++;
@@ -743,129 +836,18 @@ static void PreparseWtMTrk(UINT32 songLen, const UINT8* songData, TRK_INFO* trkI
 	return;
 }
 
-static void GuessLoopTimes(UINT8 trkCnt, TRK_INFO* trkInf)
-{
-	UINT8 curTrk;
-	TRK_INFO* tempTInf;
-	UINT32 trkLen;
-	UINT32 trkLoopLen;
-	UINT32 maxTrkLen;
-	
-	maxTrkLen = 0x00;
-	for (curTrk = 0x00; curTrk < trkCnt; curTrk ++)
-	{
-		tempTInf = &trkInf[curTrk];
-		if (tempTInf->loopOfs)
-			trkLoopLen = tempTInf->tickCnt - tempTInf->loopTick;
-		else
-			trkLoopLen = 0x00;
-		
-		trkLen = tempTInf->tickCnt + trkLoopLen * (tempTInf->loopTimes - 1);
-		if (maxTrkLen < trkLen)
-			maxTrkLen = trkLen;
-	}
-	
-	for (curTrk = 0x00; curTrk < trkCnt; curTrk ++)
-	{
-		tempTInf = &trkInf[curTrk];
-		if (tempTInf->loopOfs)
-			trkLoopLen = tempTInf->tickCnt - tempTInf->loopTick;
-		else
-			trkLoopLen = 0x00;
-		if (trkLoopLen < 0x20)
-			continue;
-		
-		trkLen = tempTInf->tickCnt + trkLoopLen * (tempTInf->loopTimes - 1);
-		if (trkLen * 5 / 4 < maxTrkLen)
-		{
-			// trkLen = desired length of the loop
-			trkLen = maxTrkLen - tempTInf->loopTick;
-			
-			tempTInf->loopTimes = (UINT16)((trkLen + trkLoopLen / 3) / trkLoopLen);
-			printf("Trk %u: Extended loop to %u times\n", curTrk, tempTInf->loopTimes);
-		}
-	}
-	
-	return;
-}
-
-static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay)
-{
-	UINT8 curNote;
-	UINT32 tempDly;
-	RUN_NOTE* tempNote;
-	
-	while(RunNoteCnt)
-	{
-		// 1. Check if we're going beyond a note's timeout.
-		tempDly = *delay + 1;
-		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
-		{
-			tempNote = &RunNotes[curNote];
-			if (tempNote->remLen < tempDly)
-				tempDly = tempNote->remLen;
-		}
-		if (tempDly > *delay)
-			break;	// not beyond the timeout - do the event
-		
-		// 2. advance all notes by X ticks
-		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
-			RunNotes[curNote].remLen -= tempDly;
-		(*delay) -= tempDly;
-		
-		// 3. send NoteOff for expired notes
-		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
-		{
-			tempNote = &RunNotes[curNote];
-			if (! tempNote->remLen)	// turn note off, it going beyond the Timeout
-			{
-				WriteMidiValue(fInf, tempDly);
-				tempDly = 0;
-				
-				File_CheckRealloc(fInf, 0x03);
-				// The sound driver actually sends 8c nn 00, but I prefer it this way.
-				fInf->data[fInf->pos + 0x00] = 0x90 | tempNote->midChn;
-				fInf->data[fInf->pos + 0x01] = tempNote->note;
-				fInf->data[fInf->pos + 0x02] = 0x00;
-				fInf->pos += 0x03;
-				
-				RunNoteCnt --;
-				if (RunNoteCnt)
-					*tempNote = RunNotes[RunNoteCnt];
-				curNote --;
-			}
-		}
-	}
-	
-	return;
-}
-
 static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay)
 {
-	CheckRunningNotes(fInf, delay);
+	CheckRunningNotes(fInf, delay, &RunNoteCnt, RunNotes);
 	if (*delay)
 	{
-		UINT8 curNote;
+		UINT16 curNote;
 		
 		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
 			RunNotes[curNote].remLen -= (UINT16)*delay;
 	}
 	
 	return 0x00;
-}
-
-static void FlushRunningNotes(FILE_INF* fInf, MID_TRK_STATE* MTS)
-{
-	UINT8 curNote;
-	
-	for (curNote = 0; curNote < RunNoteCnt; curNote ++)
-	{
-		if (RunNotes[curNote].remLen > MTS->curDly)
-			MTS->curDly = RunNotes[curNote].remLen;
-	}
-	CheckRunningNotes(fInf, &MTS->curDly);
-	
-	return;
 }
 
 static UINT8 WriteFileData(UINT32 dataLen, const UINT8* data, const char* fileName)
@@ -885,14 +867,63 @@ static UINT8 WriteFileData(UINT32 dataLen, const UINT8* data, const char* fileNa
 	return 0;
 }
 
-INLINE UINT32 Tempo2Mid(UINT16 bpm)
+INLINE UINT32 Tempo2Mid(UINT16 bpm, UINT8 scale)
 {
-	// formula: (60 000 000 / bpm) * (MIDI_RES / 48)
-	return 1250000 * MIDI_RES / bpm;
+	// formula: (60 000 000 / bpm) * (64 / scale) * (MIDI_RES / 48)
+	UINT32 div = bpm * scale;
+	return (UINT32)((UINT64)80000000 * MIDI_RES / div);
 }
 
 
+
+INLINE UINT16 ReadLE16(const UINT8* data)
+{
+	return	(data[0x00] << 0) | (data[0x01] << 8);
+}
+
 INLINE UINT16 ReadBE16(const UINT8* data)
 {
-	return (data[0x00] << 8) | (data[0x01] << 0);
+	return	(data[0x00] << 8) | (data[0x01] << 0);
+}
+
+INLINE UINT16 ReadUInt16(const UINT8* data)
+{
+	return (mfFlags & 0x01) ? ReadBE16(data) : ReadLE16(data);
+}
+
+INLINE UINT32 ReadLE32(const UINT8* data)
+{
+	return	(data[0x00] <<  0) | (data[0x01] <<  8) |
+			(data[0x02] << 16) | (data[0x03] << 24);
+}
+
+INLINE UINT32 ReadBE32(const UINT8* data)
+{
+	return	(data[0x00] << 24) | (data[0x01] << 16) |
+			(data[0x02] <<  8) | (data[0x03] <<  0);
+}
+
+INLINE UINT32 ReadUInt32(const UINT8* data)
+{
+	return (mfFlags & 0x01) ? ReadBE32(data) : ReadLE32(data);
+}
+
+static const char* GetLastDirSepPos(const char* fileName)
+{
+	const char* sepPos;
+	const char* wSepPos;	// Windows separator
+	
+	sepPos = strrchr(fileName, '/');
+	wSepPos = strrchr(fileName, '\\');
+	if (wSepPos == NULL)
+		return sepPos;
+	else if (sepPos == NULL)
+		return wSepPos;
+	return (wSepPos > sepPos) ? wSepPos : sepPos;
+}
+
+INLINE const char* GetFileTitle(const char* fileName)
+{
+	const char* sepPos = GetLastDirSepPos(fileName);
+	return (sepPos == NULL) ? fileName : (sepPos + 1);
 }

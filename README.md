@@ -278,10 +278,13 @@ For Wolfteam MegaDrive games with PCM drums, it can autodetect the song list and
 ## wtmf2mid
 This tool converts Wolfteam MIDI music files to standard MIDIs.
 
-I made this tool to get MIDIs of songs from Arcus Odyssey (because its MT-32 soundtrack is awesome). I disassembled AO's sound driver during the development of this tool.
+I initially made this tool to get MIDIs of songs from Arcus Odyssey (because its MT-32 soundtrack is awesome).
+I disassembled a few sound drivers during the development of this tool: Arcus Odyssey, D: European Mirage, Span of Dream.
 
-Wolfteam MIDIs are often stored in larger archives that have a .MID or .MDI extension. The files begin with "MF".
-The format seems to have Little Endian and Big Endian variants. Right now the tool works only with the Big Endian variant used by Wolfteam games on the X68000.
+The files begin with "MF" and the format has Little Endian (for PC-9801) and Big Endian (for X68000) variants.
+It has also support for multiple songs within one file, but no game seems to use that.
+
+In games on the X68000, Wolfteam MIDIs are usually stored LZSS-compressed in larger archives that have an .MID or .MDI extension.
 
 ## yong2mid
 This tool converts songs from Yong Yong games to MIDI.

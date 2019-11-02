@@ -1,0 +1,93 @@
+Main Header
+-----------
+2 bytes - "MF"
+1 bytes - number of songs (usually 01)
+1 byte  - unused (always 00)
+4 bytes - total file size
+
+This is followed by all songs concatenated.
+
+Song Header
+-----------
+2 bytes - song size (includes this value)
+2 bytes - unknown (always 0000)
+1 byte  - unknown (always 00)
+1 bytes - flags (always 28h or 29h)
+	Bit 0 (01): Endianess (0 - Little Endian, 1 - Big Endian)
+	Note: The PC-98 driver requires the flags to be 28h and refuses to play the song else. The X68000 requires them to be 29h.
+1 bytes - song speed in BPM (Beats Per Minute, with 48 ticks per beat)
+1 byte  - track count tc
+
+Note: The "Endianess" flag affects all 2-byte values in the file.
+
+[repeat tc times]
+2 bytes - track measure offset list (relative to Song Header)
+1 byte  - MIDI channel (00..0F - MIDI channel 1..16, 80..8F - MIDI channel 1..16 in drum mode, FF - disabled)
+1 byte  - unused (always 00)
+[repeat end]
+
+
+Track Measure List
+------------------
+series of 2-byte offsets (relative to Song Header) that point to the measure's sequence data to play
+Offsets < 0010h are special:
+0000 - track end
+0001 - loop start
+0002 - loop end
+0003..000F - invalid, same effect as track end
+
+
+Commands
+--------
+00..7F ll - note, length ll (modified by Dx commands)
+00..7F 00 ll - note, absolute length ll, followed by another note at the same tick
+80..87 mm - Modulation (MIDI CC 1)
+88..8F vv - Main Volume (MIDI CC 7)
+90..97 pp - Panpot (MIDI CC 10)
+98..9F ee - Expression (MIDI CC 11)
+A0..A7 ii - instrument
+A8..AF cc dd - Control Change cc, data dd
+B0..BF xx - Pitch Bend (8-bit)
+	E0 ll mm is calculated as follows:
+	pb = 0x2000 + xx
+	ll = pb & 0x7F
+	mm = (pb >> 7) & 0x7F
+C0..CF xx xx - Pitch Bend (16-bit)
+	E0 ll mm is calculated as follows:
+	pb = 0x2000 + xxxx
+	ll = pb & 0x7F
+	mm = (pb >> 7) & 0x7F
+	Note: The byte order of xxxx depends on the Endianess flag in the file header.
+D0..DF - affects note length (D8 - stop after aobut 50%, D2 - stop shortly before actual end)
+	-> might be "stop note XX ticks earlier than actual end)
+	default: no early stop
+	D6 with a note of length 6 means "duration: 1 tick"
+	-> according to disasm: D0 = off, D1 = 0 ticks, D2 = 1 tick, etc.
+E0..E1 aa bb - Tempo Modifier (E1 = command with delay)
+	aa = tempo scale (2.6 fixed point, 40h = 100%, 20h = 50%, 10h = 25%)
+	bb = ignored (intended to be RCP-style tempo fade?)
+	Note: The command is buggy in the PC-9801 and X68000 versions of the driver and doesn't have any effect.
+E2..E3 - set MIDI channel (E3 = command with delay)
+E4..E5 aa - Channel Aftertouch (E5 = command with delay)
+E6..E7 aa bb - Note Aftertouch (E7 = command with delay)
+E8..EB - ignored
+EC..EF - Pan (EC = 64/centre, ED = 0/right, EE = 127/left, EF = 64/centre)
+	 Bug: The X68000 driver sends MIDI CC 0x10 instead of 10, causing it to not work properly.
+	      The bug doesn't exist in the PC-9801 version.
+F0 dd - delay dd
+F1 vv - set note velocity
+F2..FB - ignored
+FC aa bb cc dd - unknown
+	only bb is used as delay, all other parameters are ignored
+FD - increment Measure Counter
+FE - Measure End (reads next measure pointer)
+FF - Next Measure (combines FD and FE)
+	Note: The actual value of the Measure Counter is ignored. FE and FF always just read the next measure pointer.
+
+How the command ranges work:
+cc+00 - command, no delay
+cc+01 - command, delay of 1 tick
+cc+02 - command, delay of 2 ticks
+...
+cc+(n-2) - command, delay of (n-2) ticks
+cc+(n-1) xx - command, delay xx ticks (additional delay parameter right after command byte)
