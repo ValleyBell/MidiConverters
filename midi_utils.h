@@ -27,8 +27,9 @@
 //            If you want to declare it by yourself, define HAS_RUN_NOTE_STRUCT.
 //
 //  BALANCE_TRACK_TIMES
-//      UINT16 BalanceTrackTimes(UINT16 trkCnt, TRK_INF* trkInf, UINT8 verbose);
+//      UINT16 BalanceTrackTimes(UINT16 trkCnt, TRK_INF* trkInf, UINT32 minLoopTicks, UINT8 verbose);
 //          Adjusts the value of trkInf->loopTimes so that all tracks play for the approximately same time.
+//          When a track's loop has less ticks than minLoopTicks, then it is ignored.
 //          Returns the number of adjusted tracks.
 //
 //      Note: Needs a typedef struct TRK_INF to be declared *before including the header* with
@@ -159,7 +160,7 @@ static void FlushRunningNotes(FILE_INF* fInf, UINT32* delay, UINT16* runNoteCnt,
 #endif
 
 #ifdef BALANCE_TRACK_TIMES
-static UINT16 BalanceTrackTimes(UINT16 trkCnt, TRK_INF* trkInf, UINT8 verbose)
+static UINT16 BalanceTrackTimes(UINT16 trkCnt, TRK_INF* trkInf, UINT32 minLoopTicks, UINT8 verbose)
 {
 	UINT16 curTrk;
 	TRK_INF* tInf;
@@ -190,8 +191,12 @@ static UINT16 BalanceTrackTimes(UINT16 trkCnt, TRK_INF* trkInf, UINT8 verbose)
 	{
 		tInf = &trkInf[curTrk];
 		loopTicks = tInf->loopTimes ? (tInf->tickCnt - tInf->loopTick) : 0;
-		if (loopTicks < 32)
+		if (loopTicks < minLoopTicks)
+		{
+			if (loopTicks > 0 && (verbose & 0x02))
+				printf("Trk %u: ignoring micro-loop (%u ticks)\n", curTrk, loopTicks);
 			continue;	// ignore tracks with very short loops
+		}
 		
 		// heuristic: The track needs additional loops, if the longest track is
 		//            longer than the current track + 1/4 loop.
@@ -201,7 +206,7 @@ static UINT16 BalanceTrackTimes(UINT16 trkCnt, TRK_INF* trkInf, UINT8 verbose)
 			trkTicks = maxTicks - tInf->loopTick;	// desired length of the loop
 			tInf->loopTimes = (UINT16)((trkTicks + loopTicks / 3) / loopTicks);
 			adjustCnt ++;
-			if (verbose)
+			if (verbose & 0x01)
 				printf("Trk %u: Extended loop to %u times\n", curTrk, tInf->loopTimes);
 		}
 	}

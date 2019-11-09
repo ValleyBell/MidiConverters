@@ -365,7 +365,7 @@ UINT8 Fmp2Mid(UINT16 SongLen, const UINT8* SongData)
 	qsort(gblEvts.data, gblEvts.evtCount, sizeof(UINT32) * 2, &EvtList_ItemCompare);
 	
 	if (! NO_LOOP_EXT)
-		BalanceTrackTimes(trkCnt, trkInf, 1);
+		BalanceTrackTimes(trkCnt, trkInf, MIDI_RES / 4, 0xFF);
 	
 	WriteMidiHeader(&midFileInf, 0x0001, trkCnt, MIDI_RES);
 	

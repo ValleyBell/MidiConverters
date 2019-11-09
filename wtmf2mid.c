@@ -309,7 +309,7 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 	WriteMidiHeader(&midFileInf, 0x0001, trkCnt, MIDI_RES);
 	
 	if (! NO_LOOP_EXT)
-		BalanceTrackTimes(trkCnt, trkInf, 1);
+		BalanceTrackTimes(trkCnt, trkInf, MIDI_RES / 4, 0xFF);
 	
 	for (curTrk = 0; curTrk < trkCnt; curTrk ++)
 	{

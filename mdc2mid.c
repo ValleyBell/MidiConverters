@@ -256,7 +256,7 @@ UINT8 Mdc2Mid(UINT32 SongLen, const UINT8* SongData)
 	}
 	
 	if (! NO_LOOP_EXT)
-		BalanceTrackTimes(trkCnt, trkInf, 1);
+		BalanceTrackTimes(trkCnt, trkInf, MIDI_RES / 4, 0xFF);
 	
 	WriteMidiHeader(&midFileInf, 0x0001, trkCnt, MIDI_RES);
 	

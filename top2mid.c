@@ -18,6 +18,33 @@
 #endif
 
 
+#include "midi_funcs.h"
+
+typedef struct _track_info
+{
+	UINT16 startOfs;
+	UINT16 loopOfs;
+	UINT32 tickCnt;
+	UINT32 loopTick;
+	UINT16 loopTimes;
+	UINT8 mode;
+} TRK_INF;
+
+#define HAS_RUN_NOTE_STRUCT
+typedef struct running_note
+{
+	UINT8 midChn;
+	UINT8 orgNote;	// orignal Note value - used to extend notes
+	UINT8 note;
+	UINT8 velOff;	// note off velocity
+	UINT32 remLen;
+} RUN_NOTE;
+
+//#define RUNNING_NOTES	// we need a custom implementation of this here
+#define BALANCE_TRACK_TIMES
+#include "midi_utils.h"
+
+
 #define INS_MAX_INSTRUMENTS	0x100
 #define INS_DATA_BLK_LINES	1
 #define INS_LINE_CNT		(INS_MAX_INSTRUMENTS * INS_DATA_BLK_LINES)
@@ -55,50 +82,27 @@ typedef struct channel_data_drums
 } CHN_DATA_DRM;
 
 
-typedef struct _track_info
-{
-	UINT8 Mode;
-	UINT16 StartPos;
-	UINT16 LoopPos;
-	UINT16 LoopTimes;
-	UINT32 TickCnt;
-	UINT32 LoopTick;
-} TRK_INFO;
-
-
 void ReadConvData(const char* FileName);
 INS_SETUP* GetInsSetupData(UINT8 Ins, UINT8 Note);
-void WriteRPN(UINT8* MidFile, UINT32* MidPos, UINT32* Delay, UINT8 Chn,
+void WriteRPN(FILE_INF* fInf, MID_TRK_STATE* MTS,
 			  UINT8 RpnMSB, UINT8 RpnLSB, UINT8 RpnData, CHN_DATA_MID* MidChnData);
 UINT8 ToP2Mid(void);
-static void PreparseSeq(UINT8 TrkCnt, TRK_INFO* TrkInfo, UINT16 BasePtr);
-static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf);
-static void CheckRunningNotes(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt);
-static void WriteMidiDelay(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 EvtCode);
-static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UINT8 Val1, UINT8 Val2);
-static void WriteMetaEvent_Data(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 MetaType, UINT32 DataLen, const UINT8* Data);
-static void WriteMidiValue(UINT8* Buffer, UINT32* Pos, UINT32 Value);
-static void WriteBE32(UINT8* Buffer, UINT32 Value);
-static void WriteBE16(UINT8* Buffer, UINT16 Value);
+static void PreparseSeq(TRK_INF* trkInf, UINT16 BasePtr);
+static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay, UINT16* runNoteCnt, RUN_NOTE* runNotes);
+static void FlushRunningNotes(FILE_INF* fInf, UINT32* delay, UINT16* runNoteCnt, RUN_NOTE* runNotes);
+static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay);
 static UINT16 ReadLE16(const UINT8* Data);
+static UINT32 Tempo2Mid(UINT16 bpm, UINT8 scale);
 static double Lin2DB(UINT8 LinVol);
 static UINT8 DB2Mid(double DB);
 
 
-typedef struct running_note
-{
-	UINT8 MidChn;
-	UINT8 Note;	// orignal Note value - used to extend notes
-	UINT8 MidiNote;
-	UINT16 RemLen;
-} RUN_NOTE;
-
-
+UINT16 MIDI_RES = 24;
 UINT32 SpcLen;
 UINT8* SpcData;
 UINT32 MidLen;
 UINT8* MidData;
-UINT8 RunNoteCnt;
+UINT16 RunNoteCnt;
 RUN_NOTE RunNotes[0x100];
 INS_SETUP InsSetup[INS_LINE_CNT];
 bool FixInsSet;
@@ -123,10 +127,12 @@ int main(int argc, char* argv[])
 		printf("    i   fix Instruments (needs InsMap.ini)\n");
 		printf("    v   fix Volume (convert linear SNES to logarithmic MIDI)\n");
 		printf("    d   write Debug Controllers (for unknown events)\n");
-		printf("    x   no loop extention\n");
+		printf("    x   no loop extension\n");
 		printf("Supported games: Tales Of Phantasia SFC and Star Ocean.\n");
 		return 0;
 	}
+	
+	MidiDelayCallback = MidiDelayHandler;
 	
 	FixInsSet = false;
 	FixVolume = false;
@@ -334,7 +340,7 @@ INS_SETUP* GetInsSetupData(UINT8 Ins, UINT8 Note)
 	return TempIS;
 }
 
-void WriteRPN(UINT8* MidFile, UINT32* MidPos, UINT32* Delay, UINT8 Chn,
+void WriteRPN(FILE_INF* fInf, MID_TRK_STATE* MTS,
 			  UINT8 RpnMSB, UINT8 RpnLSB, UINT8 RpnData, CHN_DATA_MID* MidChnData)
 {
 	UINT8 RPNCtrl;
@@ -347,14 +353,14 @@ void WriteRPN(UINT8* MidFile, UINT32* MidPos, UINT32* Delay, UINT8 Chn,
 	// sadly, this doesn't work, because I process every track separately
 //	if (MidChnData->RPN_MSB != RpnMSB || MidChnData->RPN_LSB != RpnLSB)
 	{
-		WriteEvent(MidFile, MidPos, Delay, 0xB0 | Chn, RPNCtrl | 0x01, RpnMSB & 0x7F);
-		WriteEvent(MidFile, MidPos, Delay, 0xB0 | Chn, RPNCtrl | 0x00, RpnLSB & 0x7F);
+		WriteEvent(fInf, MTS, 0xB0, RPNCtrl | 0x01, RpnMSB & 0x7F);
+		WriteEvent(fInf, MTS, 0xB0, RPNCtrl | 0x00, RpnLSB & 0x7F);
 		MidChnData->RPN_MSB = RpnMSB;
 		MidChnData->RPN_LSB = RpnLSB;
 	}
 	
 	if (! (RpnData & 0x80))
-		WriteEvent(MidFile, MidPos, Delay, 0xB0 | Chn, 0x06, RpnData);
+		WriteEvent(fInf, MTS, 0xB0, 0x06, RpnData);
 	
 	return;
 }
@@ -368,20 +374,19 @@ UINT8 ToP2Mid(void)
 		0xF6, 0xC4, 0xF7, 0xC4, 0x83, 0x8F, 0x30, 0xF1,
 		0xCD, 0xFF, 0xBD, 0x3F};
 	UINT16 BasePtr;
-	TRK_INFO TrkInfo[TRK_COUNT];
-	TRK_INFO* TempTInf;
+	TRK_INF TrkInfo[TRK_COUNT];
+	TRK_INF* TempTInf;
 	UINT8 CurTrk;
 	UINT16 SegBase;
 	UINT16 SegIdx;
 	UINT16 InPos;
-	UINT32 DstPos;
-	UINT32 TrkBase;
-	UINT8 MidChn;
+	FILE_INF midFileInf;
+	MID_TRK_STATE MTS;
 	bool TrkEnd;
 	UINT8 CurCmd;
 	
 	UINT8 LoopIdx;
-	UINT16 LoopCur[0x10];	// current loop counter (16-bit due to loop extention)
+	UINT16 LoopCur[0x10];	// current loop counter (16-bit due to loop extension)
 	UINT16 LoopPos[0x10];	// loop offset
 	UINT16 LoopSeg[0x10];	// loop segment
 	CHN_DATA_SEQ ChnSeq;
@@ -395,7 +400,6 @@ UINT8 ToP2Mid(void)
 	UINT8 TempByt;
 	UINT8 CurNote;
 	UINT8 LastChn;
-	UINT32 CurDly;
 	UINT8 NoteVol;
 	UINT8 ChnVol;
 	//INT8 NoteMove;
@@ -408,73 +412,63 @@ UINT8 ToP2Mid(void)
 	
 	if (memcmp(&SpcData[0x0840], DRIVER_SIG, 0x14))
 	{
-		printf("This SPC uses a wrong sound driver!\n");
+		printf("This SPC uses an unsupported sound driver!\n");
 		return 0xFF;
 	}
 	BasePtr = ReadLE16(&SpcData[0x0854]);
 	
-	MidLen = 0x40000;	// 256 KB should be enough (so-37 has 66.4 KB)
-	MidData = (UINT8*)malloc(MidLen);
+	midFileInf.alloc = 0x40000;	// 256 KB should be enough (so-37 has 66.4 KB)
+	midFileInf.data = (UINT8*)malloc(midFileInf.alloc);
+	midFileInf.pos = 0x00;
 	
-	DstPos = 0x00;
-	WriteBE32(&MidData[DstPos + 0x00], 0x4D546864);	// write 'MThd'
-	WriteBE32(&MidData[DstPos + 0x04], 0x00000006);
-	DstPos += 0x08;
-	
-	WriteBE16(&MidData[DstPos + 0x00], 0x0001);			// Format 1
-	WriteBE16(&MidData[DstPos + 0x02], 1 + TRK_COUNT);	// Tracks: 1 (master) + 15
-	WriteBE16(&MidData[DstPos + 0x04], 0x0018);			// Ticks per Quarter: 48
-	DstPos += 0x06;
+	WriteMidiHeader(&midFileInf, 0x0001, 1 + TRK_COUNT, MIDI_RES);
 	
 	InPos = BasePtr + 0x0020;
 	
-	WriteBE32(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
-	DstPos += 0x08;
-	TrkBase = DstPos;
-	CurDly = 0x00;
+	WriteMidiTrackStart(&midFileInf, &MTS);
+	MTS.midChn = 0x00;
 	
 	InPos += 0x02;	// skip file size
 	
 	InitTempo = SpcData[InPos];
-	TempLng = 60000000 / (InitTempo * 2);	// base guessed
+	TempLng = Tempo2Mid(InitTempo, 0x40);
 	WriteBE32(TempArr, TempLng);
-	WriteMetaEvent_Data(MidData, &DstPos, &CurDly, 0x51, 0x03, &TempArr[0x01]);
+	WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &TempArr[0x01]);
 	InPos ++;
 	
 	if (FixInsSet)
-		WriteEvent(MidData, &DstPos, &CurDly, 0xC9, 0x00, 0x00);	// make sure that the drum settings are reset
-	WriteEvent(MidData, &DstPos, &CurDly, 0xFF, 0x2F, 0x00);
-	WriteBE32(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
+		WriteEvent(&midFileInf, &MTS, 0xC9, 0x00, 0x00);	// make sure that the drum settings are reset
+	
+	WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
+	WriteMidiTrackEnd(&midFileInf, &MTS);
+	
 	
 	for (CurTrk = 0x00; CurTrk < TRK_COUNT; CurTrk ++, InPos += 0x03)
 	{
 		TempTInf = &TrkInfo[CurTrk];
-		TempTInf->Mode = SpcData[InPos + 0x00];
-		TempTInf->StartPos = ReadLE16(&SpcData[InPos + 0x01]);
-		TempTInf->LoopPos = 0x0000;
-		TempTInf->LoopTimes = DefLoopCur;
-		TempTInf->TickCnt = 0;
-		TempTInf->LoopTick = 0;
+		TempTInf->mode = SpcData[InPos + 0x00];
+		TempTInf->startOfs = ReadLE16(&SpcData[InPos + 0x01]);
+		TempTInf->loopOfs = 0x0000;
+		TempTInf->tickCnt = 0;
+		TempTInf->loopTick = 0;
+		
+		PreparseSeq(TempTInf, BasePtr);
+		TempTInf->loopTimes = TempTInf->loopOfs ? DefLoopCur : 0;
 	}
-	PreparseSeq(TRK_COUNT, TrkInfo, BasePtr);
 	if (LoopExt)
-		GuessLoopTimes(TRK_COUNT, TrkInfo);
+		BalanceTrackTimes(TRK_COUNT, TrkInfo, MIDI_RES / 4, 0xFF);
 	
 	for (CurTrk = 0x00; CurTrk < TRK_COUNT; CurTrk ++)
 	{
 		TempTInf = &TrkInfo[CurTrk];
-		SegBase = BasePtr + TempTInf->StartPos;
+		SegBase = BasePtr + TempTInf->startOfs;
 		
-		WriteBE32(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
-		DstPos += 0x08;
+		WriteMidiTrackStart(&midFileInf, &MTS);
 		
-		TrkBase = DstPos;
-		CurDly = 0x00;
-		
-		TrkEnd = ! (TempTInf->Mode >> 7);
+		TrkEnd = ! (TempTInf->mode >> 7);
 		LoopIdx = 0x00;
-		MidChn = CurTrk + (CurTrk + 6) / 15;
-		LastChn = MidChn;
+		MTS.midChn = CurTrk + (CurTrk + 6) / 15;
+		LastChn = MTS.midChn;
 		NoteVol = 0x7F;
 		ChnVol = 0x64;
 		//DrmNote = 0x00;
@@ -488,7 +482,7 @@ UINT8 ToP2Mid(void)
 		ChnSeq.Ins = 0xFF;
 		ChnSeq.Move = 0;
 		ChnSeq.DrmNote = 0xFF;
-		ChnSeq.DefaultChn = MidChn;
+		ChnSeq.DefaultChn = MTS.midChn;
 		CurDrmPtch = 0xFF;
 		//ChnMid.Pitch = 0x4000;
 		ChnMid.PBRange = 0x00;
@@ -550,7 +544,7 @@ UINT8 ToP2Mid(void)
 						if (TempChD->Pitch != TempByt)
 						{
 							// NRPN: Drum Note Pitch
-							WriteRPN(MidData, &DstPos, &CurDly, MidChn, 0x98, ChnSeq.DrmNote, TempByt, &ChnMid);
+							WriteRPN(&midFileInf, &MTS, 0x98, ChnSeq.DrmNote, TempByt, &ChnMid);
 							TempChD->Pitch = TempByt;
 						}
 						
@@ -571,31 +565,31 @@ UINT8 ToP2Mid(void)
 				else
 					NoteVol = SpcData[InPos + 0x03] >> 1;
 				
-				WriteEvent(MidData, &DstPos, &CurDly, 0x00, 0x00, 0x00);
+				CheckRunningNotes(&midFileInf, &MTS.curDly, &RunNoteCnt, RunNotes);
 				
 				for (TempByt = 0x00; TempByt < RunNoteCnt; TempByt ++)
 				{
-					if (RunNotes[TempByt].Note == CurCmd)
+					if (RunNotes[TempByt].orgNote == CurCmd)
 					{
-						RunNotes[TempByt].RemLen = (UINT16)CurDly + SpcData[InPos + 0x02];
+						RunNotes[TempByt].remLen = MTS.curDly + SpcData[InPos + 0x02];
 						break;
 					}
 				}
 				if (TempByt >= RunNoteCnt)
 				{
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0x90 | MidChn, CurNote & 0x7F, NoteVol);
+					WriteEvent(&midFileInf, &MTS, 0x90, CurNote & 0x7F, NoteVol);
 					if (RunNoteCnt < 0x80)
 					{
-						RunNotes[RunNoteCnt].MidChn = MidChn;
-						RunNotes[RunNoteCnt].Note = CurCmd;
-						RunNotes[RunNoteCnt].MidiNote = CurNote;
-						RunNotes[RunNoteCnt].RemLen = SpcData[InPos + 0x02];
+						RunNotes[RunNoteCnt].midChn = MTS.midChn;
+						RunNotes[RunNoteCnt].orgNote = CurCmd;
+						RunNotes[RunNoteCnt].note = CurNote;
+						RunNotes[RunNoteCnt].velOff = 0x80;
+						RunNotes[RunNoteCnt].remLen = SpcData[InPos + 0x02];
 						RunNoteCnt ++;
 					}
 				}
 				
-				CurDly += SpcData[InPos + 0x01];
+				MTS.curDly += SpcData[InPos + 0x01];
 				InPos += 0x04;
 			}
 			else
@@ -603,19 +597,16 @@ UINT8 ToP2Mid(void)
 				switch(CurCmd)
 				{
 				case 0x90:	// Delay
-					CurDly += SpcData[InPos + 0x01];
+					MTS.curDly += SpcData[InPos + 0x01];
 					InPos += 0x02;
 					break;
 				case 0x92:	// Loop Start
-					if (InPos == TempTInf->LoopPos)
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6F, 0x00);
+					if (InPos == TempTInf->loopOfs)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, 0x00);
 					else if (WriteDbgCtrls)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x70, LoopIdx);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, 0x00);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, LoopIdx);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, 0x00);
 					}
 					InPos += 0x01;
 					
@@ -637,28 +628,22 @@ UINT8 ToP2Mid(void)
 						//LoopCur[LoopIdx] = 0x00;
 						//LoopIdx ++;
 						if (! TempByt)
-							WriteEvent(MidData, &DstPos, &CurDly,
-										0xB0 | MidChn, 0x6F, 0x01);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, 0x01);
 						else if (WriteDbgCtrls)
 						{
-							WriteEvent(MidData, &DstPos, &CurDly,
-										0xB0 | MidChn, 0x70, LoopIdx);
-							WriteEvent(MidData, &DstPos, &CurDly,
-										0xB0 | MidChn, 0x26, 0x7F);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, LoopIdx);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, 0x7F);
 						}
 						break;
 					}
 					LoopIdx --;
 					LoopCur[LoopIdx] ++;
 					if (! TempByt && LoopCur[LoopIdx] <= 0x7F)
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6F, (UINT8)LoopCur[LoopIdx]);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)LoopCur[LoopIdx]);
 					else if (WriteDbgCtrls)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x70, LoopIdx);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, LoopCur[LoopIdx] & 0x7F);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, LoopIdx);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, LoopCur[LoopIdx] & 0x7F);
 					}
 					/*if (! TempByt && LoopCur[LoopIdx] >= 0x02)
 					{
@@ -666,7 +651,7 @@ UINT8 ToP2Mid(void)
 						break;
 					}*/
 					if (LoopCur[LoopIdx] < TempByt ||
-						(! TempByt && LoopCur[LoopIdx] < TempTInf->LoopTimes))
+						(! TempByt && LoopCur[LoopIdx] < TempTInf->loopTimes))
 					{
 						SegIdx = LoopSeg[LoopIdx];
 						InPos = LoopPos[LoopIdx];
@@ -678,29 +663,24 @@ UINT8 ToP2Mid(void)
 					TempByt = 12;
 					if (ChnMid.PBRange != TempByt)
 					{
-						WriteRPN(MidData, &DstPos, &CurDly, MidChn, 0x00, 0x00, TempByt, &ChnMid);
+						WriteRPN(&midFileInf, &MTS, 0x00, 0x00, TempByt, &ChnMid);
 						ChnMid.PBRange = TempByt;
 					}
 					
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xE0 | MidChn, 0x00, SpcData[InPos + 0x02]);
-					CurDly += SpcData[InPos + 0x01];
+					WriteEvent(&midFileInf, &MTS, 0xE0, 0x00, SpcData[InPos + 0x02]);
+					MTS.curDly += SpcData[InPos + 0x01];
 					InPos += 0x03;
 					break;
 				case 0x95:	// Set Tempo (relative to initial tempo)
-					WriteEvent(MidData, &DstPos, &CurDly, 0xFF, 0x51, 0x00);
 					TempByt = SpcData[InPos + 0x02];
-					//TempLng = 60000000 / (InitTempo * 2 * TempByt / 0x40);	// guessed
-					TempLng = 0x40 * 30000000 / (InitTempo * TempByt);
-					WriteBE32(&MidData[DstPos - 0x01], TempLng);
-					MidData[DstPos - 0x01] = 0x03;
-					DstPos += 0x03;
+					TempLng = Tempo2Mid(InitTempo, TempByt);	// RCP-stype tempo
+					WriteBE32(TempArr, TempLng);
+					WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &TempArr[0x01]);
 					
 					if (WriteDbgCtrls)
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SpcData[InPos + 0x02]);
 					
-					CurDly += SpcData[InPos + 0x01];
+					MTS.curDly += SpcData[InPos + 0x01];
 					InPos += 0x03;
 					break;
 				case 0x96:	// Set Instrument
@@ -720,21 +700,21 @@ UINT8 ToP2Mid(void)
 #if 0
 							if (CurDrmPtch == 0xFF)
 							{
-								WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x00, 0x7F);
-								WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x20, 0x00);
-								WriteEvent(MidData, &DstPos, &CurDly, 0xC0 | MidChn, 0x00, 0x00);
+								WriteEvent(&midFileInf, &MTS, 0xB0, 0x00, 0x7F);
+								WriteEvent(&midFileInf, &MTS, 0xB0, 0x20, 0x00);
+								WriteEvent(&midFileInf, &MTS, 0xC0, 0x00, 0x00);
 								
-								WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x07, 0x7F);
+								WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, 0x7F);
 								CurDrmPtch = 0x00;
 							}
 #else
-							if (MidChn != 0x09)
+							if (MTS.midChn != 0x09)
 							{
-								MidChn = 0x09;
+								MTS.midChn = 0x09;
 								// copy Volume/Pan to Drum Channel
-								WriteRPN(MidData, &DstPos, &CurDly, 0xB0 | MidChn,
+								WriteRPN(&midFileInf, &MTS,
 									0x9A, ChnSeq.DrmNote, ChnMid.Vol, &ChnMid);	// Drum Volume
-								WriteRPN(MidData, &DstPos, &CurDly, 0xB0 | MidChn,
+								WriteRPN(&midFileInf, &MTS,
 									0x9C, ChnSeq.DrmNote, ChnMid.Pan, &ChnMid);	// Drum Panorama
 							}
 #endif
@@ -744,21 +724,21 @@ UINT8 ToP2Mid(void)
 							if ((TempIS->MidiIns & 0x80) && TempIS->DrumBase == 0xFF)
 							{
 								// generic Drum Channel
-								MidChn = 0x09;
+								MTS.midChn = 0x09;
 								ChnSeq.Move = 0;
 								ChnSeq.DrmNote = (UINT8)TempIS->NoteMove;
 							}
 							else
 							{
 								// normal Instrument
-								if (MidChn == 0x09)
+								if (MTS.midChn == 0x09)
 								{
 									// copy Volume/Pan back to Normal Channel
-									MidChn = ChnSeq.DefaultChn;
-									WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x07, ChnMid.Vol);	// Volume
-									WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0A, ChnMid.Pan);	// Panorama
+									MTS.midChn = ChnSeq.DefaultChn;
+									WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, ChnMid.Vol);	// Volume
+									WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, ChnMid.Pan);	// Panorama
 								}
-								MidChn = ChnSeq.DefaultChn;
+								MTS.midChn = ChnSeq.DefaultChn;
 								ChnSeq.Move = TempIS->NoteMove;
 								ChnSeq.DrmNote = 0xFF;
 							}
@@ -766,7 +746,7 @@ UINT8 ToP2Mid(void)
 					}
 					
 					if (ChnSeq.DrmNote == 0xFF)
-						WriteEvent(MidData, &DstPos, &CurDly, 0xC0 | MidChn, TempByt, 0x00);
+						WriteEvent(&midFileInf, &MTS, 0xC0, TempByt, 0x00);
 					InPos += 0x02;
 					break;
 				case 0x97:	// another Volume setting?
@@ -779,16 +759,16 @@ UINT8 ToP2Mid(void)
 					{
 						ChnMid.Vol = TempByt;
 						if (ChnSeq.DrmNote == 0xFF)
-							WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x07, ChnMid.Vol);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, ChnMid.Vol);
 						else
-							WriteRPN(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x9A, ChnSeq.DrmNote, ChnMid.Vol, &ChnMid);
+							WriteRPN(&midFileInf, &MTS, 0x9A, ChnSeq.DrmNote, ChnMid.Vol, &ChnMid);
 					}
 					else //if (CurCmd == 0x98)
 					{
 						ChnMid.Expr = TempByt;
-						WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0B, ChnMid.Expr);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0B, ChnMid.Expr);
 					}
-					CurDly += SpcData[InPos + 0x01];
+					MTS.curDly += SpcData[InPos + 0x01];
 					InPos += 0x03;
 					break;
 				case 0x99:	// Set Pan
@@ -796,19 +776,17 @@ UINT8 ToP2Mid(void)
 					if (ChnMid.Pan >= 0x80)
 						ChnMid.Pan = 0x7F;
 					if (ChnSeq.DrmNote == 0xFF)
-						WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0A, ChnMid.Pan);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, ChnMid.Pan);
 					else
-						WriteRPN(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x9C, ChnSeq.DrmNote, ChnMid.Pan, &ChnMid);
-					CurDly += SpcData[InPos + 0x01];
+						WriteRPN(&midFileInf, &MTS, 0x9C, ChnSeq.DrmNote, ChnMid.Pan, &ChnMid);
+					MTS.curDly += SpcData[InPos + 0x01];
 					InPos += 0x03;
 					break;
 				case 0x9B:
 					if (WriteDbgCtrls)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, CurCmd & 0x7F);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SpcData[InPos + 0x01]);
 					}
 					InPos += 0x02;
 					break;
@@ -818,117 +796,87 @@ UINT8 ToP2Mid(void)
 					//ModVal = SpcData[InPos + 0x02] * 4
 					if (WriteDbgCtrls)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, SpcData[InPos + 0x03]);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, CurCmd & 0x7F);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SpcData[InPos + 0x01]);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SpcData[InPos + 0x02]);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SpcData[InPos + 0x03]);
 					}
 					InPos += 0x04;
 					break;
 				case 0xA2:	// Detune
 					if (WriteDbgCtrls)
 					{
-						/*WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);*/
+						/*WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, CurCmd & 0x7F);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SpcData[InPos + 0x01]);*/
 					}
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x65, 0x00);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x64, 0x01);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x06, SpcData[InPos + 0x01]);
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x26, 0x11);
+					WriteRPN(&midFileInf, &MTS, 0x00, 0x01, SpcData[InPos + 0x01], &ChnMid);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, 0x00);
 					InPos += 0x02;
 					break;
 				case 0xA3:
 					if (WriteDbgCtrls)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, CurCmd & 0x7F);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SpcData[InPos + 0x01]);
 					}
 					InPos += 0x02;
 					break;
 				case 0xAA:	// set Reverb/Chorus
-					//WriteEvent(MidData, &DstPos, &CurDly,
-					//			0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
+					//WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, CurCmd & 0x7F);
 					if (0 || WriteDbgCtrls)
 					{
 						// These are global settings, so I write them to all channels.
-						for (TempByt = 0x00; TempByt < 0x10; TempByt ++)
+						UINT8 chnBak = MTS.midChn;
+						for (MTS.midChn = 0x00; MTS.midChn < 0x10; MTS.midChn ++)
 						{
-							WriteEvent(MidData, &DstPos, &CurDly,
-										0xB0 | TempByt, 0x5B, SpcData[InPos + 0x01]);
-							WriteEvent(MidData, &DstPos, &CurDly,
-										0xB0 | TempByt, 0x5D, SpcData[InPos + 0x02]);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x5B, SpcData[InPos + 0x01]);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x5D, SpcData[InPos + 0x02]);
 						}
+						MTS.midChn = chnBak;
 					}
 					InPos += 0x03;
 					break;
 				case 0xAD:
 					if (WriteDbgCtrls)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, CurCmd & 0x7F);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SpcData[InPos + 0x01]);
 					}
 					InPos += 0x02;
 					break;
 				case 0xAE:
 					if (WriteDbgCtrls)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, CurCmd & 0x7F);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SpcData[InPos + 0x01]);
 					}
 					InPos += 0x02;
 					break;
 				case 0xAF:
 					if (WriteDbgCtrls)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, SpcData[InPos + 0x02]);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, CurCmd & 0x7F);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SpcData[InPos + 0x01]);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SpcData[InPos + 0x02]);
 					}
 					InPos += 0x03;
 					break;
 				case 0xB2:
 					if (WriteDbgCtrls)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x26, SpcData[InPos + 0x01]);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, CurCmd & 0x7F);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, SpcData[InPos + 0x01]);
 					}
 					InPos += 0x02;
 					break;
 				case 0xC8:
 					if (WriteDbgCtrls)
-					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					}
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, CurCmd & 0x7F);
 					InPos += 0x01;
 					break;
 				case 0xF0:
 					if (WriteDbgCtrls)
-					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					}
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, CurCmd & 0x7F);
 					InPos += 0x01;
 					break;
 				case 0xFD:	// Segment Return
@@ -937,10 +885,7 @@ UINT8 ToP2Mid(void)
 					break;
 				case 0xFE:
 					if (WriteDbgCtrls)
-					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6D, CurCmd & 0x7F);
-					}
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6D, CurCmd & 0x7F);
 					InPos += 0x01;
 					break;
 				case 0xFF:
@@ -950,35 +895,27 @@ UINT8 ToP2Mid(void)
 				default:
 					printf("Unknown event %02X on track %X at %04X\n", SpcData[InPos + 0x00], CurTrk, InPos);
 					if (WriteDbgCtrls)
-					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x6E, CurCmd & 0x7F);
-					}
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, CurCmd & 0x7F);
 					InPos += 0x01;
 					TrkEnd = true;
 					break;
 				}
 			}
 		}
-		for (TempByt = 0x00; TempByt < RunNoteCnt; TempByt ++)
-		{
-			if (RunNotes[TempByt].RemLen > CurDly)
-				CurDly = RunNotes[TempByt].RemLen;
-		}
-		WriteEvent(MidData, &DstPos, &CurDly, 0x7F, 0x00, 0x00);	// flush all notes
+		FlushRunningNotes(&midFileInf, &MTS.curDly, &RunNoteCnt, RunNotes);
 		
-		WriteEvent(MidData, &DstPos, &CurDly, 0xFF, 0x2F, 0x00);
+		WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
 		
-		WriteBE32(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
+		WriteMidiTrackEnd(&midFileInf, &MTS);
 	}
-	MidLen = DstPos;
+	MidData = midFileInf.data;
+	MidLen = midFileInf.pos;
 	
 	return 0x00;
 }
 
-static void PreparseSeq(UINT8 TrkCnt, TRK_INFO* TrkInfo, UINT16 BasePtr)
+static void PreparseSeq(TRK_INF* trkInf, UINT16 BasePtr)
 {
-	UINT8 CurTrk;
 	UINT16 SegBase;
 	UINT16 SegIdx;
 	UINT16 InPos;
@@ -990,267 +927,208 @@ static void PreparseSeq(UINT8 TrkCnt, TRK_INFO* TrkInfo, UINT16 BasePtr)
 	UINT8 LoopCur[0x10];
 	UINT16 LoopPos[0x10];
 	UINT16 LoopSeg[0x10];
+	UINT32 LoopTick[0x10];
 	UINT8 LoopCount;
 	
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
+	SegBase = BasePtr + trkInf->startOfs;
+	
+	TrkEnd = ! (trkInf->mode >> 7);
+	LoopIdx = 0x00;
+	SegIdx = 0x00;
+	InPos = 0x0000;
+	CurTick = 0;
+	
+	while(! TrkEnd)
 	{
-		SegBase = BasePtr + TrkInfo[CurTrk].StartPos;
-		
-		TrkEnd = ! (TrkInfo[CurTrk].Mode >> 7);
-		LoopIdx = 0x00;
-		SegIdx = 0x00;
-		InPos = 0x0000;
-		CurTick = 0;
-		
-		while(! TrkEnd)
+		if (InPos == 0x0000)
 		{
-			if (InPos == 0x0000)
+			InPos = ReadLE16(&SpcData[SegBase + SegIdx * 0x02]);
+			if (InPos == 0xFFFF)
+				break;
+			InPos += BasePtr;
+			SegIdx ++;
+		}
+		
+		CurCmd = SpcData[InPos];
+		if (CurCmd < 0x90)
+		{
+			CurTick += SpcData[InPos + 0x01];
+			InPos += 0x04;
+		}
+		else
+		{
+			switch(CurCmd)
 			{
-				InPos = ReadLE16(&SpcData[SegBase + SegIdx * 0x02]);
-				if (InPos == 0xFFFF)
-					break;
-				InPos += BasePtr;
-				SegIdx ++;
-			}
-			
-			CurCmd = SpcData[InPos];
-			if (CurCmd < 0x90)
-			{
+			case 0x90:	// Delay
 				CurTick += SpcData[InPos + 0x01];
-				InPos += 0x04;
-			}
-			else
-			{
-				switch(CurCmd)
+				InPos += 0x02;
+				break;
+			case 0x92:	// Loop Start
+				InPos += 0x01;
+				
+				LoopSeg[LoopIdx] = SegIdx;
+				LoopPos[LoopIdx] = InPos;
+				LoopCur[LoopIdx] = 0x00;
+				LoopTick[LoopIdx] = CurTick;
+				LoopIdx ++;
+				break;
+			case 0x93:	// Loop End
+				LoopCount = SpcData[InPos + 0x01];
+				InPos += 0x02;
+				
+				if (! LoopIdx)
+					break;	// missing Loop Start
+				LoopIdx --;
+				LoopCur[LoopIdx] ++;
+				
+				if (! LoopCount)	// infinite loop
 				{
-				case 0x90:	// Delay
-					CurTick += SpcData[InPos + 0x01];
-					InPos += 0x02;
-					break;
-				case 0x92:	// Loop Start
-					if (! LoopIdx)
-					{
-						TrkInfo[CurTrk].LoopPos = InPos;
-						TrkInfo[CurTrk].LoopTick = CurTick;
-					}
-					InPos += 0x01;
-					
-					LoopSeg[LoopIdx] = SegIdx;
-					LoopPos[LoopIdx] = InPos;
-					LoopCur[LoopIdx] = 0x00;
-					LoopIdx ++;
-					break;
-				case 0x93:	// Loop End
-					LoopCount = SpcData[InPos + 0x01];
-					InPos += 0x02;
-					
-					if (! LoopIdx)
-						break;	// missing Loop Start
-					LoopIdx --;
-					LoopCur[LoopIdx] ++;
-					
-					if (LoopCount)
-						TrkInfo[CurTrk].LoopPos = 0x0000;	// not an infinite loop - reset
-					// Note: Infinite loops (LoopCount == 0) exit immediately
-					if (LoopCur[LoopIdx] < LoopCount)
-					{
-						SegIdx = LoopSeg[LoopIdx];
-						InPos = LoopPos[LoopIdx];
-						LoopIdx ++;
-					}
-					break;
-				case 0x94:	// Pitch Bend
-					CurTick += SpcData[InPos + 0x01];
-					InPos += 0x03;
-					break;
-				case 0x95:	// Set Tempo (relative to initial tempo)
-					CurTick += SpcData[InPos + 0x01];
-					InPos += 0x03;
-					break;
-				case 0x96:	// Set Instrument
-					InPos += 0x02;
-					break;
-				case 0x97:	// another Volume setting?
-					CurTick += SpcData[InPos + 0x01];
-					InPos += 0x03;
-					break;
-				case 0x98:	// Set Volume
-					CurTick += SpcData[InPos + 0x01];
-					InPos += 0x03;
-					break;
-				case 0x99:	// Set Pan
-					CurTick += SpcData[InPos + 0x01];
-					InPos += 0x03;
-					break;
-				case 0x9B:
-					InPos += 0x02;
-					break;
-				case 0x9C:
-					InPos += 0x04;
-					break;
-				case 0xA2:	// Detune
-					InPos += 0x02;
-					break;
-				case 0xA3:
-					InPos += 0x02;
-					break;
-				case 0xAA:	// set Reverb/Chorus
-					InPos += 0x03;
-					break;
-				case 0xAD:
-					InPos += 0x02;
-					break;
-				case 0xAE:
-					InPos += 0x02;
-					break;
-				case 0xAF:
-					InPos += 0x03;
-					break;
-				case 0xB2:
-					InPos += 0x02;
-					break;
-				case 0xC8:
-					InPos += 0x01;
-					break;
-				case 0xF0:
-					InPos += 0x01;
-					break;
-				case 0xFD:	// Segment Return
-					//InPos += 0x01;
-					InPos = 0x0000;
-					break;
-				case 0xFE:
-					InPos += 0x01;
-					break;
-				case 0xFF:
+					trkInf->loopOfs = LoopPos[LoopIdx] - 0x01;
+					trkInf->loopTick = LoopTick[LoopIdx];
 					TrkEnd = true;
-					InPos += 0x01;
-					break;
-				default:
-					InPos += 0x01;
-					TrkEnd = true;
-					break;
 				}
+				if (LoopCur[LoopIdx] < LoopCount)
+				{
+					SegIdx = LoopSeg[LoopIdx];
+					InPos = LoopPos[LoopIdx];
+					LoopIdx ++;
+				}
+				break;
+			case 0x94:	// Pitch Bend
+				CurTick += SpcData[InPos + 0x01];
+				InPos += 0x03;
+				break;
+			case 0x95:	// Set Tempo (relative to initial tempo)
+				CurTick += SpcData[InPos + 0x01];
+				InPos += 0x03;
+				break;
+			case 0x96:	// Set Instrument
+				InPos += 0x02;
+				break;
+			case 0x97:	// another Volume setting?
+				CurTick += SpcData[InPos + 0x01];
+				InPos += 0x03;
+				break;
+			case 0x98:	// Set Volume
+				CurTick += SpcData[InPos + 0x01];
+				InPos += 0x03;
+				break;
+			case 0x99:	// Set Pan
+				CurTick += SpcData[InPos + 0x01];
+				InPos += 0x03;
+				break;
+			case 0x9B:
+				InPos += 0x02;
+				break;
+			case 0x9C:
+				InPos += 0x04;
+				break;
+			case 0xA2:	// Detune
+				InPos += 0x02;
+				break;
+			case 0xA3:
+				InPos += 0x02;
+				break;
+			case 0xAA:	// set Reverb/Chorus
+				InPos += 0x03;
+				break;
+			case 0xAD:
+				InPos += 0x02;
+				break;
+			case 0xAE:
+				InPos += 0x02;
+				break;
+			case 0xAF:
+				InPos += 0x03;
+				break;
+			case 0xB2:
+				InPos += 0x02;
+				break;
+			case 0xC8:
+				InPos += 0x01;
+				break;
+			case 0xF0:
+				InPos += 0x01;
+				break;
+			case 0xFD:	// Segment Return
+				//InPos += 0x01;
+				InPos = 0x0000;
+				break;
+			case 0xFE:
+				InPos += 0x01;
+				break;
+			case 0xFF:
+				TrkEnd = true;
+				InPos += 0x01;
+				break;
+			default:
+				InPos += 0x01;
+				TrkEnd = true;
+				break;
 			}
 		}
-		TrkInfo[CurTrk].TickCnt = CurTick;
 	}
+	trkInf->tickCnt = CurTick;
 	
 	return;
 }
 
-static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf)
-{
-	UINT8 CurTrk;
-	TRK_INFO* TempTInf;
-	UINT32 TrkLen;
-	UINT32 TrkLoopLen;
-	UINT32 MaxTrkLen;
-	
-	MaxTrkLen = 0x00;
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
-	{
-		TempTInf = &TrkInf[CurTrk];
-		if (TempTInf->LoopPos)
-			TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
-		else
-			TrkLoopLen = 0x00;
-		
-		TrkLen = TempTInf->TickCnt + TrkLoopLen * (TempTInf->LoopTimes - 1);
-		if (MaxTrkLen < TrkLen)
-			MaxTrkLen = TrkLen;
-	}
-	
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
-	{
-		TempTInf = &TrkInf[CurTrk];
-		if (TempTInf->LoopPos)
-			TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
-		else
-			TrkLoopLen = 0;
-		if (TrkLoopLen < 6)	// ignore loops < 1/16
-		{
-			if (TrkLoopLen > 0)
-				printf("Trk %u: ignoring micro-loop (%u ticks)\n", 1 + CurTrk, TrkLoopLen);
-			continue;
-		}
-		
-		TrkLen = TempTInf->TickCnt + TrkLoopLen * (TempTInf->LoopTimes - 1);
-		if (TrkLen * 5 / 4 < MaxTrkLen)
-		{
-			// TrkLen = desired length of the loop
-			TrkLen = MaxTrkLen - TempTInf->LoopTick;
-			
-			TempTInf->LoopTimes = (TrkLen + TrkLoopLen / 3) / TrkLoopLen;
-			printf("Trk %u: Extended loop to %u times\n", 1 + CurTrk, TempTInf->LoopTimes);
-		}
-	}
-	
-	return;
-}
-
-static void CheckRunningNotes(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt)
+static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay, UINT16* runNoteCnt, RUN_NOTE* runNotes)
 {
 	UINT8 CurNote;
 	UINT32 TempDly;
 	RUN_NOTE* TempNote;
 	
-	while(RunNoteCnt)
+	while(*runNoteCnt)
 	{
 		// 1. Check if we're going beyond a note's timeout.
-		TempDly = *Delay + 1;
-		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
+		TempDly = *delay + 1;
+		for (CurNote = 0x00; CurNote < *runNoteCnt; CurNote ++)
 		{
-			TempNote = &RunNotes[CurNote];
-			if (TempNote->RemLen < TempDly)
-				TempDly = TempNote->RemLen;
+			TempNote = &runNotes[CurNote];
+			if (TempNote->remLen < TempDly)
+				TempDly = TempNote->remLen;
 		}
-		if (Evt != 0x7F)
-		{
-			if (TempDly >= *Delay)
-				break;	// not beyond the timeout - do the event
-		}
-		else
-		{
-			// 7F is the 'flush all' command
-			if (TempDly > *Delay)
-				break;
-		}
+		if (TempDly >= *delay)
+			break;	// not beyond the timeout - do the event
 		
 		// 2. advance all notes by X ticks
-		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
-			RunNotes[CurNote].RemLen -= (UINT16)TempDly;
-		(*Delay) -= TempDly;
+		for (CurNote = 0x00; CurNote < *runNoteCnt; CurNote ++)
+			runNotes[CurNote].remLen -= TempDly;
+		(*delay) -= TempDly;
 		
 		// 3. send NoteOff for expired notes
-		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
+		for (CurNote = 0x00; CurNote < *runNoteCnt; CurNote ++)
 		{
-			TempNote = &RunNotes[CurNote];
-			if (! TempNote->RemLen)	// turn note off, it going beyond the Timeout
+			TempNote = &runNotes[CurNote];
+			if (! TempNote->remLen)	// turn note off, it going beyond the Timeout
 			{
-				WriteMidiValue(Buffer, Pos, TempDly);
+				WriteMidiValue(fInf, TempDly);
 				TempDly = 0;
 				
-				Buffer[*Pos + 0x00] = 0x90 | TempNote->MidChn;
-				Buffer[*Pos + 0x01] = TempNote->MidiNote & 0x7F;
-				Buffer[*Pos + 0x02] = 0x00;
-				*Pos += 0x03;
+				File_CheckRealloc(fInf, 0x03);
+				fInf->data[fInf->pos + 0x00] = 0x90 | TempNote->midChn;
+				fInf->data[fInf->pos + 0x01] = TempNote->note & 0x7F;
+				fInf->data[fInf->pos + 0x02] = 0x00;
+				fInf->pos += 0x03;
 				
-				if (TempNote->MidiNote == (0x80 | 0x2E))
+				if (TempNote->note == (0x80 | 0x2E))
 				{
-					WriteMidiValue(Buffer, Pos, 0);
-					Buffer[*Pos + 0x00] = 0x2C;
-					Buffer[*Pos + 0x01] = 0x01;
-					*Pos += 0x02;
-					WriteMidiValue(Buffer, Pos, 0);
-					Buffer[*Pos + 0x00] = 0x2C;
-					Buffer[*Pos + 0x01] = 0x00;
-					*Pos += 0x02;
+					File_CheckRealloc(fInf, 0x03 + 0x03);
+					WriteMidiValue(fInf, 0);
+					fInf->data[fInf->pos + 0x00] = 0x2C;
+					fInf->data[fInf->pos + 0x01] = 0x01;
+					fInf->pos += 0x02;
+					
+					WriteMidiValue(fInf, 0);
+					fInf->data[fInf->pos + 0x00] = 0x2C;
+					fInf->data[fInf->pos + 0x01] = 0x00;
+					fInf->pos += 0x02;
 				}
 				
-				RunNoteCnt --;
-				if (RunNoteCnt)
-					*TempNote = RunNotes[RunNoteCnt];
+				(*runNoteCnt) --;
+				if (*runNoteCnt)
+					*TempNote = runNotes[*runNoteCnt];
 				CurNote --;
 			}
 		}
@@ -1259,126 +1137,46 @@ static void CheckRunningNotes(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 E
 	return;
 }
 
-static void WriteMidiDelay(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 EvtCode)
+static void FlushRunningNotes(FILE_INF* fInf, UINT32* delay, UINT16* runNoteCnt, RUN_NOTE* runNotes)
 {
-	UINT8 CurNote;
+	UINT16 curNote;
 	
-	CheckRunningNotes(Buffer, Pos, Delay, EvtCode);
-	if (! (EvtCode & 0x80))
-		return;
-	
-	WriteMidiValue(Buffer, Pos, *Delay);
-	if (*Delay)
+	for (curNote = 0; curNote < *runNoteCnt; curNote ++)
 	{
-		for (CurNote = 0x00; CurNote < RunNoteCnt; CurNote ++)
-			RunNotes[CurNote].RemLen -= (UINT16)*Delay;
-		*Delay = 0x00;
+		if (runNotes[curNote].remLen > *delay)
+			*delay = runNotes[curNote].remLen;	// set "delay" to longest note
+	}
+	(*delay) ++;
+	CheckRunningNotes(fInf, delay, runNoteCnt, runNotes);
+	(*delay) --;
+	
+	return;
+}
+
+static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay)
+{
+	CheckRunningNotes(fInf, delay, &RunNoteCnt, RunNotes);
+	if (*delay)
+	{
+		UINT16 curNote;
+		
+		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
+			RunNotes[curNote].remLen -= *delay;
 	}
 	
-	return;
-}
-
-static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UINT8 Val1, UINT8 Val2)
-{
-	WriteMidiDelay(Buffer, Pos, Delay, Evt);
-	
-	switch(Evt & 0xF0)
-	{
-	case 0x80:
-	case 0x90:
-	case 0xA0:
-	case 0xB0:
-	case 0xE0:
-		Buffer[*Pos + 0x00] = Evt;
-		Buffer[*Pos + 0x01] = Val1;
-		Buffer[*Pos + 0x02] = Val2;
-		*Pos += 0x03;
-		break;
-	case 0xC0:
-	case 0xD0:
-		Buffer[*Pos + 0x00] = Evt;
-		Buffer[*Pos + 0x01] = Val1;
-		*Pos += 0x02;
-		break;
-	case 0xF0:	// for Meta Event: Track End
-		Buffer[*Pos + 0x00] = Evt;
-		Buffer[*Pos + 0x01] = Val1;
-		Buffer[*Pos + 0x02] = Val2;
-		*Pos += 0x03;
-		break;
-	default:
-		break;
-	}
-	
-	return;
-}
-
-static void WriteMetaEvent_Data(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 MetaType, UINT32 DataLen, const UINT8* Data)
-{
-	WriteMidiDelay(Buffer, Pos, Delay, 0xFF);
-	
-	Buffer[*Pos + 0x00] = 0xFF;
-	Buffer[*Pos + 0x01] = MetaType;
-	*Pos += 0x02;
-	WriteMidiValue(Buffer, Pos, DataLen);
-	memcpy(Buffer + *Pos, Data, DataLen);
-	*Pos += DataLen;
-	
-	return;
-}
-
-static void WriteMidiValue(UINT8* Buffer, UINT32* Pos, UINT32 Value)
-{
-	UINT8 ValSize;
-	UINT8* ValData;
-	UINT32 TempLng;
-	UINT32 CurPos;
-	
-	ValSize = 0x00;
-	TempLng = Value;
-	do
-	{
-		TempLng >>= 7;
-		ValSize ++;
-	} while(TempLng);
-	
-	ValData = &Buffer[*Pos];
-	CurPos = ValSize;
-	TempLng = Value;
-	do
-	{
-		CurPos --;
-		ValData[CurPos] = 0x80 | (TempLng & 0x7F);
-		TempLng >>= 7;
-	} while(TempLng);
-	ValData[ValSize - 1] &= 0x7F;
-	
-	*Pos += ValSize;
-	
-	return;
-}
-
-static void WriteBE32(UINT8* Buffer, UINT32 Value)
-{
-	Buffer[0x00] = (Value & 0xFF000000) >> 24;
-	Buffer[0x01] = (Value & 0x00FF0000) >> 16;
-	Buffer[0x02] = (Value & 0x0000FF00) >>  8;
-	Buffer[0x03] = (Value & 0x000000FF) >>  0;
-	
-	return;
-}
-
-static void WriteBE16(UINT8* Buffer, UINT16 Value)
-{
-	Buffer[0x00] = (Value & 0xFF00) >> 8;
-	Buffer[0x01] = (Value & 0x00FF) >> 0;
-	
-	return;
+	return 0x00;
 }
 
 static UINT16 ReadLE16(const UINT8* Data)
 {
 	return (Data[0x01] << 8) | (Data[0x00] << 0);
+}
+
+static UINT32 Tempo2Mid(UINT16 bpm, UINT8 scale)
+{
+	// formula: (60 000 000 / bpm) * (64 / scale) * (MIDI_RES / 48)
+	UINT32 div = bpm * scale;
+	return (UINT32)((UINT64)80000000 * MIDI_RES / div);
 }
 
 static double Lin2DB(UINT8 LinVol)
