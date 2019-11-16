@@ -2,6 +2,10 @@
 // --------------------------------
 // Written by Valley Bell, 07 September 2019
 // based on Wolfteam MF -> Midi Converter
+//
+// Notes:
+// - MegaDrive games seem to only use the commands 8x/9x/Cx/FC.
+// - Apple IIgs games use 8x/9x/Bx/Cx/Ex/FC
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -72,8 +76,8 @@ int main(int argc, char* argv[])
 		printf("Usage: eash2mid.exe [options] GameROM.bin output.mid songOffset\n");
 		printf("Options:\n");
 		printf("    -Ver n      file format version (default: %u)\n", FILE_VER);
-		printf("                1 - without note velocity\n");
-		printf("                2 - with note velocity\n");
+		printf("                1 - with note velocity\n");
+		printf("                2 - without note velocity (used by some MegaDrive games)\n");
 		printf("    -Loops n    loop song n times (default: %u)\n", NUM_LOOPS);
 		printf("    -TpQ n      convert with n ticks per quarter (default: %u)\n", MIDI_RES);
 		return 0;
@@ -200,7 +204,7 @@ UINT8 EaSH2Mid(UINT32 songLen, const UINT8* songData, UINT32 songPos)
 		switch(curCmd & 0xF0)
 		{
 		case 0x80:	// Note Off
-			if (FILE_VER == 1)
+			if (FILE_VER == 2)
 			{
 				WriteEvent(&midFileInf, &MTS, curCmd, songData[inPos + 0x00], 0x40);
 				inPos += 0x01;
@@ -212,7 +216,7 @@ UINT8 EaSH2Mid(UINT32 songLen, const UINT8* songData, UINT32 songPos)
 			}
 			break;
 		case 0x90:	// Note On
-			if (FILE_VER == 1)
+			if (FILE_VER == 2)
 			{
 				WriteEvent(&midFileInf, &MTS, curCmd, songData[inPos + 0x00], 0x7F);
 				inPos += 0x01;
@@ -223,6 +227,11 @@ UINT8 EaSH2Mid(UINT32 songLen, const UINT8* songData, UINT32 songPos)
 				inPos += 0x02;
 			}
 			break;
+		case 0xB0:	// Control Change
+		case 0xE0:	// Pitch Bend
+			WriteEvent(&midFileInf, &MTS, curCmd, songData[inPos + 0x00], songData[inPos + 0x01]);
+			inPos += 0x02;
+			break;
 		case 0xC0:	// Instrument
 			WriteEvent(&midFileInf, &MTS, curCmd, songData[inPos + 0x00], 0x00);
 			inPos += 0x01;
@@ -230,8 +239,17 @@ UINT8 EaSH2Mid(UINT32 songLen, const UINT8* songData, UINT32 songPos)
 		case 0xF0:	// special
 			if (curCmd == 0xFC)
 			{
-				tempByt = songData[inPos + 0x00];
-				inPos += 0x01;
+				// Note: Sometimes in files from KQ4 (Apple IIgs), there is an additional
+				//       "initialization" block after the first FC marker.
+				if (inPos < songLen)
+				{
+					tempByt = songData[inPos + 0x00];
+					inPos += 0x01;
+				}
+				else
+				{
+					tempByt = 0x00;
+				}
 				if (tempByt == 0x80)
 				{
 					// loop back
@@ -252,9 +270,7 @@ UINT8 EaSH2Mid(UINT32 songLen, const UINT8* songData, UINT32 songPos)
 			}
 			// fall through
 		//case 0xA0:	// Note Aftertouch
-		//case 0xB0:	// Control Change
 		//case 0xD0:	// Channel Aftertouch
-		//case 0xE0:	// Pitch Bend
 		default:	// unknown events cause the driver to enter an infinite loop
 			printf("Unknown event %02X at %06X\n", curCmd, inPos);
 			WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
