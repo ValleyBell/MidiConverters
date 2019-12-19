@@ -137,8 +137,10 @@ UINT8 Syx2Mid(void)
 			WriteLongEvent(&midFileInf, delay, SyxData[inPos], evtLen - 1, &SyxData[inPos + 1]);
 		}
 		inPos += evtLen;
-		// wait time [seconds] = evtLen [bytes] * 8 [bits/byte] / 31250 [bits/sec]
-		delay = (ticksSec * evtLen * 4 + 15624) / 15625;	// calculate with integer ceil()
+		// MIDI data is sent via UART at 31250 bps.
+		// For each byte of data, 10 bits are sent. (1 start bit, 8 bits of data, 1 stop bit)
+		// Thus, we get a transfer rate of 3125 data bytes per second.
+		delay = (ticksSec * evtLen + 3124) / 3125;	// calculate with integer ceil()
 	}
 	
 	WriteMetaEvent(&midFileInf, delay, 0x2F, 0x00, NULL);
