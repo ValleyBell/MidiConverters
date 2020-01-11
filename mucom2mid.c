@@ -52,7 +52,7 @@ int main(int argc, char* argv[])
 	}
 	
 	MIDI_RES = 24;
-	MIDI_RES = 0x20;
+	//MIDI_RES = 0x20;
 	NUM_LOOPS = 2;
 	
 	hFile = fopen(argv[1], "rb");
@@ -110,6 +110,7 @@ void ConvertMucom2MID(void)
 	{	 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11,255,255,255,255};
 	static const UINT8 RHYTHM_NOTES[0x06] =
 	{0x24, 0x26, 0x33, 0x2A, 0x2D, 0x25};
+	UINT8 Mucom88Win;
 	UINT16 SeqSize;
 	UINT16 TrkHdrPos;
 	UINT16 FMInsPos;
@@ -150,10 +151,13 @@ void ConvertMucom2MID(void)
 	TrkHdrPos = 0x0000;
 	if (!memcmp(SeqData, "MUB8", 4))
 	{
+		printf("Detected Mucom88win header.\n");
+		Mucom88Win = 1;
 		TrkHdrPos = ReadLE16(&SeqData[4]) + 5;
 	}
 	else
 	{
+		Mucom88Win = 0;
 		for (SeqPos = 0x00; SeqPos < 0x08; SeqPos ++)
 		{
 			TempPos = ReadLE16(&SeqData[SeqPos + 0x01]);
@@ -388,8 +392,16 @@ void ConvertMucom2MID(void)
 				switch(CurCmd)
 				{
 				case 0xF0:	// Set Instrument
-					TempByt = SeqData[SeqPos] & 0x7F;
-					WriteEvent(MidData, &MidPos, &CurDly, 0xC0 | MidChn, TempByt, 0x00);
+					if (TrkMode == 3 && Mucom88Win)
+					{
+						// set Rhythm Mask
+						CurRhythmMask = SeqData[SeqPos];
+					}
+					else
+					{
+						TempByt = SeqData[SeqPos] & 0x7F;
+						WriteEvent(MidData, &MidPos, &CurDly, 0xC0 | MidChn, TempByt, 0x00);
+					}
 					SeqPos ++;
 					break;
 				case 0xF1:	// Set Volume
@@ -484,38 +496,45 @@ void ConvertMucom2MID(void)
 						SeqPos += 0x02;
 					}
 					break;
-				case 0xF7:
+				case 0xF7: // FM3 special mode
 					WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x6E, CurCmd & 0x0F);
 					SeqPos ++;
 					break;
 				case 0xF8:
-					WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x6E, CurCmd & 0x0F);
-					SeqPos ++;
-					break;
 				case 0xF9:	// Pan
-					TempByt = SeqData[SeqPos];
-					if (TrkMode == 3)	// rhythm mode works differently
+					if((Mucom88Win && CurCmd == 0xf8) || (!Mucom88Win && CurCmd == 0xf9))
 					{
-						WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt);
-						TempByt = 0x00;
+						TempByt = SeqData[SeqPos];
+						if (TrkMode == 3)	// rhythm mode works differently
+						{
+							WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt);
+							TempByt = 0x00;
+						}
+						TempByt &= 0x03;
+						if (TempByt == 0x01)	// right speaker
+							TempByt = 0x7F;
+						else if (TempByt == 0x02)	// left speaker
+							TempByt = 0x00;
+						else	// both speakers
+							TempByt = 0x40;
+						ChnPanOn = (TempByt == 0x40) ? 0x00 : 0x01;
+
+						WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x0A, TempByt);
+						TempByt = MucomVol2Mid(TrkMode, CurChnVol, ChnPanOn);
+						if (! USE_VELOCITY)
+							WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x07, TempByt);
+						else
+							CurNoteVol = TempByt;
+						SeqPos ++;
+						break;
 					}
-					TempByt &= 0x03;
-					if (TempByt == 0x01)	// right speaker
-						TempByt = 0x7F;
-					else if (TempByt == 0x02)	// left speaker
-						TempByt = 0x00;
-					else	// both speakers
-						TempByt = 0x40;
-					ChnPanOn = (TempByt == 0x40) ? 0x00 : 0x01;
-					
-					WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x0A, TempByt);
-					TempByt = MucomVol2Mid(TrkMode, CurChnVol, ChnPanOn);
-					if (! USE_VELOCITY)
-						WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x07, TempByt);
 					else
-						CurNoteVol = TempByt;
-					SeqPos ++;
-					break;
+					{
+						// seems to just write a communication byte
+						WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x6E, CurCmd & 0x0F);
+						SeqPos ++;
+						break;
+					}
 				case 0xFA:	// Register Write
 					if (TrkMode == 1)
 					{
@@ -576,6 +595,30 @@ void ConvertMucom2MID(void)
 					}
 					break;
 				case 0xFF:	// Master Loop Start??
+					if(Mucom88Win)
+					{
+						TempByt = SeqData[SeqPos];
+						SeqPos ++;
+						switch(TempByt)
+						{
+							case 0xf0: // PCM volume mode ('vm')
+								SeqPos++;
+								break;
+							case 0xf1: // PSG hardware support (mucom88 v1.5 / music lalf 1.0 only)
+							case 0xf2:
+								SeqPos++;
+								break;
+							case 0xf3: // Reverb enable
+							case 0xf4: // Reverb mode
+							case 0xf5: // Reverb switch
+								SeqPos++;
+								break;
+							default:
+								printf("unknown extra command %02x at %04x\n", TempByt, SeqPos);
+								break;
+						}
+						WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x71, TempByt & 0x0F);
+					}
 					//WriteEvent(MidData, &MidPos, &CurDly, 0xB0 | MidChn, 0x6F, 0x00);
 					//SeqPos += 0x02;
 					break;
