@@ -224,8 +224,14 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 			inPos += 0x02;
 			break;
 		//case 0x15:	// "base channel setting"?? (FM vs. MIDI)
-		//case 0x18:	// "MIDI data transfer" (for initialization SysEx)
-		case 0x1B:	// FM instrument
+		case 0x18:	// "MIDI data transfer" (for initialization SysEx)
+			tempSht = ReadBE16(&songData[inPos + 0x00]);
+			//sysExData = &songData[inPos + 0x02];
+			printf("Warning! Found SysEx Initialization Block! (skipped)\n");
+			inPos += 0x02 + tempSht;
+			break;
+		case 0x04:	// FM instrument (m_vset format)
+		case 0x1B:	// FM instrument (m_vset2 format)
 			tempByt = songData[inPos + 0x00];	// instrument ID
 			inPos += 0x38;
 			break;
@@ -312,7 +318,7 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 		mstLoopCur = 0;
 		
 		if (trkInf[curTrk].chnMode < 0x08)
-			MTS.midChn = trkInf[curTrk].chnMode;
+			MTS.midChn = (UINT8)trkInf[curTrk].chnMode;
 		else if (trkInf[curTrk].chnMode == 0x08)
 			MTS.midChn = 0x09;
 		else //if (trkInf[curTrk].chnMode < 0x08)
@@ -416,6 +422,32 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 					}
 					inPos += 0x02;
 					break;
+				case 0xA6:	// Fade In/Out (TODO)
+					// param: 0 = cancel, -85..-1 = fade in, +1..+85 = fade out
+					tempByt = songData[inPos + 0x01];
+					printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+					inPos += 0x02;
+					break;
+				case 0xA7:	// Damper Pedal (TODO)
+					tempByt = songData[inPos + 0x01];
+					printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x40, tempByt);
+					inPos += 0x02;
+					break;
+				case 0xA8:	// Pitch Bend Range (TODO)
+					tempByt = songData[inPos + 0x01];
+					printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x65, 0x00);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x64, 0x00);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x06, tempByt);
+					inPos += 0x02;
+					break;
+				case 0xAC:	// No Key-Off Mode (TODO)
+					tempByt = songData[inPos + 0x01];
+					if (tempByt)
+						printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+					inPos += 0x02;
+					break;
 				case 0xB4:	// Set Pan
 					tempByt = songData[inPos + 0x01];
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, tempByt);
@@ -444,6 +476,18 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 					if (tempByt)
 						printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x01, tempByt);
+					inPos += 0x02;
+					break;
+				case 0xBD:	// Auto Pitch Bend Switch ?? (TODO)
+					tempByt = songData[inPos + 0x01];
+					if (tempByt)
+						printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+					inPos += 0x02;
+					break;
+				case 0xBE:	// Aftertouch Sequence Switch ?? (TODO)
+					tempByt = songData[inPos + 0x01];
+					if (tempByt)
+						printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
 					inPos += 0x02;
 					break;
 				case 0xBF:	// force key off
@@ -629,6 +673,10 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x20, songData[inPos + 0x02]);
 					inPos += 0x03;
 					break;
+				case 0xE2:	// Chord Note (TODO)
+					printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+					inPos += 0x0E;
+					break;
 				case 0xE6:	// Set Modulation
 					tempByt = songData[inPos + 0x01];
 					if (tempByt)
@@ -669,6 +717,13 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 					else
 						printf("Invalid Raw-Data-Write on track %u at %04X\n", curTrk, inPos);
 					inPos += 0x03 + sysExLen;
+					break;
+				case 0xED:	// MT-32 Effect Control (TODO)
+					// Params: +01 = Reverb Level, +02 = Chorus Level, +03 = unused
+					// MT-32/CM-64 Params: +01 = Part Number, +02 = Reverb Switch, +03 = unused
+					// Parameter == 0xFF -> omit
+					printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+					inPos += 0x04;
 					break;
 				case 0xF0:	// NOP command
 					inPos += 0x01;
@@ -797,6 +852,7 @@ static void PreparseZmd(UINT32 songLen, const UINT8* songData, TRK_INFO* trkInf)
 			case 0xB6:	// Set Channel Volume
 			case 0xB9:	// Set Note Velocity
 			case 0xBB:	// Set Modulation
+			case 0xBE:
 			case 0xCD:	// Chord Note
 				cmdLen = 0x02;
 				break;
