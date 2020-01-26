@@ -449,6 +449,9 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	if (rcpInf->fileVer == 2)
 	{
 		trkLen = ReadLE16(&rcpData[inPos]);
+		// Bits 0/1 are used as 16/17, allowing for up to 256 KB per track.
+		// This is used by some ItoR.x conversions.
+		trkLen = (trkLen & ~0x03) | ((trkLen & 0x03) << 16);
 		inPos += 0x02;
 	}
 	else if (rcpInf->fileVer == 3)
