@@ -1,12 +1,30 @@
 #include <stdio.h>
-#include <malloc.h>
-#include <memory.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stddef.h>	// for NULL
 #include <time.h>
 
 #include "stdtype.h"
 #include "Soundfont.h"
+
+
+static const FOURCC MAIN_CHUNK_ORDER[] =
+{
+	FCC_INFO, FCC_sdta, FCC_pdta, 0
+};
+static const FOURCC PDTA_CHUNK_ORDER[] =
+{
+	FCC_phdr, FCC_pbag, FCC_pmod, FCC_pgen,
+	FCC_inst, FCC_ibag, FCC_imod, FCC_igen,
+	FCC_shdr,
+	0
+};
+
+typedef struct _sort_item
+{
+	UINT32 idx;
+	void* data;
+} SORT_ITEM;
 
 
 SF2_DATA* CreateSF2Base(const char* SoundfontName)
@@ -87,7 +105,7 @@ void FreeSF2Data(SF2_DATA* SF2Data)
 	return;
 }
 
-void CalculateBlockSizes(SF2_DATA* SF2Data)
+void CalculateSF2BlockSizes(SF2_DATA* SF2Data)
 {
 	UINT32 RIFFSize;
 	LIST_CHUNK* CurLst;
@@ -116,7 +134,7 @@ UINT8 WriteSF2toFile(SF2_DATA* SF2Data, const char* FileName)
 	if (hFile == NULL)
 		return 0xFF;
 	
-	CalculateBlockSizes(SF2Data);
+	CalculateSF2BlockSizes(SF2Data);
 	
 	// write RIFF header
 	fwrite(&SF2Data->fccRIFF, 0x04, 0x01, hFile);
@@ -134,6 +152,95 @@ UINT8 WriteSF2toFile(SF2_DATA* SF2Data, const char* FileName)
 	fclose(hFile);
 	
 	return 0x00;
+}
+
+static int SortCompare(const void* a, const void* b)
+{
+	const SORT_ITEM* sortA = (const SORT_ITEM*)a;
+	const SORT_ITEM* sortB = (const SORT_ITEM*)b;
+	return sortA->idx - sortB->idx;
+}
+
+static UINT8 SortItemChunks(ITEM_CHUNK** chkBegin, ITEM_CHUNK** chkEnd, const FOURCC* order)
+{
+	UINT32 chkCount;
+	UINT32 fccCount;
+	ITEM_CHUNK* curChk;
+	ITEM_CHUNK* lastChk;
+	const FOURCC* curFCC;
+	SORT_ITEM* sortItems;
+	UINT32 curItm;
+	UINT32 unkChkIdx;	// index for unknown chunks
+	UINT8 needSort;
+	
+	for (curChk = *chkBegin, chkCount = 0; curChk != NULL; curChk = curChk->next, chkCount ++)
+		;
+	for (curFCC = order, fccCount = 0; *curFCC != 0; curFCC ++, fccCount ++)
+		;
+	
+	sortItems = (SORT_ITEM*)calloc(chkCount, sizeof(SORT_ITEM));
+	unkChkIdx = fccCount;	// default to "after all known chunks"
+	needSort = 0;
+	for (curChk = *chkBegin, curItm = 0; curChk != NULL; curChk = curChk->next, curItm ++)
+	{
+		for (curFCC = order; *curFCC != 0; curFCC ++)
+		{
+			if (*curFCC == curChk->ckID)
+				break;
+		}
+		
+		sortItems[curItm].data = curChk;
+		if (*curFCC != 0)
+		{
+			// put all known chunks in the listed order
+			sortItems[curItm].idx = curFCC - order;
+		}
+		else
+		{
+			// keep the order to all unknown chunks intact, but move them to the end
+			sortItems[curItm].idx = unkChkIdx;
+			unkChkIdx ++;
+		}
+		
+		if (sortItems[curItm].idx != curItm)
+			needSort = 1;
+	}
+	if (! needSort)
+	{
+		free(sortItems);
+		return 0x00;
+	}
+	
+	qsort(sortItems, chkCount, sizeof(SORT_ITEM), &SortCompare);
+	
+	lastChk = (ITEM_CHUNK*)sortItems[0].data;
+	for (curItm = 1; curItm < chkCount; curItm ++)
+	{
+		curChk = (ITEM_CHUNK*)sortItems[curItm].data;
+		lastChk->next = curChk;
+		lastChk = curChk;
+	}
+	lastChk->next = NULL;
+	
+	*chkEnd = lastChk;
+	*chkBegin = (ITEM_CHUNK*)sortItems[0].data;
+	free(sortItems);
+	
+	return 0x01;
+}
+
+UINT8 SortSF2Chunks(SF2_DATA* SF2Data)
+{
+	LIST_CHUNK* LstPreset;
+	UINT8 retVal = 0x00;
+	
+	//retVal |= SortListChunks(&SF2Data->Lists, &SF2Data->LastLst, MAIN_CHUNK_ORDER);
+	
+	LstPreset = List_GetChunk(SF2Data->Lists, FCC_pdta);
+	if (LstPreset != NULL)
+		retVal |= SortItemChunks(&LstPreset->Items, &LstPreset->LastItem, PDTA_CHUNK_ORDER);
+	
+	return retVal;	// 0 - no chunks reordered, 1 - some chunks were reordered
 }
 
 

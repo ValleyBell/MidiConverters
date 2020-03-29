@@ -735,7 +735,7 @@ static UINT32 DoCommandA0(UINT32 MidStPos, UINT8 Command, UINT8 Arg1, UINT8 Arg2
 		return 0;
 	case 0x07:	// Init All Track Instruments
 		BasePtr = GetGlobalPtr(TRK_INIT_ID) & 0x7FFFF;
-		if (Arg2 >= ReadBE16(&ROMData[BasePtr]))
+		if (Arg2 > ReadBE16(&ROMData[BasePtr]))	// the value is the last valid ID
 			return 0;
 		CurPos = BasePtr + ReadBE16(&ROMData[BasePtr + 0x02 + Arg2 * 0x02]);
 		
@@ -1076,6 +1076,7 @@ static void CreateSoundfont(const char* FileName)
 	GeneratePresets(SF2Data, InsCnt, DrumMask);
 	free(SmplLoopMask);
 	
+	SortSF2Chunks(SF2Data);
 	RetVal = WriteSF2toFile(SF2Data, FileName);
 	if (RetVal)
 		printf("Save Error: 0x%02X\n", RetVal);

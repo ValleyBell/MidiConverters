@@ -1,3 +1,7 @@
+#ifndef __SOUNDFONT_H__
+#define __SOUNDFONT_H__
+
+#include "stdtype.h"
 
 typedef char	CHAR;
 typedef UINT8	BYTE;
@@ -36,23 +40,6 @@ typedef struct _sf2_data
 	LIST_CHUNK* LastLst;	// not really necessary, but improves performance
 } SF2_DATA;
 
-
-// --- Item Types ---
-/*enum SF2_TYPES
-{
-	SFT_ANY = 0x00,
-	SFT_STRING = 0x01,
-	SFT_VER_TAG = 0x10,
-	SFT_PRESET_HDR,
-	SFT_PRESET_BAG,
-	SFT_MOD_LIST,
-	SFT_GEN_LIST,
-	SFT_INST,
-	SFT_INST_BAG,
-	SFT_INST_MOD_LIST,
-	SFT_INST_GEN_LIST,
-	SFT_SAMPLE
-};*/
 
 #pragma pack(1)
 
@@ -319,8 +306,9 @@ RIFF 'sfbk'
 
 SF2_DATA* CreateSF2Base(const char* SoundfontName);
 void FreeSF2Data(SF2_DATA* SF2Data);
-void CalculateBlockSizes(SF2_DATA* SF2Data);
+void CalculateSF2BlockSizes(SF2_DATA* SF2Data);
 UINT8 WriteSF2toFile(SF2_DATA* SF2Data, const char* FileName);
+UINT8 SortSF2Chunks(SF2_DATA* SF2Data);
 
 // --- List Chunk Handling ---
 LIST_CHUNK* List_MakeChunk(const FOURCC fccID);
@@ -336,3 +324,5 @@ ITEM_CHUNK* Item_MakeChunk_String(const FOURCC fccID, const char* Data, UINT8 Co
 ITEM_CHUNK* Item_GetChunk(const ITEM_CHUNK* FirstChk, const FOURCC fccID);
 void Item_FreeItemData(ITEM_CHUNK* Chunk);
 void Item_WriteToFile(ITEM_CHUNK* Chunk, FILE* hFile);
+
+#endif	// __SOUNDFONT_H__
