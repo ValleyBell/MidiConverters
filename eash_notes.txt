@@ -1,6 +1,6 @@
 Might and Magic 2 - Gates to Another World
 
-format version 1
+format version 2 (no velocity)
 song pointer search pattern: 2EBC 00## #### 2B5F C850
 
 song locations
@@ -26,24 +26,32 @@ song locations
 
 Might and Magic III - Isles of Terra
 
-format version 1
+format version 2 (no velocity)
 song pointer search pattern: 2EBC 00## #### 206D 9DE6
 
 
 King's Bounty
 
-format version 2
+format version 1 (with velocity)
 no good search pattern
 
 
 Rolo to the Rescue
 
-format version 1
+format version 2 (no velocity)
 song pointer list is at 078A92, but songs are compressed (unknown compression)
 decompressed songs are stored in 68k RAM at FF8004
 
+
 Populous
 
-format version 2
+format version 1 (with velocity)
 The only song is stored at 000B86 (U) / 000D54 (E), but it is compressed (seems to be LZSS, the first 4 bytes are the decompressed length in Little Endian)
 decompressed songs are stored in 68k RAM at FF13C4
+
+
+Marble Madness
+
+format version 2 (no velocity)
+song pointer list at 07F7D4, songs are compressed (unknown compression)
+The required parts of the songs are decompressed right into Z80 RAM into the buffer at 1A00..1BFF.

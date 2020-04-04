@@ -5,7 +5,7 @@
 //
 // Notes:
 // - MegaDrive games seem to only use the commands 8x/9x/Cx/FC.
-// - Apple IIgs games use 8x/9x/Bx/Cx/Ex/FC
+// - Apple IIgs games use 8x/9x/Bx/Cx/Ex/FC and the special delay byte F8
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -73,13 +73,20 @@ int main(int argc, char* argv[])
 	printf("EA Steve Hayes -> Midi Converter\n--------------------------------\n");
 	if (argc < 3)
 	{
-		printf("Usage: eash2mid.exe [options] GameROM.bin output.mid songOffset\n");
+		printf("Usage: eash2mid.exe [options] ROM.bin/song.bin output.mid songOffset\n");
 		printf("Options:\n");
 		printf("    -Ver n      file format version (default: %u)\n", FILE_VER);
 		printf("                1 - with note velocity\n");
 		printf("                2 - without note velocity (used by some MegaDrive games)\n");
 		printf("    -Loops n    loop song n times (default: %u)\n", NUM_LOOPS);
 		printf("    -TpQ n      convert with n ticks per quarter (default: %u)\n", MIDI_RES);
+		printf("For songs extracted from Apple IIgs games, use version 1 and offset 4.\n");
+		printf("\n");
+		printf("Examples:\n");
+		printf("    eash2mid -Ver 1 \"King's Bounty (U).bin\" KB_01.mid 0x07F7C0\n");
+		printf("    eash2mid -Ver 2 \"Might+Magic2(U,Rev01).bin\" MM2_01.mid 0x0AF59C\n");
+		printf("    eash2mid -Ver 2 \"Might+Magic3(U).bin\" MM3_01.mid 0x0C2E44\n");
+		printf("    eash2mid -Ver 1 snd.24 KQ4GS_24.mid 4\n");
 		return 0;
 	}
 	
@@ -193,8 +200,13 @@ UINT8 EaSH2Mid(UINT32 songLen, const UINT8* songData, UINT32 songPos)
 	MTS.midChn = 0x00;
 	while(! trkEnd && inPos < songLen)
 	{
-		// delays are always 1 byte (00..FF, no variable length delays)
-		MTS.curDly += songData[inPos];	inPos ++;
+		// delays are always 1 byte with value F8 being special and
+		// causing another delay byte to be followed
+		do
+		{
+			tempByt = songData[inPos];	inPos ++;
+			MTS.curDly += tempByt;
+		} while(tempByt == 0xF8);
 		
 		if (songData[inPos] & 0x80)	// the driver remembers the last MIDI command
 		{
