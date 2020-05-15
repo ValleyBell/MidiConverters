@@ -1,0 +1,243 @@
+Version notes
+-------------
+Driver versions are mostly guesswork.
+v1 driver: entry point at 0x600100
+v2 driver: entry point at 0x601200
+v3 driver: entry point at 0x600120, note at offset 0x100:
+	Ver3.2.x|96 x/x |CRX_drv|by Hiro
+
+
+Model 2A
+--------
+airwlkrs	Air Walkers
+	Sound Program:
+v2		10-18_ic30_30f2.30
+	Samples:
+		mpr-19243.31 mpr-19242.32 mpr-19241.36 mpr-19240.37
+
+dynamcop	Dynamite Cop
+dyndeka2	Dynamite Deka 2
+	Sound Program:
+v3		epr-20811.30
+			Ver3.2.8|96 10/28|CRX_drv|byHiro
+	Samples:
+		mpr-20812.31 mpr-20813.32 mpr-20814.36 mpr-20815.37
+
+manxtt		Manx TT Superbike Twin
+	Sound Program:
+v2		epr-18924a.30
+v2		epr-18826.30	[manxttc]
+	Samples:
+		mpr-18763.31 mpr-18764.32 mpr-18765.36 mpr-18766.37
+		mpr-18827.31 mpr-18764.32 mpr-18765.36 mpr-18766.37	[manxttc]
+
+motoraid	Motor Raid
+	Sound Program:
+v3		epr-20029.30
+			Ver3.2.8|96 10/28|CRX_drv|byHiro
+v3		epr-20222.30	[motoraiddx]
+			Ver3.2.8|96 10/28|CRX_drv|byHiro
+	Samples:
+		mpr-20030.31 mpr-20031.32 mpr-20032.36 mpr-20033.37
+
+skytargt	Sky Target
+	Sound Program:
+v2		epr-18408.30
+	Samples:
+		mpr-18424.31 mpr-18423.32 mpr-18422.36 mpr-18421.37
+
+srallyc		Sega Rally Championship
+	Sound Program:
+v1		epr-17890a.30
+v1		epr-17763.30	[srallycdx]
+	Samples:
+		mpr-17756.31 mpr-17757.32 mpr-17886.36 mpr-17887.37
+		mpr-17756.31 mpr-17757.32 mpr-17758.36	[srallycdx]
+
+vcop2		Virtua Cop 2
+	Sound Program:
+v2		epr-18530.30
+	Samples:
+		mpr-18529.31 mpr-18528.32 mpr-18527.36 mpr-18526.37
+
+vf2		Virtua Fighter 2
+	Sound Program:
+v1		epr-17574.30
+	Samples:
+		mpr-17573.31 mpr-17572.32 mpr-17571.36 mpr-17570.37
+
+
+Model 2B
+--------
+doa		Dead or Alive
+	Sound Program:
+v2		epr-19328.30
+	Samples:
+		mpr-19329.31 mpr-19330.32 mpr-19331.33 mpr-19332.34
+
+dynabb		Dynamite Baseball
+	Sound Program:
+v3		epr-19184.31
+			Ver3.2.2|96 7/5 |CRX_drv|by Hiro
+	Samples:
+		mpr-19185.32 mpr-19186.33 mpr-19187.34
+
+dynabb97	Dynamite Baseball 97
+	Sound Program:
+v3		epr-19849.31
+			Ver3.2.8|96 10/28|CRX_drv|byHiro
+	Samples:
+		mpr-19850.32 mpr-19851.33 mpr-19852.34 mpr-19853.35
+
+fvipers		Fighting Vipers
+	Sound Program:
+v2		epr-18628.31
+	Samples:
+		mpr-18629.32 mpr-18630.33 mpr-18631.34 mpr-18632.35
+
+gunblade	Gunblade NY
+	Sound Program:
+v2		epr-18990.31
+	Samples:
+		mpr-18978.32 mpr-18979.34
+
+indy500		INDY 500
+	Sound Program:
+v1		epr-18600.31
+v1		epr-18253.31	[indy500d]
+v1		epr-18391.31	[indy500to]
+	Samples:
+		mpr-18241.32 mpr-18242.33 mpr-18243.34 mpr-18244.35
+
+lastbrnx	Last Bronx
+	Sound Program:
+v3		mpr-19056.31
+			Ver3.1.1|96 6/6 |CRX_drv|by Hiro
+	Samples:
+		mpr-19057.32 mpr-19058.34
+
+pltkids		Pilot Kids
+	Sound Program:
+v3		epr-21276.sd0
+			Ver3.4.9|97  8/26|CRX_drv|byHiro
+	Samples:
+		mpr-21277.sd1 mpr-21278.sd2 mpr-21279.sd3 mpr-21280.sd4
+
+powsled		Power Sled
+	Sound Program:
+v3		epr-19466.31
+			Ver3.0.6|96 5/7 |CRX_drv|by Hiro
+	Samples:
+		fpr-19459.32
+
+powsledr	Power Sled Relay
+	Sound Program:
+v3		epr-19467.31
+			Ver3.0.6|96 5/7 |CRX_drv|by Hiro
+	Samples:
+		fpr-19460.32 fpr-19461.34
+
+rchase2		Rail Chase 2
+	Sound Program:
+v1		epr-18047.31
+	Samples:
+		mpr-18029.32 mpr-18030.34
+
+schamp		Sonic Championship
+sfight		Sonic The Fighters
+	Sound Program:
+v2		epr-19021.31
+	Samples:
+		mpr-19022.32 mpr-19023.33 mpr-19024.34 mpr-19025.35
+
+sgt24h		Super GT 24h
+	Sound Program:
+v2		epr-19157.31
+	Samples:
+		mpr-19154.32
+
+von		Virtual On Cyber Troopers
+	Sound Program:
+v2		epr-18670.31
+	Samples:
+		mpr-18652.32 mpr-18653.34
+
+vstriker	Virtua Striker
+	Sound Program:
+v1		epr-18072.31
+	Samples:
+		mpr-18063.32 mpr-18064.33 mpr-18065.34
+
+zerogun		Zero Gunner
+	Sound Program:
+v3		epr-20302.31
+			Ver3.4.9|97  8/26|CRX_drv|byHiro
+	Samples:
+		mpr-20303.32 mpr-20304.33
+
+
+Model 2C
+--------
+bel		Behind Enemy Lines
+	Sound Program:
+v2		mpr-20249.31
+	Samples:
+		mpr-20250.32 mpr-20251.33 mpr-20252.34 mpr-20253.35
+
+hotd		House of the Dead
+	Sound Program:
+v3		epr-19720.31
+			Ver3.2.8|96 10/28|CRX_drv|byHiro
+v3		sndpgm0.31 [hotdp]
+			Ver3.2.8|96 10/28|CRX_drv|byHiro
+	Samples:
+		mpr-19721.32 mpr-19722.34
+		sound1.32 sound2.33 sound3.34 sound4.35 [hotdp]
+
+overrev		Over Rev
+	Sound Program:
+v2		epr-20002.31
+	Samples:
+		mpr-20003.32 mpr-20004.34
+
+rascot2		Royal Ascot 2
+	Sound Program:
+v3		epr-20168.31
+			Ver3.4.8|97  8/20|CRX_drv|byHiro
+	Samples:
+		epr-20185.32
+
+segawski	Sega Water Ski
+	Sound Program:
+v3		epr-19967.31
+			Ver3.4.8|97  8/20|CRX_drv|byHiro
+	Samples:
+		mpr-19988.32 mpr-19989.34
+
+skisuprg	Sega Ski Super G
+	Sound Program:
+v3		epr-19491.31
+			Ver3.2.8|96 10/28|CRX_drv|byHiro
+	Samples:
+		mpr-19504.32 mpr-19505.34
+
+stcc		Sega Touring Car Championship
+	Sound Program:
+v3		epr-19274.31
+			Ver3.2.5|96 8/1 |CRX_drv|by Hiro
+	Samples:
+		mpr-19259.32 mpr-19261.34
+
+topskatr	Top Skater
+	Sound Program:
+v3		mpr-19759.31
+			Ver3.2.8|96 10/28|CRX_drv|byHiro
+	Samples:
+		mpr-19745.32 mpr-19746.34
+
+waverunr	Wave Runner
+	Sound Program:
+v3		epr-19284.31
+			Ver3.2.7|96 9/10|CRX_drv|by Hiro
+	Samples:
+		mpr-19295.32 mpr-19296.34

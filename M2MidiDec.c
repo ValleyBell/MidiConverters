@@ -2,21 +2,49 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <memory.h>	// for memcpy()
-#include <string.h>	// for strlen()
+#include <stddef.h>
+#include <string.h>
+#include <ctype.h>
 #include <math.h>	// for powf()
+
 #include "stdtype.h"
-#include "stdbool.h"
 #include "Soundfont.h"
 
+#ifndef INLINE
+#if defined(_MSC_VER)
 #define INLINE	static __inline
+#elif defined(__GNUC__)
+#define INLINE	static __inline__
+#else
+#define INLINE	static inline
+#endif
+#endif	// INLINE
+
+#ifdef _MSC_VER
+#define stricmp	_stricmp
+#define strdup	_strdup
+#else
+#define stricmp	strcasecmp
+#endif
+
+#ifdef _WIN32
+#include <direct.h>		// for _mkdir()
+#define MakeDir(x)	_mkdir(x)
+#else
+#include <sys/stat.h>	// for mkdir()
+#define MakeDir(x)	mkdir(x, 0755)
+#endif
 
 
 typedef struct _rom_data ROM_DATA;
 typedef struct _sample_def SMPL_DEF;
 
-static UINT8 LoadROMData(const char* FileName, ROM_DATA* Rom, UINT32 ExpectedSize);
+static UINT8 LoadROMData(const char* FileName, UINT32* retSize, UINT8** retData);
+static UINT8 LoadROMsMerged(size_t romCount, const char** fileNames, UINT32* retSize, UINT8** retData);
 static void RomByteswap(UINT32 Size, UINT8* Data);
+static UINT8 IsUpperCase(const char* text);
+static void NormalizePath(char* filePath);
+static void CreateDirTree(const char* dirPath);
 INLINE UINT32 GetGlobalPtr(UINT32 PtrID);
 INLINE const UINT8* GetRomPtr(UINT32 Address);
 static void DecodeMidiData(UINT32 PtrBase, UINT8 SongID);
@@ -33,7 +61,7 @@ INLINE UINT32 ReadBE32(const UINT8* Data);
 INLINE void WriteBE16(UINT8* Buffer, UINT16 Value);
 INLINE void WriteBE32(UINT8* Buffer, UINT32 Value);
 
-static void ExtractInstrumentSamples(const char* Folder);
+static void ExtractInstrumentSamples(const char* fNamePrefix);
 static void ExtractSample(const char* FileName, UINT16 SmplID, UINT8 FreqMod);
 
 static void CreateSoundfont(const char* FileName);
@@ -71,24 +99,8 @@ static const UINT8 WAVE_Header[0x2C] =
 #define MODE_MIDI	0x01	// convert sequences to MIDI
 #define MODE_WAV	0x10	// dump samples to WAV
 #define MODE_SF2	0x11	// dump samples to SF2 soundfonts
+#define MODE_NONE	0xFF
 
-#define SONICFIGHTER
-//#define FVIPERS
-
-#ifdef SONICFIGHTER
-#define SND_DRV_FILE	"epr-19021.31"
-#define SMP_ROM_0		"mpr-19022.32"
-#define SMP_ROM_1		"mpr-19023.33"
-#define SMP_ROM_2		"mpr-19024.34"
-#define SMP_ROM_3		"mpr-19025.35"
-#endif
-#ifdef FVIPERS
-#define SND_DRV_FILE	"epr-18628.31"
-#define SMP_ROM_0		"mpr-18629.32"
-#define SMP_ROM_1		"mpr-18630.33"
-#define SMP_ROM_2		"mpr-18631.34"
-#define SMP_ROM_3		"mpr-18632.35"
-#endif
 
 typedef struct _rom_data
 {
@@ -112,16 +124,18 @@ typedef struct _sample_def
 
 static UINT32 ROMSize;
 static UINT8* ROMData;
-static ROM_DATA SmpROM[4];
+static ROM_DATA SmpROM;
 static UINT32 MidSize;
 static UINT8* MidData;
 
-static bool FixVolume;		// convert volume to MIDI scale
-static UINT8 FixDrumNotes;	// turn off endlessly playing drum notes
-							// 01 - end when replaying note of segment ends
-							// 02 - end immediately
-static bool PatchDrumChn;	// swap MIDI channels 0F and 09
+static UINT8 FixVolume = 1;		// convert volume to MIDI scale
+static UINT8 FixDrumNotes = 0;	// turn off endlessly playing drum notes
+								// 01 - end when replaying note of segment ends
+								// 02 - end immediately
+static UINT8 PatchDrumChn = 0;	// swap MIDI channels 0F and 09
+static UINT16 NUM_LOOPS = 2;
 static UINT32 GLOBAL_PTR_OFS = 0x008000;
+static const char* OUT_PREFIX = NULL;
 static UINT8 Mode;
 
 #define SMPL_DATA_ID	0x00	// Offset 0x008000
@@ -137,71 +151,165 @@ static UINT8 RunningDrmNotes[0x80];
 int main(int argc, char* argv[])
 {
 	FILE* hFile;
-	char FileName[0x10];
+	char* FileName;
 	UINT8 SongCnt;
 	UINT8 CurSng;
 	UINT32 BasePos;
 	UINT32 CurPos;
+	int argbase;
+	UINT8 retVal;
+	UINT32 drvInitAddr;
+	UINT16 driverVer;
+	UINT8 outPrefUCase;
 	
-	FixVolume = true;
-	FixDrumNotes = 0x01;
-	PatchDrumChn = true;
-	Mode = MODE_SF2;
-	//Mode = MODE_MIDI;
-	
-	hFile = fopen(SND_DRV_FILE, "rb");
-	if (hFile == NULL)
+	printf("Model2 MIDI Decoder\n-------------------\n");
+	if (argc < 3)
+	{
+		printf("Usage: %s [-options] mode sound_program.bin [samples1.bin] ... [samples4.bin]\n", argv[0]);
+		printf("Modes:\n");
+		printf("    mus - extract music to MIDI files (default: SONG_##.MID)\n");
+		printf("    wav - extract samples as WAV files (default: Ins##_n##_Smpl##.wav)\n");
+		printf("    sf2 - extract samples as SF2 soundfont (default: out.sf2)\n");
+		printf("Options:\n");
+		printf("    -o out  set output name prefix to \"out\"\n");
+		printf("    -l n    loop song n times (default: %u)\n", NUM_LOOPS);
+		printf("    -v      do NOT convert volume to MIDI scale\n");
+		printf("    -c      swap MIDI channels 10 and 16 (some games have drum on ch16)\n");
+		printf("    -d n    cut drum notes\n");
+		printf("                0 - don't cut (default)\n");
+		printf("                1 - stop when replaying note or when segment ends\n");
+		printf("                2 - stop immediately\n");
+		printf("\n");
+		printf("The sound program ROM is the file loaded into the \"audiocpu\" region in MAME.\n");
+		printf("It is often called epr-XXXXX.30 or epr-XXXXX.31\n");
+		printf("\n");
+		printf("Byteswapped ROMs are detected and fixed automatically\n");
+		printf("Currently only driver version v2 (entry offset 0x601200) is supported.\n");
 		return 1;
-	
-	fseek(hFile, 0, SEEK_END);
-	ROMSize = ftell(hFile);
-	
-	ROMData = (UINT8*)malloc(ROMSize);
-	fseek(hFile, 0, SEEK_SET);
-	fread(ROMData, 0x01, ROMSize, hFile);
-	
-	fclose(hFile);
-	
-	if ((Mode & 0xF0) == 0x10)
-	{
-		LoadROMData(SMP_ROM_0, &SmpROM[0], 0x200000);
-		LoadROMData(SMP_ROM_1, &SmpROM[1], 0x200000);
-		LoadROMData(SMP_ROM_2, &SmpROM[2], 0x200000);
-		LoadROMData(SMP_ROM_3, &SmpROM[3], 0x200000);
 	}
-	else
+	
+	Mode = MODE_NONE;
+	argbase = 1;
+	while(argbase < argc && argv[argbase][0] == '-')
 	{
-		for (CurSng = 0; CurSng < 4; CurSng ++)
+		if (! stricmp(argv[argbase] + 1, "o"))
 		{
-			SmpROM[CurSng].Size = 0x00;
-			SmpROM[CurSng].Data = NULL;
+			argbase ++;
+			if (argbase < argc)
+				OUT_PREFIX = argv[argbase];
 		}
+		else if (! stricmp(argv[argbase] + 1, "l"))
+		{
+			argbase ++;
+			if (argbase < argc)
+			{
+				NUM_LOOPS = (UINT16)strtoul(argv[argbase], NULL, 0);
+				if (! NUM_LOOPS)
+					NUM_LOOPS = 2;
+			}
+		}
+		else if (! stricmp(argv[argbase] + 1, "v"))
+		{
+			FixVolume = 0;
+		}
+		else if (! stricmp(argv[argbase] + 1, "c"))
+		{
+			PatchDrumChn = 1;
+		}
+		else if (! stricmp(argv[argbase] + 1, "d"))
+		{
+			argbase ++;
+			if (argbase < argc)
+				FixDrumNotes = (UINT8)strtoul(argv[argbase], NULL, 0);
+		}
+		else
+			break;
+		argbase ++;
 	}
 	
+	if (argc < argbase + 2)
+	{
+		printf("Insufficient arguments!\n");
+		return 1;
+	}
+	
+	if (! stricmp(argv[argbase + 0], "mus"))
+		Mode = MODE_MIDI;
+	else if (! stricmp(argv[argbase + 0], "wav"))
+		Mode = MODE_WAV;
+	else if (! stricmp(argv[argbase + 0], "sf2"))
+		Mode = MODE_SF2;
+	if (Mode == MODE_NONE)
+	{
+		printf("Invalid mode!\n");
+		return 1;
+	}
+	
+	retVal = LoadROMData(argv[argbase + 1], &ROMSize, &ROMData);
+	if (retVal > 0x00)
+	{
+		printf("Unable to load Sound Program ROM: %s\n", argv[argbase + 1]);
+		return 1;
+	}
+	
+	if (Mode & 0x10)
+	{
+		if (argbase + 2 >= argc)
+		{
+			printf("Sample ROMs are required for sample dumping!\n");
+			free(ROMData);
+			return 2;
+		}
+		
+		LoadROMsMerged(argc - (argbase + 2), &argv[argbase + 2], &SmpROM.Size, &SmpROM.Data);
+	}
 	
 	if (ReadBE16(&ROMData[0x04]) == 0x6000)
 	{
 		printf("This ROM is byteswapped.\n");
 		printf("Swapping bytes again to get a clean ROM ...\n");
 		
-		printf("Main ROM ...");
+		printf("    Main ROM ...");
+		fflush(stdout);
 		RomByteswap(ROMSize, ROMData);
 		printf("  Done.\n");
-		for (CurSng = 0; CurSng < 4; CurSng ++)
+		
+		if (SmpROM.Size > 0x00)
 		{
-			if (SmpROM[CurSng].Data != NULL)
-			{
-				printf("Sample ROM #%u ...", 1 + CurSng);
-				RomByteswap(SmpROM[CurSng].Size, SmpROM[CurSng].Data);
-				printf("  Done.\n");
-			}
+			printf("    Sample ROM ...");
+			fflush(stdout);
+			RomByteswap(SmpROM.Size, SmpROM.Data);
+			printf("  Done.\n");
 		}
+	}
+	
+	drvInitAddr = ReadBE32(&ROMData[0x04]);
+	if (drvInitAddr == 0x600100)
+		driverVer = 1;
+	else if (drvInitAddr == 0x601200)
+		driverVer = 2;
+	else if (drvInitAddr == 0x600120)
+		driverVer = 3;
+	else
+		driverVer = 0xFF;
+	if (driverVer != 2)
+	{
+		printf("Unsupported sound driver version!\n");
+		if (SmpROM.Data != NULL)
+			free(SmpROM.Data);
+		free(ROMData);
+		return 3;
 	}
 	
 	switch(Mode)
 	{
 	case MODE_MIDI:
-		MidSize = 0x10000;
+		if (OUT_PREFIX == NULL)
+			OUT_PREFIX = "SONG_";
+		outPrefUCase = IsUpperCase(OUT_PREFIX);
+		FileName = (char*)malloc(strlen(OUT_PREFIX) + 0x10);
+		
+		MidSize = 0x100000;
 		MidData = (UINT8*)malloc(MidSize);
 		
 		BasePos = GetGlobalPtr(PLAYLIST_ID) & 0x7FFFF;
@@ -213,7 +321,7 @@ int main(int argc, char* argv[])
 			printf("Song %02X / %02X\n", CurSng, SongCnt);
 			DecodeMidiData(GetGlobalPtr(PLAYLIST_ID) & 0x7FFFF, CurSng);
 			
-			sprintf(FileName, "SONG_%02X.MID", CurSng);
+			sprintf(FileName, "%s%02X.%s", OUT_PREFIX, CurSng, (outPrefUCase ? "MID" : "mid"));
 			hFile = fopen(FileName, "wb");
 			if (hFile == NULL)
 			{
@@ -226,29 +334,35 @@ int main(int argc, char* argv[])
 			fclose(hFile);
 		}
 		free(MidData);	MidData = NULL;
+		free(FileName);
 		break;
 	case MODE_WAV:
+		if (OUT_PREFIX == NULL)
+			OUT_PREFIX = "";
+		
 		printf("Extracting Samples to .wav format ...");
-		ExtractInstrumentSamples("InsData/");
+		fflush(stdout);
+		ExtractInstrumentSamples(OUT_PREFIX);
 		break;
 	case MODE_SF2:
+		if (OUT_PREFIX == NULL)
+			OUT_PREFIX = "out";
+		outPrefUCase = IsUpperCase(OUT_PREFIX);
+		
+		FileName = (char*)malloc(strlen(OUT_PREFIX) + 0x10);
+		sprintf(FileName, "%s.%s", OUT_PREFIX, (outPrefUCase ? "SF2" : "sf2"));
+		
 		printf("Creating SoundFont ...");
-		CreateSoundfont("out.sf2");
+		fflush(stdout);
+		CreateSoundfont(FileName);
+		free(FileName);
 		break;
 	}
-	
 	printf("  Done.\n");
 	
-	for (CurSng = 0; CurSng < 4; CurSng ++)
-	{
-		if (SmpROM[CurSng].Data != NULL)
-		{
-			free(SmpROM[CurSng].Data);
-			SmpROM[CurSng].Data = NULL;
-		}
-	}
+	if (SmpROM.Data != NULL)
+		free(SmpROM.Data);
 	free(ROMData);
-	ROMData = NULL;
 	
 #ifdef _DEBUG
 	getchar();
@@ -257,44 +371,85 @@ int main(int argc, char* argv[])
 	return 0;
 }
 
-static UINT8 LoadROMData(const char* FileName, ROM_DATA* Rom, UINT32 ExpectedSize)
+static UINT8 LoadROMData(const char* FileName, UINT32* retSize, UINT8** retData)
 {
 	FILE* hFile;
-	UINT32 FileSize;
 	
 	hFile = fopen(FileName, "rb");
 	if (hFile == NULL)
 	{
-		Rom->Size = 0x00;
-		Rom->Data = NULL;
+		*retSize = 0x00;
+		*retData = NULL;
 		return 0xFF;
 	}
 	
 	fseek(hFile, 0, SEEK_END);
-	FileSize = ftell(hFile);
-	if (FileSize != ExpectedSize)
-	{
-		printf("Warning! %s has an incorrect file size! (%u != %u)\n",
-				FileSize, ExpectedSize);
-		if (FileSize > ExpectedSize)
-			FileSize = ExpectedSize;
-	}
+	*retSize = ftell(hFile);
 	
-	Rom->Data = (UINT8*)malloc(ExpectedSize);
-	if (Rom->Data == NULL)
+	*retData = (UINT8*)malloc(*retSize);
+	if (*retData == NULL)
 	{
 		fclose(hFile);
 		return 0x80;
 	}
-	Rom->Size = ExpectedSize;
 	fseek(hFile, 0, SEEK_SET);
-	fread(Rom->Data, 0x01, FileSize, hFile);
-	if (FileSize < ExpectedSize)
-		memset(Rom->Data + FileSize, 0x00, ExpectedSize - FileSize);
+	fread(*retData, 0x01, *retSize, hFile);
 	
 	fclose(hFile);
 	
 	return 0x00;
+}
+
+static UINT8 LoadROMsMerged(size_t romCount, const char** fileNames, UINT32* retSize, UINT8** retData)
+{
+	ROM_DATA* tmpROM;
+	size_t curROM;
+	UINT32 baseOfs;
+	UINT8 resVal;
+	UINT8 retVal;
+	
+	resVal = 0x00;
+	
+	tmpROM = (ROM_DATA*)calloc(romCount, sizeof(ROM_DATA));
+	for (curROM = 0; curROM < romCount; curROM ++)
+	{
+		retVal = LoadROMData(fileNames[curROM], &tmpROM[curROM].Size, &tmpROM[curROM].Data);
+		if (retVal > 0x00)
+		{
+			printf("Unable to load Sample ROM: %s\n", fileNames[curROM]);
+			resVal = 0x01;	// error loading one or more ROMs
+			break;
+		}
+	}
+	if (resVal && curROM == 0)
+	{
+		free(tmpROM);
+		return 0xFF;	// load fail for first ROM
+	}
+	for (curROM = 1; curROM < romCount; curROM ++)
+	{
+		if (tmpROM[curROM].Size != tmpROM[0].Size)
+		{
+			printf("Warning: Sample ROMs have different sizes!\n");
+			break;
+		}
+	}
+	
+	*retSize = 0x00;
+	for (curROM = 0; curROM < romCount; curROM ++)
+		*retSize += tmpROM[curROM].Size;
+	*retData = (UINT8*)malloc(*retSize);
+	
+	baseOfs = 0x00;
+	for (curROM = 0; curROM < romCount; curROM ++)
+	{
+		memcpy(&(*retData)[baseOfs], tmpROM[curROM].Data, tmpROM[curROM].Size);
+		baseOfs += tmpROM[curROM].Size;
+		free(tmpROM[curROM].Data);
+	}
+	free(tmpROM);
+	
+	return resVal;
 }
 
 static void RomByteswap(UINT32 Size, UINT8* Data)
@@ -311,6 +466,61 @@ static void RomByteswap(UINT32 Size, UINT8* Data)
 	
 	return;
 }
+
+
+static UINT8 IsUpperCase(const char* text)
+{
+	UINT8 flags;
+	unsigned char chr;
+	
+	flags = 0x00;
+	while(*text != '\0')
+	{
+		chr = (unsigned char)*text;
+		if (isupper(chr))
+			flags |= 0x01;
+		if (islower(chr))
+			flags |= 0x02;
+		text ++;
+	}
+	
+	// no letters -> false, lower/mixed case -> false, only uppercase letters -> true
+	return (flags == 0x01);
+}
+
+static void NormalizePath(char* filePath)
+{
+	for (; *filePath != '\0'; filePath ++)
+	{
+		if (*filePath == '\\')
+			*filePath = '/';
+	}
+	
+	return;
+}
+
+static void CreateDirTree(const char* dirPath)
+{
+	char* tempPath;
+	char* dirSepPos;
+	char bakChr;
+	
+	tempPath = strdup(dirPath);
+	NormalizePath(tempPath);
+	
+	dirSepPos = strchr(tempPath, '/');
+	while(dirSepPos != NULL)
+	{
+		bakChr = *dirSepPos;
+		*dirSepPos = '\0';
+		MakeDir(tempPath);
+		*dirSepPos = bakChr;
+		dirSepPos = strchr(dirSepPos + 1, '/');
+	}
+	
+	return;
+}
+
 
 INLINE UINT32 GetGlobalPtr(UINT32 PtrID)
 {
@@ -331,7 +541,7 @@ INLINE const UINT8* GetRomPtr(UINT32 Address)
 	case 0xA0:
 	case 0xC0:
 	case 0xE0:
-		return SmpROM[(Address >> 21) & 3].Data;
+		return &SmpROM.Data[Address & 0x600000];
 	default:
 		return NULL;
 	}
@@ -382,7 +592,7 @@ static void DecodeMidiData(UINT32 PtrBase, UINT8 SongID)
 	WriteBE32(&MidData[MidPos], 0x00000000);	MidPos += 0x04;	// Track Size
 	MidTrkBase = MidPos;
 	
-	LoopCnt = 0x00;
+	LoopCnt = 0;
 	SegPos = SegBase + 0x04;
 	MidData[MidPos] = 0x00;		MidPos ++;	// Delay
 	MidData[MidPos] = 0xFF;		MidPos ++;	// FF - Meta Event
@@ -455,7 +665,7 @@ static void DecodeMidiData(UINT32 PtrBase, UINT8 SongID)
 			
 			MidData[MidPos] = 0x00;		MidPos ++;	// Delay
 			
-			if (LoopCnt >= 0x02)
+			if (LoopCnt >= NUM_LOOPS)
 				break;	// Terminate Song
 		}
 		else if (TempLng == 0xFFFFFFF2)
@@ -738,6 +948,8 @@ static UINT32 DoCommandA0(UINT32 MidStPos, UINT8 Command, UINT8 Arg1, UINT8 Arg2
 		if (Arg2 > ReadBE16(&ROMData[BasePtr]))	// the value is the last valid ID
 			return 0;
 		CurPos = BasePtr + ReadBE16(&ROMData[BasePtr + 0x02 + Arg2 * 0x02]);
+		// TODO: Pitch Bend Range
+		//  Dead Or Alive, song 00, channel 1 needs PB range 12
 		
 		// Base+0x00
 		// TODO: Enqueue Command A0 01 ROMData[CurPos]
@@ -914,19 +1126,23 @@ INLINE void WriteBE32(UINT8* Buffer, UINT32 Value)
 }
 
 
-
-static void ExtractInstrumentSamples(const char* Folder)
+static void ExtractInstrumentSamples(const char* fNamePrefix)
 {
+	// TODO: just extract all samples once (instead of per-instrument) while still using the "base note" from instrument data
 	UINT32 InsBasePtr;
 	UINT32 CurPos;
-	UINT8 InsCnt;
-	UINT8 CurIns;
+	UINT16 InsCnt;
+	UINT16 CurIns;
 	UINT8 CurNote;
 	UINT8 MaxNote;
 	UINT16 SmplID;
 	char* FileName;
+	const char* fnPrefExt;
 	
-	FileName = (char*)malloc(strlen(Folder) + 0x20);
+	fnPrefExt = IsUpperCase(fNamePrefix) ? "WAV" : "wav";
+	FileName = (char*)malloc(strlen(fNamePrefix) + 0x20);
+	
+	CreateDirTree(fNamePrefix);
 	
 	InsBasePtr = GetGlobalPtr(INS_DATA_ID) & 0x7FFFF;
 	
@@ -943,7 +1159,7 @@ static void ExtractInstrumentSamples(const char* Folder)
 			for (; CurNote <= MaxNote; CurNote ++, CurPos += 0x0C)
 			{
 				SmplID = ReadBE16(&ROMData[CurPos + 0x00]);
-				sprintf(FileName, "%sIns%02X_d%02X_Smpl%02X.wav", Folder, CurIns, CurNote, SmplID);
+				sprintf(FileName, "%sIns%02X_d%02X_Smpl%02X.%s", fNamePrefix, CurIns, CurNote, SmplID, fnPrefExt);
 				ExtractSample(FileName, SmplID, ROMData[CurPos + 0x02]);
 			}
 		}
@@ -954,7 +1170,7 @@ static void ExtractInstrumentSamples(const char* Folder)
 			{
 				CurNote = ROMData[CurPos + 0x00];
 				SmplID = ReadBE16(&ROMData[CurPos + 0x04]);
-				sprintf(FileName, "%sIns%02X_n%02X_Smpl%02X.wav", Folder, CurIns, CurNote, SmplID);
+				sprintf(FileName, "%sIns%02X_n%02X_Smpl%02X.%s", fNamePrefix, CurIns, CurNote, SmplID, fnPrefExt);
 				ExtractSample(FileName, SmplID, 0xF0);
 				
 				CurPos += 0x0A;
@@ -1155,7 +1371,7 @@ static UINT16 GenerateSampleTable(SF2_DATA* SF2Data, UINT8** RetLoopMsk)
 		SmplPtr = GetRomPtr(SmplStart);
 		if (SmplPtr == NULL || ! SmplLen)
 		{
-			sprintf(TempSHdr->achSampleName, "Sample %03hX (null)", CurSmpl);
+			sprintf(TempSHdr->achSampleName, "Sample %03X (null)", CurSmpl);
 			TempSHdr->dwEnd = SmplDBPos+1;
 			TempSHdr->dwStartloop = SmplDBPos;
 			TempSHdr->dwEndloop = SmplDBPos;
@@ -1166,7 +1382,7 @@ static UINT16 GenerateSampleTable(SF2_DATA* SF2Data, UINT8** RetLoopMsk)
 			if (SmplLoopLen)
 				(*RetLoopMsk)[CurSmpl >> 3] |= 1 << (CurSmpl & 0x07);
 			
-			sprintf(TempSHdr->achSampleName, "Sample %03hX", CurSmpl);
+			sprintf(TempSHdr->achSampleName, "Sample %03X", CurSmpl);
 			TempSHdr->dwEnd = SmplDBPos + SmplLen;
 			CurPos = SmplDBPos + (SmplLoopSt - SmplStart);
 			TempSHdr->dwStartloop = CurPos;
@@ -1246,7 +1462,7 @@ static UINT16 GenerateInstruments(SF2_DATA* SF2Data, UINT16 SmplCnt, const UINT8
 	for (CurIns = 0x00; CurIns < InsCnt; CurIns ++)
 	{
 		memset(&InsData[CurIns], 0x00, sizeof(sfInst));
-		sprintf(InsData[CurIns].achInstName, "Instrument %02hX", CurIns);
+		sprintf(InsData[CurIns].achInstName, "Instrument %02X", CurIns);
 		InsData[CurIns].wInstBagNdx = InsBagCnt;
 		
 		// Instrument Generators format:
@@ -1601,7 +1817,7 @@ static void GeneratePresets(SF2_DATA* SF2Data, UINT16 InsCnt, const UINT8* DrumM
 	{
 		TempPHdr = &PrsDB[CurPrs];
 		memset(TempPHdr, 0x00, sizeof(sfPresetHeader));
-		sprintf(TempPHdr->achPresetName, "Preset %02hX", CurIns);
+		sprintf(TempPHdr->achPresetName, "Preset %02X", CurIns);
 		TempPHdr->wPreset = CurIns;			// MIDI Instrument ID
 		TempPHdr->wBank = 0x0000;			// Bank MSB 0, Bank LSB 0
 		TempPHdr->wPresetBagNdx = CurPrs;
@@ -1625,7 +1841,7 @@ static void GeneratePresets(SF2_DATA* SF2Data, UINT16 InsCnt, const UINT8* DrumM
 			CurPrs ++;
 			TempPHdr = &PrsDB[CurPrs];
 			memset(TempPHdr, 0x00, sizeof(sfPresetHeader));
-			sprintf(TempPHdr->achPresetName, "Preset %02hX (drum)", CurIns);
+			sprintf(TempPHdr->achPresetName, "Preset %02X (drum)", CurIns);
 			TempPHdr->wPreset = CurIns;			// MIDI Instrument ID
 			TempPHdr->wBank = 0x0080;			// Bank MSB 128, Bank LSB 0
 			TempPHdr->wPresetBagNdx = CurPrs;

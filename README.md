@@ -58,6 +58,7 @@ I developed the tool using songs from various GIGA and TGL games that use the FM
 Currently the tool supports only MIDI FMP songs. OPN/OPNA FMP songs are unsupported as they use a different set of sequence commands.
 
 Please note that TGL FMP is *not* the popular FMP format that uses files with .OPI/.OVI/.OZI extension.
+See fmp2mid.c for a list of games that use TGL FMP.
 
 ## gems2mid
 This tool converts songs from the GEMS sound driver to MIDI.
@@ -121,7 +122,11 @@ This tool converts songs from games for Sega Model 2 to MIDI.
 This tool can convert the sequences from Model 2 sound ROMs to MIDI and export the samples to WAV or SF2 soundfonts.  
 It was written based on a sound driver disassembly of Sonic the Fighters.
 
-So far only Sonic the Fighters and Fighting Vipers are supported. You need to select between those games by enabling a #define at compile time. It will then try to read the respective ROM files from the current directory. Byteswapped ROMs are detected and fixed automatically.
+There seem to be 3 variants of the Model 2 sound driver. The converter currently only supports "version 2". The main test cases during development were Sonic the Fighters and Fighting Vipers.
+Byteswapped ROMs are detected and fixed automatically.
+
+M2_SndDrvList.txt contains a list of Model 2 games.
+It shows what sound driver versions they use and what ROM files are related to sound.
 
 Notes:
 * The sequences contain no tempo information, so don't expect the MIDIs to be printable.
@@ -240,7 +245,7 @@ This tool takes SYX files (raw binary files containing SysEx data dumps) and con
 
 It takes the actual data transfer time into account and inserts delays between commands respectively.
 The transfer time is calculated as follows:
-time in seconds = number of bytes * 8 bits/byte / 31250 bits/second
+time in seconds = number of bytes / 3125 data bytes/second
 
 The SYX files may also contain other commands like Control Changes.
 

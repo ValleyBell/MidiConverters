@@ -18,6 +18,8 @@
 //	- Farland Story 6: Kamigami no Isen: FMP v3.05
 //	- Farland Story 7: Shishi Ou no Akashi: FMP v3.05
 //	- Harlem Blade: The Greatest of All Time: FMP v3.95
+//	- Horny Sweeper: Koushoku Shikakenin: FMP v3.05
+//	- Horny Sweeper 2: Joshi Kou Kiki Ippatsu: FMP v3.04a (yes, it uses an older version than HS1)
 //	- Kisoushinden Genkaizer: FMP v3.05
 //	- Steam-Heart's: FMP v3.04
 //	- Sword Dancer: FMP v1 (MIDIBS.COM v1)
