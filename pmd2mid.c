@@ -32,6 +32,7 @@ static UINT8 PMDVol2Mid(UINT8 trkMode, UINT8 vol, UINT8 panBoost);
 INLINE double OPNVol2DB(UINT8 TL);
 INLINE double SSGVol2DB(UINT8 vol);
 INLINE double DeltaTVol2DB(UINT8 vol);
+INLINE double RhythmVol2DB(UINT8 vol);
 INLINE UINT8 DB2Mid(double db);
 INLINE UINT32 Tempo2Mid(UINT8 tempoVal);
 INLINE UINT8 PanBits2MidiPan(UINT8 pan);
@@ -64,6 +65,7 @@ typedef struct channel_info
 	UINT8 volOnce;
 	UINT8 panOn;
 	INT16 detune;
+	UINT8 earlyOff;
 	
 	UINT16 mstLoopPos;
 	UINT8 mstLoopCnt;
@@ -85,15 +87,17 @@ static UINT8* ROMData;
 static UINT32 MidLen;
 static UINT8* MidData;
 
-static UINT16 MIDI_RES = 48;
+static UINT16 MIDI_RES = 24;
 static UINT16 NUM_LOOPS = 2;
+static UINT8 VOL_MODE = 0;	// 0  - Controller: Main Volume, 1 - Note Velocity
+static double VOL_BOOST = 0.0;
 
 int main(int argc, char* argv[])
 {
 	FILE* hFile;
 	char* StrPtr;
 	
-	printf("P.M.D. -> Midi Converter\n------------------------------\n");
+	printf("P.M.D. -> Midi Converter\n------------------------\n");
 	if (argc < 3)
 	{
 		printf("Usage: pmd2mid.exe Options input.bin output.mid\n");
@@ -107,6 +111,9 @@ int main(int argc, char* argv[])
 		switch(toupper(*StrPtr))
 		{
 		case 'R':
+			break;
+		case 'V':
+			VOL_MODE = 1;
 			break;
 		}
 		StrPtr ++;
@@ -183,6 +190,7 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 	CHN_INF chnInf;
 	UINT8 curNote;
 	UINT8 curNoteVol;
+	UINT8 curDly;
 	UINT8 lastNote;
 	UINT8 didInitCmds;
 	
@@ -291,6 +299,7 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 		chnInf.detune = 0;
 		didInitCmds = 0x00;
 		chnInf.volOnce = 0xFF;
+		chnInf.earlyOff = 0;
 		chnInf.rhythmKeyMask = 0x00;
 		if (inPos == 0x0000 || songData[inPos] == 0x80)
 			chnInf.flags |= CHNFLAG_STOP;
@@ -304,6 +313,8 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 				WriteEvent(&midFileInf, &MTS, 0xC0, 0x00, 0x00);	// drum channel
 			//tempByt = PMDVol2Mid(chnInf.trkMode, chnInf.volume, chnInf.panOn);
 			//WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+			if (VOL_MODE == 0x01)
+				WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, 0x7F);
 			WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, 0x40);	// center panning
 		}
 		
@@ -397,10 +408,26 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 					
 					if ((chnInf.flags & CHNFLAG_HOLD) && ! (chnInf.flags & CHNFLAG_PORTA))
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x41, 0x00);
-					chnInf.flags &= ~CHNFLAG_HOLD;
 				}
+				chnInf.flags &= ~CHNFLAG_HOLD;
 				
-				MTS.curDly += songData[inPos];	inPos ++;
+				curDly = songData[inPos];	inPos ++;
+				if (chnInf.earlyOff && songData[inPos] != 0xFB && songData[inPos] != 0xC1)
+				{
+					// The PMD driver instantly cuts of the note when earlyOff >= noteLen. (used by RUSTY/MUSS.M)
+					tempByt = (chnInf.earlyOff < curDly) ? chnInf.earlyOff : (curDly - 1);
+					MTS.curDly += (curDly - tempByt);
+					if (lastNote != 0xFF)
+					{
+						WriteEvent(&midFileInf, &MTS, 0x90, lastNote, 0x00);
+						lastNote = 0xFF;
+					}
+					MTS.curDly += tempByt;
+				}
+				else
+				{
+					MTS.curDly += curDly;
+				}
 				if (chnInf.flags & CHNFLAG_PORTA)
 				{
 					chnInf.flags &= ~CHNFLAG_PORTA;
@@ -410,7 +437,10 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 				{
 					chnInf.flags &= ~CHNFLAG_VOL_ONE;
 					tempByt = PMDVol2Mid(chnInf.trkMode, chnInf.volume, chnInf.panOn);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					if (VOL_MODE == 0x00)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					else
+						curNoteVol = tempByt;
 				}
 			}
 			else
@@ -435,19 +465,28 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 					WriteEvent(&midFileInf, &MTS, 0xC0, tempByt & 0x7F, 0x00);
 					break;
 				case 0xFE:	// set Early Key Off
-					printf("Track %u at %04X: Early Key Off = %02X\n", trkID, inPos - 0x01, songData[inPos]);
-					if (! (didInitCmds & 0x04))
+					chnInf.earlyOff = songData[inPos];
+					if (chnInf.earlyOff)
+						printf("Track %u at %04X: Early Key Off = %02X\n", trkID, inPos - 0x01, chnInf.earlyOff);
+					if (0)
 					{
-						didInitCmds |= 0x04;
-						WriteEvent(&midFileInf, &MTS, 0xB0, 0x29, 0x01);	// SMPS Note Timeout: Reverse
+						if (! (didInitCmds & 0x04))
+						{
+							didInitCmds |= 0x04;
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x29, 0x01);	// SMPS Note Timeout: Reverse
+						}
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x09, chnInf.earlyOff);
+						chnInf.earlyOff = 0;
 					}
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x09, songData[inPos]);
 					inPos += 0x01;
 					break;
 				case 0xFD:	// set Volume
 					chnInf.volume = songData[inPos];	inPos ++;
 					tempByt = PMDVol2Mid(chnInf.trkMode, chnInf.volume, chnInf.panOn);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					if (VOL_MODE == 0x00)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					else
+						curNoteVol = tempByt;
 					break;
 				case 0xFC:	// set/change Tempo
 					tempByt = songData[inPos];	inPos ++;
@@ -492,21 +531,37 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 					break;
 				case 0xFA:	// Detune
 					chnInf.detune = (INT16)ReadLE16(&songData[inPos]);	inPos += 0x02;
-					tempSSht = 0x2000 + (chnInf.detune << 7);
+					if (chnInf.trkMode == TRKMODE_SSG)
+						tempSSht = 0x2000 + (chnInf.detune << 5);
+					else
+						tempSSht = 0x2000 + (chnInf.detune << 7);
 					WriteEvent(&midFileInf, &MTS, 0xE0, (tempSSht >> 0) & 0x7F, (tempSSht >> 7) & 0x7F);
 					break;
 				case 0xF9:	// Loop Start
 					tempPos = ReadLE16(&songData[inPos]);
 					songData[tempPos + 0x01] = 0;	// initialize loop counter
+					if (songData[tempPos + 0x00] == 0x00)	// check for alternate Master Loop
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, songData[tempPos + 0x01]);
 					inPos += 0x02;
 					break;
 				case 0xF8:	// Loop End
 					tempPos = inPos;
 					songData[tempPos + 0x01] ++;
-					if (songData[tempPos + 0x01] < songData[tempPos + 0x00])
-						inPos = ReadLE16(&songData[tempPos + 0x02]) + 0x02;
+					if (songData[tempPos + 0x00] == 0x00)	// check for alternate Master Loop
+					{
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, songData[tempPos + 0x01]);
+						if (songData[tempPos + 0x01] < NUM_LOOPS)
+							inPos = ReadLE16(&songData[tempPos + 0x02]) + 0x02;
+						else
+							inPos += 0x04;
+					}
 					else
-						inPos += 0x04;
+					{
+						if (songData[tempPos + 0x01] < songData[tempPos + 0x00])
+							inPos = ReadLE16(&songData[tempPos + 0x02]) + 0x02;
+						else
+							inPos += 0x04;
+					}
 					break;
 				case 0xF7:	// Loop Exit
 					tempPos = ReadLE16(&songData[inPos]);
@@ -544,7 +599,10 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 						break;
 					}
 					tempByt = PMDVol2Mid(chnInf.trkMode, chnInf.volume, chnInf.panOn);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					if (VOL_MODE == 0x00)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					else
+						curNoteVol = tempByt;
 					break;
 				case 0xF3:	// Volume Down (3 db)
 					switch(chnInf.trkMode)
@@ -568,7 +626,10 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 					else
 						chnInf.volume = 0x00;
 					tempByt = PMDVol2Mid(chnInf.trkMode, chnInf.volume, chnInf.panOn);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					if (VOL_MODE == 0x00)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					else
+						curNoteVol = tempByt;
 					break;
 				case 0xF2:	// set Modulation
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x10, songData[inPos + 0x00]);
@@ -593,6 +654,7 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 					break;
 				case 0xEE:	// set PSG Noise Frequency
 					tempByt = songData[inPos];	inPos ++;
+					tempByt += noteMove;
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x54, tempByt);	// Portamento Control (Note)
 					break;
 				case 0xED:	// set PSG Noise Mask
@@ -607,7 +669,10 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, tempByt);
 					
 					tempByt = PMDVol2Mid(chnInf.trkMode, chnInf.volume, chnInf.panOn);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					if (VOL_MODE == 0x00)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					else
+						curNoteVol = tempByt;
 					break;
 				case 0xEB:	// OPNA Rhythm Key On
 					tempByt = songData[inPos];	inPos ++;
@@ -724,7 +789,10 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 						break;
 					}
 					tempByt = PMDVol2Mid(chnInf.trkMode, chnInf.volume, chnInf.panOn);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					if (VOL_MODE == 0x00)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					else
+						curNoteVol = tempByt;
 					break;
 				case 0xE2:	// Volume Down
 					tempByt = songData[inPos];	inPos ++;
@@ -733,21 +801,30 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 					else
 						chnInf.volume -= tempByt;
 					tempByt = PMDVol2Mid(chnInf.trkMode, chnInf.volume, chnInf.panOn);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					if (VOL_MODE == 0x00)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					else
+						curNoteVol = tempByt;
 					break;
 				case 0xDE:	// temporary Volume Up
 					tempByt = songData[inPos];	inPos ++;
 					chnInf.flags |= CHNFLAG_VOL_ONE;
 					chnInf.volOnce = chnInf.volume + tempByt;
 					tempByt = PMDVol2Mid(chnInf.trkMode, chnInf.volOnce, chnInf.panOn);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					if (VOL_MODE == 0x00)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					else
+						curNoteVol = tempByt;
 					break;
 				case 0xDD:	// temporary Volume Down
 					tempByt = songData[inPos];	inPos ++;
 					chnInf.flags |= CHNFLAG_VOL_ONE;
 					chnInf.volOnce = chnInf.volume - tempByt;
 					tempByt = PMDVol2Mid(chnInf.trkMode, chnInf.volOnce, chnInf.panOn);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					if (VOL_MODE == 0x00)
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					else
+						curNoteVol = tempByt;
 					break;
 				case 0xDA:	// Portamento
 					chnInf.flags |= CHNFLAG_PORTA;
@@ -771,7 +848,10 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 					break;
 				case 0xD5:	// add to Detune
 					chnInf.detune += (INT16)ReadLE16(&songData[inPos]);	inPos += 0x02;
-					tempSSht = 0x2000 + (chnInf.detune << 7);
+					if (chnInf.trkMode == TRKMODE_SSG)
+						tempSSht = 0x2000 + (chnInf.detune << 5);
+					else
+						tempSSht = 0x2000 + (chnInf.detune << 7);
 					WriteEvent(&midFileInf, &MTS, 0xE0, (tempSSht >> 0) & 0x7F, (tempSSht >> 7) & 0x7F);
 					break;
 				case 0xCF:	// set FM Slot Mask
@@ -833,7 +913,8 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 				}
 			}
 		}
-		WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
+		if (lastNote != 0xFF)
+			WriteEvent(&midFileInf, &MTS, 0x90, lastNote, 0x00);
 		if (chnInf.rhythmKeyMask)
 		{
 			MTS.midChn = 0x09;
@@ -844,6 +925,7 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 			}
 			chnInf.rhythmKeyMask = 0x00;
 		}
+		WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
 		
 		WriteMidiTrackEnd(&midFileInf, &MTS);
 	}
@@ -879,7 +961,7 @@ static UINT8 PMDVol2Mid(UINT8 trkMode, UINT8 vol, UINT8 panBoost)
 	
 	if (trkMode == TRKMODE_FM)
 		dbVol = OPNVol2DB(~vol & 0x7F);
-	else if (trkMode == TRKMODE_SSG || trkMode == TRKMODE_RHYTHM)
+	else if (trkMode == TRKMODE_SSG)
 		dbVol = SSGVol2DB(~vol & 0x0F);
 	else if (trkMode == TRKMODE_ADPCM)
 		dbVol = DeltaTVol2DB(vol);
@@ -887,12 +969,13 @@ static UINT8 PMDVol2Mid(UINT8 trkMode, UINT8 vol, UINT8 panBoost)
 		dbVol = OPNVol2DB(~vol & 0x1F);
 	else if (trkMode == TRKMODE_RHY_MST)
 		dbVol = OPNVol2DB(~vol & 0x3F);
-	/*else if (TrkMode == TRKMODE_RHYTHM)
-		DBVol = DeltaTVol2DB(Vol * 4);*/
+	else if (trkMode == TRKMODE_RHYTHM)
+		dbVol = RhythmVol2DB(vol);
 	else
 		return vol / 2;
-	if (panBoost)
+	if (panBoost && ! (trkMode == TRKMODE_SSG || trkMode == TRKMODE_RHYTHM))	// no panning for SSG channels
 		dbVol -= 3.0;
+	dbVol += VOL_BOOST;
 	return DB2Mid(dbVol);
 }
 
@@ -914,8 +997,19 @@ INLINE double DeltaTVol2DB(UINT8 vol)
 	return log(vol / 255.0) * (6.0 / M_LN2) + 6.0;	// boost its volume
 }
 
+INLINE double RhythmVol2DB(UINT8 vol)
+{
+	if (vol > 0x0F)
+		vol = 0x0F;
+	// PPS volume is linear
+	// Values 0..2 are silent due to the SSG's low precision, but let's ignore that.
+	return log(vol / 15.0) * (6.0 / M_LN2) - 6.0;	// lower the volume by 50%
+}
+
 INLINE UINT8 DB2Mid(double db)
 {
+	if (db > 0.0)
+		db = 0.0;
 	return (UINT8)(pow(10.0, db / 40.0) * 0x7F + 0.5);
 }
 
