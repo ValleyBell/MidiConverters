@@ -1,0 +1,44 @@
+Header
+------
+Pos	Len	Description
+00	04	"MMU1" signature
+04	01	song tempo
+05	01	global transposition
+06	0B	[ignored]
+10	??	track data (12h tracks)
+
+Track Data
+----------
+2 bytes - track length (includes this value)
+1 byte  - track ID
+1 byte  - unused (RCP rhythm mode?)
+1 byte  - channel ID (FF = none)
+1 byte  - track transposition (low 7 bits = transpose, 80h = special)
+1 byte  - Start Tick (example: delay track by N ticks)
+1 byte  - channel muted (only bit 0 is important)
+?? bytes - sequence data
+
+
+Known commands (RCP-style):
+00..7F - note
+91 00 aa bb - ?? (used by tbs98\MSC.FMX songs 79, 84)
+              In RCP, this is "User SysEx", however it is impossible to what parameter it was supposed to be used with.
+DD 00 hh mm - set Roland Base Address (hh = high address, mm = mid address)
+DE 00 ll vv - send Roland SysEx Parameter (ll = low address, vv = value)
+DF 00 mm vv - set Roland Device (mm = model ID, vv = device ID)
+E6 00 cc ## - set MIDI channel to cc
+E7 00 tt mm - set song tempo (tt = 40h -> 100%, mm = 0 -> instant change, mm = 1 -> ignored)
+EA 00 vv ## - MIDI channel aftertouch
+EB 00 cc vv - MIDI control change cc, value vv
+EC 00 pp 00 - MIDI patch change pp
+EE 00 ll mm - MIDI pitch bend mmll
+F6 00 xx xx - comment
+F7 00 xx xx - continuation
+F8 00 00 00 - Loop End
+F9 01 00 00 - Loop Start
+FC ## ll mm - repeat previous measure
+              Plays the measure at offset mmll. The actual file offset is:
+                  OfsTrackStart + (mmll & 0FFFCh) - 0024h
+FD ## ## ## - measure end (The first parameter seems to be 0 or 1, but the driver ignores all parameters.)
+FE ## ## ## - track end
+FF ## ## ## - track end
