@@ -29,10 +29,6 @@
 
 #include "midi_funcs.h"
 
-#define RUNNING_NOTES
-#include "midi_utils.h"
-
-
 typedef struct mmu_info
 {
 	UINT8 fileVer;
@@ -48,8 +44,13 @@ typedef struct _track_info
 	UINT32 loopOfs;
 	UINT32 tickCnt;
 	UINT32 loopTick;
-	//UINT16 loopTimes;
-} TRK_INFO;
+	UINT16 loopTimes;
+} TRK_INF;
+
+#define RUNNING_NOTES
+#define BALANCE_TRACK_TIMES
+#include "midi_utils.h"
+
 
 #define MCMD_INI_EXCLUDE	0x00	// exclude initial command
 #define MCMD_INI_INCLUDE	0x01	// include initial command
@@ -61,9 +62,8 @@ static UINT8 WriteFileData(UINT32 DataLen, const UINT8* Data, const char* FileNa
 
 UINT8 Mmu2Mid(UINT32 songLen, const UINT8* songData);
 static UINT8 MmuTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMU_INFO* mmuInf,
-							UINT32* mmuInPos, FILE_INF* fInf, MID_TRK_STATE* MTS);
-static UINT8 PreparseMmuTrack(UINT32 songLen, const UINT8* songData, const MMU_INFO* mmuInf,
-							UINT32 startPos, TRK_INFO* trkInf);
+							TRK_INF* trkInf, FILE_INF* fInf, MID_TRK_STATE* MTS);
+static UINT8 PreparseMmuTrack(UINT32 songLen, const UINT8* songData, const MMU_INFO* mmuInf, TRK_INF* trkInf);
 static UINT16 GetMultiCmdDataSize(UINT32 songLen, const UINT8* songData, UINT32 startPos, UINT8 flags);
 static UINT16 ReadMultiCmdData(UINT32 songLen, const UINT8* songData,
 								UINT32* mmuInPos, UINT32 bufSize, UINT8* buffer, UINT8 flags);
@@ -99,8 +99,8 @@ int main(int argc, char* argv[])
 		printf("Usage: mmu2mid.exe [options] input.bin output.mid\n");
 		printf("Options:\n");
 		printf("    -Loops n    Loop each track at least n times. (default: 2)\n");
-	//	printf("    -NoLpExt    No Loop Extension\n");
-	//	printf("                Do not fill short tracks to the length of longer ones.\n");
+		printf("    -NoLpExt    No Loop Extension\n");
+		printf("                Do not fill short tracks to the length of longer ones.\n");
 		printf("    -KeepDummyCh convert data with MIDI channel set to -1\n");
 		printf("                channel -1 is invalid, which can be used for muting\n");
 		return 0;
@@ -163,7 +163,7 @@ int main(int argc, char* argv[])
 	free(ROMData);	ROMData = NULL;
 	
 #ifdef _DEBUG
-//	getchar();
+	//getchar();
 #endif
 	
 	return 0;
@@ -189,6 +189,8 @@ static UINT8 WriteFileData(UINT32 DataLen, const UINT8* Data, const char* FileNa
 
 UINT8 Mmu2Mid(UINT32 songLen, const UINT8* songData)
 {
+	TRK_INF trkInf[18];
+	TRK_INF* tempTInf;
 	UINT8 tempArr[0x20];
 	MMU_INFO mmuInf;
 	UINT8 curTrk;
@@ -212,9 +214,29 @@ UINT8 Mmu2Mid(UINT32 songLen, const UINT8* songData)
 	mmuInf.gblTransp = songData[0x05];
 	mmuInf.trkCnt = 18;	// track count is fixed
 	
+	inPos = 0x10;
+	for (curTrk = 0; curTrk < mmuInf.trkCnt; curTrk ++)
+	{
+		tempTInf = &trkInf[curTrk];
+		tempTInf->startOfs = inPos;
+		tempTInf->loopOfs = 0x0000;
+		tempTInf->tickCnt = 0;
+		tempTInf->loopTick = 0;
+		
+		if (inPos < songLen)
+		{
+			tempLng = ReadLE16(&songData[inPos]);
+			PreparseMmuTrack(songLen, songData, &mmuInf, tempTInf);
+			inPos += tempLng;
+		}
+		tempTInf->loopTimes = tempTInf->loopOfs ? NUM_LOOPS : 0;
+	}
+	
+	if (! NO_LOOP_EXT)
+		BalanceTrackTimes(mmuInf.trkCnt, trkInf, MIDI_RES / 4, 0xFF);
+	
 	WriteMidiHeader(&midFInf, 0x0001, mmuInf.trkCnt, MIDI_RES);
 	
-	inPos = 0x10;
 	retVal = 0x00;
 	for (curTrk = 0; curTrk < mmuInf.trkCnt; curTrk ++)
 	{
@@ -227,7 +249,7 @@ UINT8 Mmu2Mid(UINT32 songLen, const UINT8* songData)
 			WriteMetaEvent(&midFInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
 		}
 		
-		retVal = MmuTrk2MidTrk(songLen, songData, &mmuInf, &inPos, &midFInf, &MTS);
+		retVal = MmuTrk2MidTrk(songLen, songData, &mmuInf, &trkInf[curTrk], &midFInf, &MTS);
 		
 		WriteEvent(&midFInf, &MTS, 0xFF, 0x2F, 0x00);
 		WriteMidiTrackEnd(&midFInf, &MTS);
@@ -253,13 +275,11 @@ UINT8 Mmu2Mid(UINT32 songLen, const UINT8* songData)
 }
 
 static UINT8 MmuTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMU_INFO* mmuInf,
-							UINT32* mmuInPos, FILE_INF* fInf, MID_TRK_STATE* MTS)
+							TRK_INF* trkInf, FILE_INF* fInf, MID_TRK_STATE* MTS)
 {
 	UINT32 inPos;
-	UINT32 trkBasePos;
 	UINT32 trkEndPos;
 	UINT32 trkLen;
-	TRK_INFO trkInf;
 	UINT32 parentPos;
 	UINT16 repMeasure;
 	UINT8 trkID;
@@ -283,19 +303,16 @@ static UINT8 MmuTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMU_INFO
 	UINT32 txtBufSize;
 	UINT8* txtBuffer;
 	
-	inPos = *mmuInPos;
-	if (inPos >= songLen)
+	if (trkInf->startOfs >= songLen)
 		return 0x01;
 	
-	trkBasePos = inPos;
+	inPos = trkInf->startOfs;
 	trkLen = ReadLE16(&songData[inPos]);
-	trkEndPos = trkBasePos + trkLen;
+	trkEndPos = inPos + trkLen;
 	if (trkEndPos > songLen)
 		trkEndPos = songLen;
 	if (inPos + 0x08 > songLen)
 		return 0x01;	// not enough bytes to read the header
-	
-	PreparseMmuTrack(songLen, songData, mmuInf, trkBasePos, &trkInf);
 	
 	trkID = songData[inPos + 0x02];		// track ID
 	midChn = songData[inPos + 0x04];	// MIDI channel
@@ -521,7 +538,7 @@ static UINT8 MmuTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMU_INFO
 					if (loopCnt[loopIdx] < 0x80 && midiDev != 0xFF)
 						WriteEvent(fInf, MTS, 0xB0, 0x6F, (UINT8)loopCnt[loopIdx]);
 					
-					if (loopCnt[loopIdx] < NUM_LOOPS)
+					if (loopCnt[loopIdx] < trkInf->loopTimes)
 						takeLoop = 1;
 				}
 				else
@@ -545,7 +562,7 @@ static UINT8 MmuTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMU_INFO
 			}
 			else
 			{
-				if (inPos == trkInf.loopOfs && midiDev != 0xFF)
+				if (inPos == trkInf->loopOfs && midiDev != 0xFF)
 					WriteEvent(fInf, MTS, 0xB0, 0x6F, 0);
 				
 				loopPPos[loopIdx] = parentPos;
@@ -574,7 +591,7 @@ static UINT8 MmuTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMU_INFO
 				if (! parentPos)
 					parentPos = inPos;
 				repMeasure = measureID;
-				inPos = trkBasePos + repeatPos - 0x24;	// This is what the driver does.
+				inPos = trkInf->startOfs + repeatPos - 0x24;	// This is what the driver does.
 			}
 			break;
 		case 0xFD:	// measure end
@@ -613,15 +630,12 @@ static UINT8 MmuTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMU_INFO
 	if (midiDev == 0xFF)
 		MTS->curDly = 0;
 	
-	*mmuInPos = trkBasePos + trkLen;
 	return 0x00;
 }
 
-static UINT8 PreparseMmuTrack(UINT32 songLen, const UINT8* songData, const MMU_INFO* mmuInf,
-							UINT32 startPos, TRK_INFO* trkInf)
+static UINT8 PreparseMmuTrack(UINT32 songLen, const UINT8* songData, const MMU_INFO* mmuInf, TRK_INF* trkInf)
 {
 	UINT32 inPos;
-	UINT32 trkBasePos;
 	UINT32 trkEndPos;
 	UINT32 trkLen;
 	UINT32 parentPos;
@@ -637,24 +651,22 @@ static UINT8 PreparseMmuTrack(UINT32 songLen, const UINT8* songData, const MMU_I
 	UINT32 loopTick[8];
 	UINT16 loopCnt[8];
 	
-	inPos = startPos;
-	if (inPos >= songLen)
+	trkInf->loopOfs = 0x00;
+	trkInf->tickCnt = 0;
+	trkInf->loopTick = 0;
+	
+	if (trkInf->startOfs >= songLen)
 		return 0x01;
 	
-	trkBasePos = inPos;
+	inPos = trkInf->startOfs;
 	trkLen = ReadLE16(&songData[inPos]);
-	trkEndPos = trkBasePos + trkLen;
+	trkEndPos = inPos + trkLen;
 	if (trkEndPos > songLen)
 		trkEndPos = songLen;
 	if (inPos + 0x08 > songLen)
 		return 0x01;	// not enough bytes to read the header
 	
 	inPos += 0x08;
-	
-	trkInf->startOfs = trkBasePos;
-	trkInf->loopOfs = 0x00;
-	trkInf->tickCnt = 0;
-	trkInf->loopTick = 0;
 	
 	trkEnd = 0;
 	parentPos = 0x00;
@@ -716,7 +728,7 @@ static UINT8 PreparseMmuTrack(UINT32 songLen, const UINT8* songData, const MMU_I
 				if (! parentPos)
 					parentPos = inPos;
 				repMeasure = measureID;
-				inPos = trkBasePos + repeatPos - 0x24;	// This is what the driver does.
+				inPos = trkInf->startOfs + repeatPos - 0x24;	// This is what the driver does.
 			}
 			break;
 		case 0xFD:	// measure end

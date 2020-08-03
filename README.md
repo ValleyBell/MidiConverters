@@ -153,6 +153,15 @@ The tool needs "RO" files ripped from ScummVM's RAM as I couldn't figure out the
 The "RO" signature must be at byte 0x0C. (I apparently ripped some bytes from the memory block header.)  
 MI1-Midi_Data.7z contains the files that I used with the converter.
 
+## mmu2mid
+This tool converts Wolfteam MMU music files to standard MIDIs.
+
+I made this tool to be able to convert the music of the 3 PC-98 Wolfteam games that *don't* use the MF format for MIDI music.
+
+Just like most other Wolfteam music formats, the MMU format is based on the RCP format.
+This one in particular appears to just be RCP with a smaller file and track headers.
+ZAN3.MTN (from Zan 3 on the PC-98) is also just a .CM6 file with the first 0C4h bytes being cut off.
+
 ## msdrv2mid
 This tool converts songs from PC-98 games that use the MsDRV sound driver to MIDI.
 
@@ -286,7 +295,7 @@ Right now the tool uses hardcoded instrument mappings - which interestingly work
 For Wolfteam MegaDrive games with PCM drums, it can autodetect the song list and will batch-convert all songs. (compile with `PLMode = 0x01;` to enable it)
 
 ## wtmf2mid
-This tool converts Wolfteam MIDI music files to standard MIDIs.
+This tool converts Wolfteam MF music files to standard MIDIs.
 
 I initially made this tool to get MIDIs of songs from Arcus Odyssey (because its MT-32 soundtrack is awesome).
 I disassembled a few sound drivers during the development of this tool: Arcus Odyssey, D: European Mirage, Span of Dream.
