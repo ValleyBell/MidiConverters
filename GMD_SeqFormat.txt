@@ -1,0 +1,291 @@
+GMD Sequence Format (for CSCP sound driver)
+===================
+(.GMD files)
+
+Header
+------
+Pos	Len	Desc
+00	04	"GMD0" signature
+04	02	Version? (0100h)
+06	02	unused
+08	02	unused
+0A	02	Tempo (BPM)
+0C	01	Time Signature: Numerator?
+0D	01	Time Signature: Denominator?
+0E	02	Ticks per Quarter?
+10	01	maximum number of tracks (usually 10h)
+11	01	Master Volume (usually 7Fh)
+12	0E	unused
+20	??	Chunk Song Title
+22	??	Chunk FM Instrument Data
+24	??	Chunk SSG Instrument Data
+26	06	ignored
+2C	??	Chunk ??
+2E	??	Chunk Track Data
+
+
+Chunk Song Title
+----------------
+2 bytes - chunk size (cs) (excluding this word)
+2 bytes - 01 00
+x bytes - song title (null-terminated)
+-> 2 + cs bytes
+
+Chunk FM Instrument Data
+------------------------
+2 bytes - instrument count (ic)
+2 bytes - 00 28
+28h*ic bytes - instrument data
+	00: instrument ID
+	01..0C: instrument name
+	0D..0E: unused? (00)
+	0F..27: OPN register data
+-> 4 + (ic * 28h) bytes
+
+Chunk SSG Instrument Data
+-------------------------
+2 bytes - instrument count (ic)
+2 bytes - 00 14
+14h*ic bytes - instrument data
+	00: instrument ID
+	01..07: unused? (00)
+	08..11: OPN register data
+	12..13: unused? (00)
+-> 4 + (ic * 14h) bytes
+
+Chunk Track Data
+----------------
+2 bytes - track count
+  ?? bytes - track 1 data
+  ?? bytes - track 2 data
+  ...
+
+
+Track Data
+----------
+Pos	Len	Desc
+00	02	track size (including this word)
+02	02	track ID (valid are only 01h..10h)
+		common track IDs:
+			MIDI: 01h..10h
+			FM/SSG: 01..06 = FM 1..6, 07..09 = SSG 1..3
+04	01	unused (maybe intended to be transpositon?)
+05	01	track delay in ticks
+06	02	special loop offset
+08	08	unused
+10	??	sequence commands
+
+
+Sequence Commands
+-----------------
+Note Mode 0: (commonly used on MIDI melody channels)
+  00..7F dd ll - Note, delay dd, length ll
+	Note: Notes can be extended by replaying them at tick ll.
+	      i.e. "note extension" is processed *before* a note expires
+	     TODO: verify exact note expiration tick
+Note Mode 1: (commonly used on MIDI drum channels)
+  00..7F dd vv - Note, delay dd, velocity vv
+	Note: Notes are stopped when being replayed.
+	vv = 00..7F: play note with velocity vv
+	vv = 80..FF: play note with velocity [channel velocity + vv] where (vv & 0x7F) is a signed two's complement 7-bit value
+Note Mode 2: (commonly used on FM/SSG channels)
+  00..7F dd - Note, length/delay dd
+	Note: Command EF is used for extending notes.
+	In all other cases, the actual note length "nl" [TrkRAM+1B] is calculated as follows:
+		nlm == 00h: nl = dd
+		nlm == 10h: nl = dd - nls
+		else: nl = dd * nlm / 10h
+Note Mode 3:
+  00..7F dd ll vv - Note, delay dd, length ll, velocity vv
+	vv works the same as in Note Mode 1.
+80 ll - rest, length ll [Note Mode 0/1/2]
+80 ll cc - rest, length ll [Note Mode 3]
+	cc = 0 -> do nothing else
+	cc > 0 -> force all playing notes to play cc ticks
+81 ll - delay, length ll
+82 [nn nn ...] - Note Off
+	A series of notes to be turned off. The last nn has bit 7 set.
+83 [nn vv nn vv ...] - Note On
+	A series of notes to be played. Note nn, velocity vv. The last nn has bit 7 set.
+84 vv - Note Length Multiplicator "nlm" (only has effect in Note Mode 2)
+85 vv - Note Length Subtraction "nls" (only has effect in Note Mode 2)
+86 ll mm - set Track Detune (mm = MSB, ll = LSB, 8.8 fixed point, 0000 = center)
+87 ll mm - add mmll to Track Detune
+88 tt - set track transposition to tt
+89 tt - add tt to track transposition
+8A - reset Pitch Bend
+8B ll mm - set Pitch Bend (mm = MSB, ll = LSB, 0000 = min, 2000 = center, 3FFF = max)
+8C ll mm - add mmll to Pitch Bend
+8D aa bb - Portamento Up?
+8E aa bb - Portamento Down?
+8F pp - Sustain Pedal (MIDI CC 64), value pp
+90 vv - Channel Volume (MIDI CC 7), value vv
+91 vv - Channel Volume Accumulate
+	Step 1:
+		vv = 00/80: reuse saved Channel Volume Accumulator cva
+		vv = 01..7F, 81..FF: save "vv & 0x7F" to Channel Volume Accumulator cva
+	Step 2:
+		vv = 00..7F: add cva to channel volume
+		vv = 80..FF: subtract cva from channel volume
+92 vv - set Note Velocity, value vv
+93 vv - Note Velocity Accumulate, see command 91
+95 vv - ??
+96 vv - ??
+97 aa bb cc - ??
+98 ll mm - set Song Tempo in BPM (value mmll, clamped to 300)
+9A ss ii - Tempo Modifier
+	ss = tempo scale (0x20 = 50%, 0x40 = 100%, 0x80 = 200%)
+	ii = interpolation?
+9C ii - silence channel, then set Instrument ii
+	Silencing is done by:
+		- sending Sustain Pedal Off (controller 64, data 0)
+		- [Note Mode 0/2/3] turning all notes off explicitly
+		- [Note Mode 0/2/3] sending All Notes Off (controller 123, data 0)
+9D bb ii - set Bank MSB bb, Instrument ii
+9E nn vv - Note Aftertouch, note nn, value vv
+9F vv - Channel Aftertouch, value vv
+A0 ii - Pan via LUT (00 = centre, 01 = left, 02 = right, 03 = centre, 04..FF = invalid)
+A1 pp - Pan (MIDI CC 10), value pp
+A2 pp - add pp to Pan
+	pp == 00..7F: pan = (pan + (pp & 7F))
+	pp == 80..FF: pan = (pan - (pp & 7F))
+	The result is clamped into [01..7F].
+A4 mm [dd] - MIDI Modulation (MIDI CC 1), strength mm
+	mm = 00..7F: just set modulation strength = mm, parameter dd is missing
+	mm = 80..FF: set modulation strength = (mm & 0x7F), set modulation delay = dd ticks
+A5 ee [dd] - Software Modulation Enable (bb exists only when aa = 80..FF)
+	ee == 00: disable
+	ee == 01..7F: enable
+	When (ee & 80), then an additional byte for Modulation Delay dd is present
+A7 mm t1 t2 d1 d2 - Software Modulation Parameters
+	mm: Modulation Mode (00..03)
+	t2t1: ticks until the frequency delta is inversed
+	d2d1: initial frequency delta
+AC rr dd - OPNA register write
+	Notes:
+		- channel mode 0/1/6 only
+		- always goes to port 0
+AD rr dd - OPNA channel register write, register rr, data dd
+	Notes:
+		- channel mode 0/6 only
+		- only useable with rr = 30h..B6h, ignored else
+		- port/register ID are modified in order to access the current channel
+AE cc dd - MIDI Controller cc, data dd
+AF [dd dd ...] - send SysEx command
+	F0 dd dd ... F7
+	Note: The last data byte (dd) has Bit 7 (80) set.
+B0 vv - set RPN Pitch Bend Range to vv
+	sends RPN MSB 0, RPN LSB 0, Data MSB vv
+B1 mm ll vv - set RPN MSB mm, LSB ll, Data MSB vv
+B3 mm ll vv - set NRPN MSB mm, LSB ll, Data MSB vv
+B5 di mi - set SysEx command header (di = device ID, mi = model ID)
+B6 a1 a2 a3 [dd dd ...] - send Roland SysEx command
+	F0 41 di mi 12 a1 a2 a3 dd dd .. [chksum] F7
+	Note: The last data byte (dd) has Bit 7 (80) set.
+B7 - set Roland GS Reset
+	F0 41 10 42 40 00 7F 41 F7
+B8 vv - Expression (MIDI CC 11), value vv
+E0 mm cc - set channel mode/ID
+	mm = 00 (FM): cc = 00..05 (FM 1..6)
+	mm = 01 (SSG): cc = 00..02 (SSG 1..3)
+	mm = 06
+	mm = 07 (OPNA Rhythm)
+	mm = 10 (MIDI): cc = 00..0F (MIDI channel 1..16)
+E1 mm - set note mode
+E2 vv - ??
+E3 vv - ??
+E5 ll mm - repeat measure at mmll (mmll is relative to the track header)
+	Notes:
+		- The E5 command may jump to another E5 directly, which is followed.
+		- Nesting is not allowed and results in the driver leaving the repeated measure.
+	Examples:
+		E5 1111 -> E5 2222 -> E5 3333 -> [data]: will repeat the measure at offset 3333
+		E5 1111 -> [data] E5 2222 -> will play [data], but returns at "E5 2222"
+E6 tt - Loop Start (loop tt times, 00 = infinite)
+E7 - Loop End
+E8 - Loop Start
+E9 tt - Loop End (loop tt times, 00 = infinite)
+EA ll mm - Loop Exit (jump to offset mmll when remaining loops == 1, mmll is relative to byte after mm)
+EB tt ll mm - special loop jump (TODO: how does this work exactly?)
+EC ll mm - jump to offset mmll (mmll is relative to byte after mm)
+ED vv - ?? (some special loop stuff?)
+	OPN/OPNA songs often use vv=00 for Master Loop Start and vv=01 for Master Loop End
+EE - no effect
+EF - note tie (MUST be the byte after the note command to have an effect, checked via look-ahead, Note Mode 2 only)
+F8 vv - set Marker to vv
+F9 vv - add vv to Marker
+FA ll mm  - Measure End: set Measure ID to mmll, may return from Repeated Measure
+FB - Measure End: increment Measure ID, may return from Repeated Measure
+FC [...] 00 - comment? (the driver skips until it finds a 00 byte)
+FD - no effect
+FE xx - ??
+FF - Track End
+
+
+Sound Driver RAM
+----------------
+Track RAM (offsets are ds:0+x)
+---------
+00	Track Enable (00h = enabled, 01h-FFh = stopped)
+01	?? (written to by command FE)
+02	note mode
+04	channel mode (00h = FM, 01 = SSG, 06h = FM?, 07h = OPNA Rhythm, 10h = MIDI)
+05	channel ID
+06/07	Marker value
+08/09	measure counter
+0A/0B	track tick counter
+0C/0D	track data pointer
+0E/0F	track base segment
+10/11	track base offset (offset of track header)
+12/13	track header offset (same as 10/11)
+14/15	track header segment (same as 0E/0F)
+16/17	measure return pointer (offset to return to after playing a repeated measure)
+1A	track tick timeout
+1B	remaining note ticks (Note Mode 2)
+1C..2B	Note RAM
+	+00	Note ID (FF = not playing)
+	+01	remaining ticks
+
+32/33	Special Loop offset [seee track header + 06/07]
+34	Special Loop Enable (00h = disable, 01h..FFh = enable)
+35	current Loop Slot ID
+36..65	Loop RAM
+	+00	total number of loops (0 = no set)
+	+01	remaining number of loops
+	+02	Loop Start offset
+	+04	repeated measure return offset
+
+67	instrument
+6A	channel pan (OPNA bitmask, 80h = lefth, C0h = centre [default], 40h = right)
+
+74	note pitch
+75	Modulation Enable (00h = off, 01h..FFh = on)
+76	Frequency Modulation Enable (00h = off, FFh = initialize, 01h = running)
+77	Modulation Mode (00h..03h, default: 02h)
+78	Modulation Delay Countdown
+79	Modulation Delay after starting note (in ticks)
+7A/7B	remaining ticks until delta inversion
+7C/7D	ticks until delta inversion (reset value)
+82/83	current Frequency Delta
+84/85	initial Frequency Delta
+
+96	SysEx Device ID (default: 10h)
+97	SysEx Model ID (default: 42h)
+98..9B	last written NRPN/RPN value (98 = NRPN LSB, 99 = NRPN MSB, 9A = RPN LSB, 9B = RPN MSB)
+9D	track transpose (with 9F applied)
+9E/9F	track detune (8.8 fixed point, 9E = fraction, 9F = note)
+
+A0/A1	pitch bend detune (MIDI scale, i.e. 2000h = 1 semitone, default: 0 = no change)
+A2/A3	current pitch bend value (default: 2000h = centre)
+A6	Modulation delay countdown
+A7	Modulation delay (initial value)
+A8	Modulation value
+A9	sustain pedal state
+AA	channel pan (raw/MIDI scale, default: 40h)
+AD	channel volume (default: 64h = 100 dec)
+AE	last channel volume accumulator (set by command 91)
+
+B2	note velocity (default: 64h = 100 dec)
+B3	last note velocity accumulator (set by command 93)
+
+-> D0h bytes per track

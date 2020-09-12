@@ -72,6 +72,16 @@ For sequence data, the tool tries to detect the pointer format, which is differe
 
 The GEMS sound driver is commonly found in MegaDrive games developed in the U.S.
 
+## gmd2mid
+This tool converts songs from PC-98 games that use the GMD format to MIDI.
+
+I wrote this tool to get MIDIs of the songs from Valkyrie: The Power Beauties.
+The tool should work with all games published by "Discovery" that use the CSCP.BIN/SSCP.BIN sound driver.
+
+The sound driver was surprisingly complex. I disassembled it and reverse-engineered most of the commands.
+MIDI songs seem to be converted from RCP files and barely use any of the shortcut commands that the format allows. Those should all convert fine.
+OPN/OPNA songs were generated differently. (They even use other commands for song tempo changes than the RCP conversions.) The tool doesn't yet convert everything they use.
+
 ## grc2mid
 This tool converts songs from MegaDrive games that use the GRC sound driver to MIDI.
 
