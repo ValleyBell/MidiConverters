@@ -10,9 +10,9 @@ Pos	Len	Desc
 06	02	unused
 08	02	unused
 0A	02	Tempo (BPM)
-0C	01	Time Signature: Numerator?
-0D	01	Time Signature: Denominator?
-0E	02	Ticks per Quarter?
+0C	01	Time Signature: Numerator
+0D	01	Time Signature: Denominator
+0E	02	Ticks per Quarter
 10	01	maximum number of tracks (usually 10h)
 11	01	Master Volume (usually 7Fh)
 12	0E	unused
@@ -212,6 +212,12 @@ ED vv - ?? (some special loop stuff?)
 	OPN/OPNA songs often use vv=00 for Master Loop Start and vv=01 for Master Loop End
 EE - no effect
 EF - note tie (MUST be the byte after the note command to have an effect, checked via look-ahead, Note Mode 2 only)
+F7 aa bb cc - set Fade Out parameters
+	Note: invalid in CSCP.BIN (valkyrie_98), valid in SSCP.BIN and present in most songs that use this
+ driver
+	aa: number of ticks before fading starts
+	bb: delay between fade steps (decremented every 4 ticks until 1 is reached)
+	cc: fade duration in ticks
 F8 vv - set Marker to vv
 F9 vv - add vv to Marker
 FA ll mm  - Measure End: set Measure ID to mmll, may return from Repeated Measure

@@ -821,8 +821,9 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 				
 				if (songData[inPos + 0x02] != 0)
 				{
-					printf("Warning Track %u: Interpolated Tempo Modifier at 0x%04X!\n", trkID, prevPos);
+					printf("Warning Track %u: Interpolated Tempo Modifier at 0x%04X!\n", trkID, inPos);
 					// TODO: the driver seems to be able to actually handle this
+					// TODO: used by hinadori_98/MD2_55_21.DAT
 				}
 				tempoMod = songData[inPos + 0x01];
 				inPos += 0x03;
@@ -843,7 +844,10 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 			else
 			{
 				if (susPedState & 0x40)
+				{
+					printf("Warning Track %u: Sustain Off due to new instrument at 0x%04X!\n", trkID, inPos);
 					WriteEvent(fInf, MTS, 0xB0, 0x40, 0x00);
+				}
 				susPedState = 0x00;
 				FlushRunningNotes(fInf, &MTS->curDly, &RunNoteCnt, RunNotes, 1);
 			}
@@ -851,7 +855,6 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 			inPos += 0x02;
 			break;
 		case 0x9D:	// banked Instrument
-			printf("Warning Track %u: Banked Instrument (untested)\n", trkID);
 			WriteEvent(fInf, MTS, 0xB0, 0x00, songData[inPos + 0x01]);
 			WriteEvent(fInf, MTS, 0xC0, songData[inPos + 0x02], 0x00);
 			inPos += 0x03;
@@ -997,7 +1000,6 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 				UINT32 syxPos;
 				UINT32 dataLen;
 				
-				printf("Warning Track %u: Generic SysEx (untested)\n", trkID);
 				for (syxPos = inPos + 0x01; syxPos < songLen; syxPos ++)
 				{
 					if (songData[syxPos] & 0x80)
@@ -1012,8 +1014,8 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 				dataLen -= 0x01;
 				
 				memcpy(&syxBuffer[0], &songData[inPos + 0x01], dataLen);
-				syxBuffer[dataLen + 0x00] &= 0x7F;
-				syxBuffer[dataLen + 0x01] = 0xF7;
+				syxBuffer[dataLen - 0x01] &= 0x7F;
+				syxBuffer[dataLen + 0x00] = 0xF7;
 				WriteLongEvent(fInf, MTS, 0xF0, dataLen + 0x01, syxBuffer);
 				inPos += 0x01 + dataLen;
 			}
@@ -1086,7 +1088,7 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 			inPos += 0x02;
 			break;
 		case 0xE0:	// channel mode
-			//printf("Warning Track %u: Set MIDI Channel command found at 0x%04X\n", trkID, prevPos);
+			//printf("Warning Track %u: Set MIDI Channel command found at 0x%04X\n", trkID, inPos);
 			chnMode = songData[inPos + 0x01];
 			if (chnMode == 0x00)	// FM 1..6
 				MTS->midChn = songData[inPos + 0x02] & 0x0F;
@@ -1273,6 +1275,20 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 		case 0xEF:	// note tie
 			inPos += 0x01;
 			break;
+		case 0xF7:	// Fade Out parameters
+			// Note: invalid in CSCP.BIN (valkyrie_98), valid/used in SSCP.BIN
+			printf("Warning Track %u: Fade Out Parameters: %02X %02X %02X\n",
+				trkID, cmdType, songData[inPos + 0x01], songData[inPos + 0x02], songData[inPos + 0x03]);
+			inPos += 0x04;
+			break;
+		case 0xF8:	// Marker Set
+			WriteEvent(fInf, MTS, 0xB0, 0x70, songData[inPos + 0x01]);
+			inPos += 0x02;
+			break;
+		case 0xF9:	// Marker Add
+			WriteEvent(fInf, MTS, 0xB0, 0x71, songData[inPos + 0x01]);
+			inPos += 0x02;
+			break;
 		case 0xFA:	// measure end / set measure counter
 			inPos += 0x02;
 			// fall through
@@ -1302,7 +1318,7 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 		case 0xFD:	// no effect
 			inPos += 0x01;
 			break;
-		case 0xFE:	// unknown
+		case 0xFE:	// unknown, apparently no effect for sound playback
 			if (songData[inPos + 0x01] > 0)
 				printf("Warning Track %u: Command %02X at position 0x%04X\n", trkID, cmdType, inPos);
 			inPos += 0x02;
@@ -1421,6 +1437,8 @@ static UINT8 PreparseGmdTrack(UINT32 songLen, const UINT8* songData, const GMD_I
 		case 0xE2:
 		case 0xE3:
 		case 0xED:
+		case 0xF8:	// Marker Set
+		case 0xF9:	// Marker Add
 		case 0xFE:	// unknown
 			inPos += 0x02;
 			break;
@@ -1442,6 +1460,7 @@ static UINT8 PreparseGmdTrack(UINT32 songLen, const UINT8* songData, const GMD_I
 		case 0x97:
 		case 0xB1:	// set RPN Parameter
 		case 0xB3:	// set NRPN Parameter
+		case 0xF7:	// Fade Out parameters
 			inPos += 0x04;
 			break;
 		case 0xA7:	// Software Modulation Settings
