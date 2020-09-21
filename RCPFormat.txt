@@ -1,3 +1,6 @@
+Sequence Files
+==============
+
 Header v2 [RCP]
 ------
 Pos	Len	Description
@@ -23,7 +26,7 @@ Pos	Len	Description
 586	??	Track Data
 
 
-Header v3 [G38]
+Header v3 [G36]
 ------
 000	20	"COME ON MUSIC RECOMPOSER RCP3.0" 00
 020	80	song title
@@ -39,8 +42,8 @@ Header v3 [G38]
 212	06	dummy ??
 218	10	??
 228	70	??
-298	10	GSD file name 1
-2A8	10	GSD file name 2
+298	10	GSD (port A) file name
+2A8	10	GSD (port B) file name
 2B8	10	CM6 file name
 2C8	50	??
 318	80h*10h	Rhythm Definitions
@@ -80,7 +83,7 @@ Track Header [RCP]
 24h bytes - track name
 -> 2Ch bytes
 
-Track Header [G38]
+Track Header [G36]
 ------------
 4 bytes - track length (includes this value)
 1 byte - track ID (1-based)
@@ -100,7 +103,7 @@ Series of events, 4 bytes each, terminated by Track End command (FEh):
 1 byte - note duration/param 1 [p1]
 1 byte - note velocity/param 2 [p2]
 
-Sequence Data [G38]
+Sequence Data [G36]
 -------------
 Series of events, 6 bytes each, terminated by Track End command (FEh):
 1 byte - note height (00h..7Fh) / command ID (80h..FFh)
@@ -125,20 +128,35 @@ Commands
 		83 - initialize Roland checksum calculation
 		84 - put Roland checksum (based on current state)
 C0 - DX7 Function
+	-> results in: F0 43 (10+cc) 08 p1 p2 F7 [cc = current MIDI channel]
 C1 - DX Parameter
+	-> results in: F0 43 (10+cc) 00 p1 p2 F7
 C2 - DX RERF
+	-> results in: F0 43 (10+cc) 04 p1 p2 F7
 C3 - TX Function
+	-> results in: F0 43 (10+cc) 11 p1 p2 F7
 C5 - FB-01 P Parameter
+	-> results in: F0 43 (10+cc) 15 p1 p2 F7
 C6 - FB-01 S System
+	-> results in: F0 43 75 cc 10 p1 p2 F7
 C7 - TX81Z V VCED
+	-> results in: F0 43 (10+cc) 12 p1 p2 F7
 C8 - TX81Z A ACED
+	-> results in: F0 43 (10+cc) 13 p1 p2 F7
 C9 - TX81Z P PCED
+	-> results in: F0 43 (10+cc) 10 p1 p2 F7
 CA - TX81Z S System
+	-> results in: F0 43 (10+cc) 10 7B p1 p2 F7
 CB - TX81Z E EFFECT
+	-> results in: F0 43 (10+cc) 10 7C p1 p2 F7
 CC - DX7-2 R Remote SW
+	-> results in: F0 43 (10+cc) 1B p1 p2 F7
 CD - DX7-2 A ACED
+	-> results in: F0 43 (10+cc) 18 p1 p2 F7
 CE - DX7-2 P PCED
+	-> results in: F0 43 (10+cc) 19 p1 p2 F7
 CF - TX802 P PCED
+	-> results in: F0 43 (10+cc) 1A p1 p2 F7
 D0 - YAMAHA Base Address (p1 = high "yaH", p2 = mid "yaM")
 D1 - YAMAHA Device Data (p1 = Device ID "yDev", p2 = Model ID "yMod")
 D2 - YAMAHA Address / Parameter (p1 = address low "yaL", p2 = parameter "yPar")
@@ -146,6 +164,7 @@ D2 - YAMAHA Address / Parameter (p1 = address low "yaL", p2 = parameter "yPar")
 D3 - YAMAHA XG Address / Parameter (p1 = address low "yaL", p2 = parameter "yPar")
 	-> results in: F0 43 10 4C yaH yaM yaL yPar F7
 DC - MKS-7
+	-> results in: F0 41 32 cc p1 p2 F7 [cc = current MIDI channel]
 DD - Roland Base Address (p1 = high "raH", p2 = mid "raM")
 DE - Roland Parameter (p1 = address low "raL", p2 = parameter "rPar")
 	-> results in: F0 41 rDev rMod 12 raH raM raL rPar [checksum] F7
@@ -165,12 +184,12 @@ EB - Control Change p1, data p2
 EC - Instrument p1
 ED - Note Aftertouch p1/p2
 EE - Pitch Bend (14-bit MIDI format, p1 = low 7 bits, p2 = high 7 bits)
-F5* - Key Signature Change (TODO: what is the parameter?? MDPlay uses the command ID]
+F5* - Key Signature Change (p0 = key signature)
 	Bits 0-2 (07h) - number of flats/sharps
 	Bit   3  (08h) - sharps (0) / flats (1)
 	Bit   4  (10h) - major key (0) / minor key (1)
 F6* [RCP] - Comment (p1/p2 = text characters, continued by F7 events with p1/p2 being used)
-F6* [G38] - Comment (all 5 parameter bytes = text characters, continued by F7 events with all parameters used)
+F6* [G36] - Comment (all 5 parameter bytes = text characters, continued by F7 events with all parameters used)
 F7* - continuation of previous command
 F8* - Loop End (p0 == loop count, 0 = infinite)
 F9* - Loop Start (p0 is always set to 1)
@@ -188,5 +207,95 @@ FC* - repeat previous measure
 FD* - Measure End
 FE* - Track End
 
+* - delay time p0 ignored (seems to apply to all commands F0..FF)
 
-* - delay time p0 ignored
+
+Control Files
+=============
+
+CM6 Format
+----------
+0000	10	"COME ON MUSIC" 00 00 00
+0010	0C	"R CM-64   " 03 00
+0010	0C	"R MT-32   " 00 00
+...
+0040	40	description?
+0080	17	SysEx Data: MT-32 System Area (offset 10 00 00)
+0097	09	MT-32 channel volume settings?
+00A0	90	SysEx Data: MT-32 Patch Temporary Area (offset 03 00 00) [9 channels with 10h bytes each]
+0130	154	SysEx Data: MT-32 Rhythm Setup Temporary Area (offset 03 01 10) [85 drums with 4 bytes each]
+0284	7B0	SysEx Data: MT-32 Timbre Temporary Area (offset 04 00 00) [8 channels with F6h bytes each]
+0A34	400	SysEx Data: MT-32 Patch Memory (offset 05 00 00) [8 channels with 40h bytes each]
+0E34	4000	SysEx Data: MT-32 Timbre Memory (offset 08 00 00) [128 instruments with 100h bytes each]
+4E34	7E	SysEx Data: CM-32P Patch Temporary Area (offset 50 00 00) [6 channels with 15h bytes each]
+4EB2	980	SysEx Data: CM-32P Patch Memory (offset 51 00 00) [128 instruments with 13h bytes each]
+5832	11	SysEx Data: CM-32P System Area (offset 52 00 00)
+5843	06	CM-32P channel volume settings?
+-> 5849h bytes
+
+GSD Format
+----------
+0000	0E	"COME ON MUSIC" 00
+000E	12	"GS CONTROL 1.0" 00 00 00 00
+0020	07	SysEx: System Params (offset 40 00 04)
+0027	07	SysEx: Reverb Params (offset 40 01 30)
+002E	08	SysEx: Chorus Params (offset 40 01 38)
+0036	7A0	Patch Parameters [16 channels with 7Ah bytes each]
+ +00	02	Bank MSB + program number (offset 40 1n 00)
+ +02	01	Rx. Channel (offset 40 1n 02)
+ +03	10	Rx. Pitch Bend
+ +04	10	Rx. Ch. Pressure
+ +05	10	Rx. Program Change
+ +06	10	Rx. Control Change
+ +07	10	Rx. Poly Pressure
+ +08	10	Rx. Note Message
+ +09	10	Rx. RPN
+ +0A	10	Rx. NRPN
+ +0B	10	Rx. Modulation
+ +0C	10	Rx. Volume
+ +0D	10	Rx. Panpot
+ +0E	10	Rx. Expression
+ +0F	10	Rx. Hold 1 (Sustain)
+ +10	10	Rx. Portamento
+ +11	10	Rx. Sostenuto
+ +12	10	Rx. Soft Pedal
+ +13	01	Mono/Poly Mode
+ +14	01	Assign Mode
+ +15	01	Rhythm Part Mode
+ +16	01	Pitch Key Shift
+ +17	02	Pitch Offset Fine
+ +19	01	Part Level
+ +1A	01	Velocity Sense Depth
+ +1B	01	Velocity Sense Offset
+ +1C	01	Part Panpot
+ +1D	01	Key Range Low
+ +1E	01	Key Range High
+ +1F	01	CC1 Controller Number
+ +20	01	CC2 Controller Number
+ +21	01	Chorus Send Depth
+ +22	01	Reverb Send Depth (offset 40 1n 22)
+ +23	08	Tone Modify 1-8 (offset 40 1n 30)
+ +2B	0C	Scale Tuning C to B (offset 40 1n 40)
+ +37	42	Destination Controllers [6 controllers, 0Bh bytes each]
+			0 Modulation (offset 40 2n 00)
+			1 Bend (offset 40 2n 10)
+			2 Ch. Pressure (offset 40 2n 20)
+			3 Poly Pressure (offset 40 2n 30)
+			4 CC1 (offset 40 2n 40)
+			5 CC2 (offset 40 2n 50)
+ +79	01	Voice Reserve
+07D6	298	Drum Setup Parameters [2 drum sets, 14Ch bytes each] (offset 49 n0 00)
+		[82 drum notes, 4 bytes each, use of the 83th entry is unknown]
+ +00	01	Level
+ +01	01	Panpot
+ +02	01	Reverb Send Level
+ +03	01	Chrous Send Level
+0A6E	02	Master Fine Tuning (Little Endian word, 2000 = no detune, 0000 = 1 semitone down, 3FFF = 1 semitone up)
+0A70	01	Master Coarse Tuning (40h = default, 3Fh = 1 semitone down, 41h = 1 semitone up)
+-> A71h bytes
+
+
+Thanks to
+- https://github.com/kuma4649/MDPlayer
+- https://github.com/shingo45endo/rcm2smf
+I used the source code of those tools as a reference, especially for command lists.

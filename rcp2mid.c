@@ -29,21 +29,21 @@
 #include "midi_funcs.h"
 
 
-typedef struct rcp_string
+typedef struct _rcp_string
 {
 	UINT16 maxSize;	// maximum size
 	UINT16 length;	// actual length (after trimming spaces)
 	const char* data;
 } RCP_STR;
 
-typedef struct user_sysex_data
+typedef struct _user_sysex_data
 {
 	RCP_STR name;
 	UINT16 dataLen;
 	const UINT8* data;
 } USER_SYX_DATA;
 
-typedef struct rcp_info
+typedef struct _rcp_info
 {
 	UINT8 fileVer;
 	UINT16 trkCnt;
@@ -62,13 +62,6 @@ typedef struct rcp_info
 	USER_SYX_DATA usrSyx[8];
 } RCP_INFO;
 
-typedef struct running_note
-{
-	UINT8 midChn;
-	UINT8 note;
-	UINT16 remLen;
-} RUN_NOTE;
-
 typedef struct _track_info
 {
 	UINT32 startOfs;
@@ -77,6 +70,11 @@ typedef struct _track_info
 	UINT32 loopTick;
 	//UINT16 loopTimes;
 } TRK_INFO;
+
+
+#define RUNNING_NOTES
+#include "midi_utils.h"
+
 
 #define MCMD_INI_EXCLUDE	0x00	// exclude initial command
 #define MCMD_INI_INCLUDE	0x01	// include initial command
@@ -103,9 +101,7 @@ static void RcpKeySig2Mid(UINT8 buffer[2], UINT8 rcpKeySig);
 static UINT8 val2shift(UINT32 value);
 static UINT16 ProcessRcpSysEx(UINT16 syxMaxLen, const UINT8* syxData, UINT8* syxBuffer,
 								UINT8 param1, UINT8 param2, UINT8 midChn);
-static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay);
 static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay);
-static void FlushRunningNotes(FILE_INF* fInf, MID_TRK_STATE* MTS);
 static UINT16 ReadLE16(const UINT8* data);
 static UINT32 ReadLE32(const UINT8* data);
 
@@ -120,7 +116,7 @@ static UINT32 MidLen;
 static UINT8* MidData;
 
 #define MAX_RUN_NOTES	0x20	// should be more than enough even for the MIDI sequences
-static UINT8 RunNoteCnt;
+static UINT16 RunNoteCnt;
 static RUN_NOTE RunNotes[MAX_RUN_NOTES];
 
 static UINT16 NUM_LOOPS = 2;
@@ -517,7 +513,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	trkEnd = 0;
 	parentPos = 0x00;
 	repMeasure = 0xFFFF;
-	RunNoteCnt = 0x00;
+	RunNoteCnt = 0;
 	MTS->midChn = midChn;
 	MTS->curDly = 0;
 	loopIdx = 0x00;
@@ -553,7 +549,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			UINT8 curNote;
 			UINT8 curRN;
 			
-			CheckRunningNotes(fInf, &MTS->curDly);
+			CheckRunningNotes(fInf, &MTS->curDly, &RunNoteCnt, RunNotes);
 			
 			curNote = (cmdType + transp) & 0x7F;
 			for (curRN = 0; curRN < RunNoteCnt; curRN ++)
@@ -561,7 +557,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 				if (RunNotes[curRN].note == curNote)
 				{
 					// note already playing - set new length
-					RunNotes[curRN].remLen = (UINT16)MTS->curDly + cmdDurat;
+					RunNotes[curRN].remLen = MTS->curDly + cmdDurat;
 					cmdDurat = 0;	// prevent adding note below
 					break;
 				}
@@ -571,13 +567,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			if (cmdDurat > 0 && midiDev != 0xFF)
 			{
 				WriteEvent(fInf, MTS, 0x90, curNote, cmdP2);
-				if (RunNoteCnt < MAX_RUN_NOTES)
-				{
-					RunNotes[RunNoteCnt].midChn = MTS->midChn;
-					RunNotes[RunNoteCnt].note = curNote;
-					RunNotes[RunNoteCnt].remLen = cmdDurat;
-					RunNoteCnt ++;
-				}
+				AddRunningNote(MAX_RUN_NOTES, &RunNoteCnt, RunNotes, MTS->midChn, curNote, 0x80, cmdDurat);
 			}
 		}
 		else switch(cmdType)
@@ -613,21 +603,59 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			}
 			break;
 		//case 0x99:	// "OutsideProcessExec"?? (according to MDPlayer)
-		//case 0xC0:	// DX7 Function
-		//case 0xC1:	// DX Parameter
-		//case 0xC2:	// DX RERF
-		//case 0xC3:	// TX Function
-		//case 0xC5:	// FB-01 P Parameter
-		//case 0xC6:	// FB-01 S System
-		//case 0xC7:	// TX81Z V VCED
-		//case 0xC8:	// TX81Z A ACED
-		//case 0xC9:	// TX81Z P PCED
-		//case 0xCA:	// TX81Z S System
-		//case 0xCB:	// TX81Z E EFFECT
-		//case 0xCC:	// DX7-2 R Remote SW
-		//case 0xCD:	// DX7-2 A ACED
-		//case 0xCE:	// DX7-2 P PCED
-		//case 0xCF:	// TX802 P PCED
+		case 0xC0:	// DX7 Function
+		case 0xC1:	// DX Parameter
+		case 0xC2:	// DX RERF
+		case 0xC3:	// TX Function
+		case 0xC5:	// FB-01 P Parameter
+		case 0xC7:	// TX81Z V VCED
+		case 0xC8:	// TX81Z A ACED
+		case 0xC9:	// TX81Z P PCED
+		case 0xCC:	// DX7-2 R Remote SW
+		case 0xCD:	// DX7-2 A ACED
+		case 0xCE:	// DX7-2 P PCED
+		case 0xCF:	// TX802 P PCED
+			if (midiDev == 0xFF)
+				break;
+			{
+				static const UINT8 DX_PARAM[0x10] = {
+					0x08, 0x00, 0x04, 0x11, 0xFF, 0x15, 0xFF, 0x12,
+					0x13, 0x10, 0xFF, 0xFF, 0x1B, 0x18, 0x19, 0x1A,
+				};
+				tempArr[0] = 0x43;	// YAMAHA ID
+				tempArr[1] = 0x10 | MTS->midChn;
+				tempArr[2] = DX_PARAM[cmdType & 0x0F];
+				tempArr[3] = cmdP1;
+				tempArr[4] = cmdP2;
+				tempArr[5] = 0xF7;
+				WriteLongEvent(fInf, MTS, 0xF0, 6, tempArr);
+			}
+			break;
+		case 0xC6:	// FB-01 S System
+			if (midiDev == 0xFF)
+				break;
+			tempArr[0] = 0x43;	// YAMAHA ID
+			tempArr[1] = 0x75;
+			tempArr[2] = MTS->midChn;
+			tempArr[3] = 0x10;
+			tempArr[4] = cmdP1;
+			tempArr[5] = cmdP2;
+			tempArr[6] = 0xF7;
+			WriteLongEvent(fInf, MTS, 0xF0, 7, tempArr);
+			break;
+		case 0xCA:	// TX81Z S System
+		case 0xCB:	// TX81Z E EFFECT
+			if (midiDev == 0xFF)
+				break;
+			tempArr[0] = 0x43;	// YAMAHA ID
+			tempArr[1] = 0x10 | MTS->midChn;
+			tempArr[2] = 0x10;
+			tempArr[3] = 0x7B + (cmdType - 0xCA);	// command CA -> param = 7B, command CB -> param = 7C
+			tempArr[4] = cmdP1;
+			tempArr[5] = cmdP2;
+			tempArr[6] = 0xF7;
+			WriteLongEvent(fInf, MTS, 0xF0, 7, tempArr);
+			break;
 		case 0xD0:	// YAMAHA Base Address
 			xgParams[2] = cmdP1;
 			xgParams[3] = cmdP2;
@@ -660,7 +688,17 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			tempArr[7] = 0xF7;
 			WriteLongEvent(fInf, MTS, 0xF0, 8, tempArr);
 			break;
-		//case 0xDC:	// MKS-7
+		case 0xDC:	// MKS-7
+			if (midiDev == 0xFF)
+				break;
+			tempArr[0] = 0x41;	// Roland ID
+			tempArr[1] = 0x32;
+			tempArr[2] = MTS->midChn;
+			tempArr[3] = cmdP1;
+			tempArr[4] = cmdP2;
+			tempArr[5] = 0xF7;
+			WriteLongEvent(fInf, MTS, 0xF0, 6, tempArr);
+			break;
 		case 0xDD:	// Roland Base Address
 			gsParams[2] = cmdP1;
 			gsParams[3] = cmdP2;
@@ -1001,6 +1039,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	free(measurePos);
 	if (midiDev == 0xFF)
 		MTS->curDly = 0;
+	FlushRunningNotes(fInf, &MTS->curDly, &RunNoteCnt, RunNotes, 0);
 	
 	*rcpInPos = trkBasePos + trkLen;
 	return 0x00;
@@ -1390,82 +1429,18 @@ static UINT16 ProcessRcpSysEx(UINT16 syxMaxLen, const UINT8* syxData, UINT8* syx
 	return outPos;
 }
 
-static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay)
-{
-	UINT8 curNote;
-	UINT32 tempDly;
-	RUN_NOTE* tempNote;
-	
-	while(RunNoteCnt)
-	{
-		// 1. Check if we're going beyond a note's timeout.
-		tempDly = *delay + 1;
-		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
-		{
-			tempNote = &RunNotes[curNote];
-			if (tempNote->remLen < tempDly)
-				tempDly = tempNote->remLen;
-		}
-		if (tempDly > *delay)
-			break;	// not beyond the timeout - do the event
-		
-		// 2. advance all notes by X ticks
-		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
-			RunNotes[curNote].remLen -= (UINT16)tempDly;
-		(*delay) -= tempDly;
-		
-		// 3. send NoteOff for expired notes
-		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
-		{
-			tempNote = &RunNotes[curNote];
-			if (! tempNote->remLen)	// turn note off, it going beyond the Timeout
-			{
-				WriteMidiValue(fInf, tempDly);
-				tempDly = 0;
-				
-				File_CheckRealloc(fInf, 0x03);
-				fInf->data[fInf->pos + 0x00] = 0x90 | tempNote->midChn;
-				fInf->data[fInf->pos + 0x01] = tempNote->note;
-				fInf->data[fInf->pos + 0x02] = 0x00;
-				fInf->pos += 0x03;
-				
-				RunNoteCnt --;
-				if (RunNoteCnt)
-					*tempNote = RunNotes[RunNoteCnt];
-				curNote --;
-			}
-		}
-	}
-	
-	return;
-}
-
 static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay)
 {
-	CheckRunningNotes(fInf, delay);
+	CheckRunningNotes(fInf, delay, &RunNoteCnt, RunNotes);
 	if (*delay)
 	{
 		UINT8 curNote;
 		
 		for (curNote = 0; curNote < RunNoteCnt; curNote ++)
-			RunNotes[curNote].remLen -= (UINT16)*delay;
+			RunNotes[curNote].remLen -= *delay;
 	}
 	
 	return 0x00;
-}
-
-static void FlushRunningNotes(FILE_INF* fInf, MID_TRK_STATE* MTS)
-{
-	UINT8 curNote;
-	
-	for (curNote = 0; curNote < RunNoteCnt; curNote ++)
-	{
-		if (RunNotes[curNote].remLen > MTS->curDly)
-			MTS->curDly = RunNotes[curNote].remLen;
-	}
-	CheckRunningNotes(fInf, &MTS->curDly);
-	
-	return;
 }
 
 INLINE UINT16 ReadLE16(const UINT8* data)
