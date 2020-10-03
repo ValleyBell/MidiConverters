@@ -98,6 +98,16 @@ typedef struct _cm6_info
 	const UINT8* pcmChnVol;
 } CM6_INFO;
 
+typedef struct _gsd_info
+{
+	const UINT8* sysParams;
+	const UINT8* reverbParams;
+	const UINT8* chorusParams;
+	const UINT8* partParams;
+	const UINT8* drumSetup;
+	const UINT8* masterTune;
+} GSD_INFO;
+
 
 #define RUNNING_NOTES
 #include "midi_utils.h"
@@ -137,14 +147,18 @@ static UINT16 ProcessRcpSysEx(UINT16 syxMaxLen, const UINT8* syxData, UINT8* syx
 								UINT8 param1, UINT8 param2, UINT8 midChn);
 static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay);
 
-static UINT8 ParseCM6File(const FILE_DATA* cm6File, CM6_INFO* cm6Inf);
 static void WriteRolandSyxData(FILE_INF* fInf, MID_TRK_STATE* MTS, const UINT8* syxHdr,
 	UINT32 address, UINT32 len, const UINT8* data, UINT8 opts);
 static void WriteRolandSyxBulk(FILE_INF* fInf, MID_TRK_STATE* MTS, const UINT8* syxHdr,
 	UINT32 address, UINT32 len, const UINT8* data, UINT32 bulkSize, UINT8 opts);
 static void WriteMetaEventFromStr(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 metaType, const char* text);
 static UINT8 Cm62MidTrk(const CM6_INFO* cm6Inf, FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 mode);
-UINT8 Cm62Mid(const FILE_DATA* cm6File, FILE_DATA* midFile, UINT8 mode);
+static UINT8 ParseCM6File(const FILE_DATA* cm6File, CM6_INFO* cm6Inf);
+static UINT8 ParseGSDFile(const FILE_DATA* gsdFile, GSD_INFO* gsdInf);
+static void Bytes2NibblesHL(UINT32 bytes, UINT8* nibData, const UINT8* byteData);
+static void GsdPartParam2BulkDump(UINT8* bulkData, const UINT8* partData);
+static UINT8 Gsd2MidTrk(const GSD_INFO* gsdInf, FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 mode);
+UINT8 Control2Mid(const FILE_DATA* ctrlFile, FILE_DATA* midFile, UINT8 fileType, UINT8 outMode);
 
 INLINE UINT32 MulDivCeil(UINT32 val, UINT32 mul, UINT32 div);
 INLINE UINT32 MulDivRound(UINT32 val, UINT32 mul, UINT32 div);
@@ -153,6 +167,7 @@ INLINE UINT32 ReadLE32(const UINT8* data);
 
 
 static const UINT8 MT32_SYX_HDR[4] = {0x41, 0x10, 0x16, 0x12};
+static const UINT8 SC55_SYX_HDR[4] = {0x41, 0x10, 0x42, 0x12};
 static const UINT8 MT32_PATCH_CHG[0x07] = {0xFF, 0xFF, 0x18, 0x32, 0x0C, 0x00, 0x01};
 
 
@@ -273,10 +288,7 @@ int main(int argc, char* argv[])
 		}
 		else
 		{
-			if (fileType == 0x10)
-				retVal = Cm62Mid(&inFile, &outFile, outMode);
-			//else if (fileType == 0x11)
-			//	retVal = Gsd2Mid(&inFile, &outFile, outMode);
+			retVal = Control2Mid(&inFile, &outFile, fileType, outMode);
 			if (! retVal)
 			{
 				WriteFileData(&outFile, argv[argbase + 1]);
@@ -403,10 +415,10 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 	
 	FILE_DATA cm6FData;
 	CM6_INFO cm6Inf;
-	//FILE_DATA gsd1FData;
-	//GSD_INFO gsd1Inf;
-	//FILE_DATA gsd2FData;
-	//GSD_INFO gsd2Inf;
+	FILE_DATA gsd1FData;
+	GSD_INFO gsd1Inf;
+	FILE_DATA gsd2FData;
+	GSD_INFO gsd2Inf;
 	
 	rcpInf.fileVer = GetFileVer(rcpFile);
 	if (rcpInf.fileVer >= 0x10)
@@ -509,7 +521,7 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 			memcpy(&ctrlFilePath[baseLen], rcpInf.gsdFile1.data, rcpInf.gsdFile1.length);
 			ctrlFilePath[baseLen + rcpInf.gsdFile1.length] = '\0';
 			
-			/*retVal = ReadFileData(&gsd1FData, ctrlFilePath);
+			retVal = ReadFileData(&gsd1FData, ctrlFilePath);
 			if (! retVal)
 			{
 				retVal = ParseGSDFile(&gsd1FData, &gsd1Inf);
@@ -523,17 +535,17 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 					printf("GSD Control file: %.*s\n", rcpInf.gsdFile1.length, rcpInf.gsdFile1.data);
 					ctrlTrkCnt ++;
 				}
-			}*/
+			}
 		}
 		if (rcpInf.gsdFile2.length > 0)
 		{
 			memcpy(&ctrlFilePath[baseLen], rcpInf.gsdFile2.data, rcpInf.gsdFile2.length);
 			ctrlFilePath[baseLen + rcpInf.gsdFile2.length] = '\0';
 			
-			/*retVal = ReadFileData(&cm6FData, ctrlFilePath);
+			retVal = ReadFileData(&gsd2FData, ctrlFilePath);
 			if (! retVal)
 			{
-				retVal = ParseCM6File(&cm6FData, &gsd2Inf);
+				retVal = ParseGSDFile(&gsd2FData, &gsd2Inf);
 				if (retVal)
 				{
 					printf("GSD Control file (Port B): %.*s - Invalid file type\n",
@@ -544,7 +556,7 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 					printf("GSD Control file (Port B): %.*s\n", rcpInf.gsdFile2.length, rcpInf.gsdFile2.data);
 					ctrlTrkCnt ++;
 				}
-			}*/
+			}
 		}
 	}
 	
@@ -617,7 +629,7 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 			
 			WriteRolandSyxData(&midFInf, &MTS, MT32_SYX_HDR, 0x7F0000, 0x00, NULL, 0x00);	// MT-32 Reset
 			// (N ms / 1000 ms) / (tempoTicks / 1 000 000)
-			MTS.curDly += MulDivRound(100, midiTickRes * 1000, midiTempoTicks);	// add delay of ~100 ms
+			MTS.curDly += MulDivRound(400, midiTickRes * 1000, midiTempoTicks);	// add delay of ~400 ms
 			
 			Cm62MidTrk(&cm6Inf, &midFInf, &MTS, 0x11);
 			initDelay += midiTickCount;
@@ -637,7 +649,7 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 				WriteMetaEvent(&midFInf, &MTS, 0x21, 0x01, tempArr);
 			}
 			
-			//Gsd2MidTrk(&cm6Inf, &midFInf, &MTS, 0x11);
+			Gsd2MidTrk(&gsd1Inf, &midFInf, &MTS, 0x11);
 			initDelay += midiTickCount;
 			
 			WriteEvent(&midFInf, &MTS, 0xFF, 0x2F, 0x00);
@@ -652,7 +664,7 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 			tempArr[0x00] = 0x01;	// Port B
 			WriteMetaEvent(&midFInf, &MTS, 0x21, 0x01, tempArr);
 			
-			//Gsd2MidTrk(&cm6Inf, &midFInf, &MTS, 0x11);
+			Gsd2MidTrk(&gsd2Inf, &midFInf, &MTS, 0x11);
 			initDelay += midiTickCount;
 			
 			WriteEvent(&midFInf, &MTS, 0xFF, 0x2F, 0x00);
@@ -1143,10 +1155,9 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			WriteEvent(fInf, MTS, 0xE0, cmdP1, cmdP2);
 			break;
 		case 0xF5:	// Key Signature Change
-			// TODO: find a file that uses this
-			printf("Warning Track %u: Key Signature Change at 0x%04X!\n", trkID, prevPos);
 			RcpKeySig2Mid(tempArr, (UINT8)cmdP0Delay);
 			WriteMetaEvent(fInf, MTS, 0x59, 0x02, tempArr);
+			cmdP0Delay = 0;
 			break;
 		case 0xF6:	// comment
 			{
@@ -1242,58 +1253,77 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			cmdP0Delay = 0;
 			break;
 		case 0xFC:	// repeat previous measure
+			// Behaviour of the FC command:
+			//	- already in "repeating measure" mode: return to parent measure (same as FD)
+			//	- else: follow chain of FC commands
+			//	        i.e. "FC -> FC -> FC -> non-FC command" is a valid sequence that is followed to the end.
+			if (parentPos)
+			{
+				printf("Warning Track %u: Leaving recursive Repeat Measure at 0x%04X!\n", trkID, prevPos);
+				inPos = parentPos;
+				parentPos = 0x00;
+				repMeasure = 0xFFFF;
+			}
+			else
 			{
 				UINT16 measureID;
 				UINT32 repeatPos;
 				UINT32 cachedPos;
 				
 				if (rcpInf->fileVer == 2)
-				{
-					measureID = cmdP0Delay;
-					repeatPos = (cmdP2 << 8) | (cmdP1 << 0);
-				}
+					inPos -= 0x04;
 				else if (rcpInf->fileVer == 3)
+					inPos -= 0x06;
+				do
 				{
-					measureID = cmdP0Delay;
-					// cmdDurat == command ID, I have no idea why the first command has ID 0x30
-					repeatPos = 0x002E + (cmdDurat - 0x0030) * 0x06;
-				}
-				cmdP0Delay = 0;
-				
-				if (BAR_MARKERS)
-				{
-					UINT32 txtLen = sprintf((char*)tempArr, "Repeat Bar %u", 1 + measureID);
-					WriteMetaEvent(fInf, MTS, 0x07, txtLen, tempArr);
-				}
-				
-				if (measureID >= measPosCount)
-				{
-					printf("Warning Track %u: Trying to repeat invalid bar %u (have %u bars) at 0x%04X!\n",
-						trkID, measureID, curBar + 1, prevPos);
-					break;
-				}
-				if (measureID == repMeasure)
-					break;	// prevent recursion (just for safety)
-				
-				cachedPos = measurePos[measureID] - trkBasePos;
-				if (cachedPos != repeatPos)
-					printf("Warning Track %u: Repeat Measure %u: offset mismatch (0x%04X != 0x%04X) at 0x%04X!\n",
-						trkID, measureID, repeatPos, cachedPos, prevPos);
-				
-				if (! parentPos)	// this check was verified to be necessary for some files
-					parentPos = inPos;
-				repMeasure = measureID;
-				if (rcpInf->fileVer == 2)
-				{
+					if (rcpInf->fileVer == 2)
+					{
+						cmdP0Delay = rcpData[inPos + 0x01];
+						cmdP1 = rcpData[inPos + 0x02];
+						cmdP2 = rcpData[inPos + 0x03];
+						measureID = (cmdP0Delay << 0) | ((cmdP1 & 0x03) << 8);
+						repeatPos = ((cmdP1 & ~0x03) << 0) | (cmdP2 << 8);
+						inPos += 0x04;
+					}
+					else if (rcpInf->fileVer == 3)
+					{
+						cmdP0Delay = ReadLE16(&rcpData[inPos + 0x02]);
+						cmdDurat = ReadLE16(&rcpData[inPos + 0x04]);
+						measureID = cmdP0Delay;
+						// I have no idea why the first command has ID 0x30.
+						repeatPos = 0x002E + (cmdDurat - 0x0030) * 0x06;	// calculate offset from command ID
+						inPos += 0x06;
+					}
+					
+					if (BAR_MARKERS)
+					{
+						UINT32 txtLen = sprintf((char*)tempArr, "Repeat Bar %u", 1 + measureID);
+						WriteMetaEvent(fInf, MTS, 0x07, txtLen, tempArr);
+					}
+					
+					if (measureID >= measPosCount)
+					{
+						printf("Warning Track %u: Trying to repeat invalid bar %u (have %u bars) at 0x%04X!\n",
+							trkID, measureID, curBar + 1, prevPos);
+						break;
+					}
+					
+					cachedPos = measurePos[measureID] - trkBasePos;
+					if (cachedPos != repeatPos)
+						printf("Warning Track %u: Repeat Measure %u: offset mismatch (file: 0x%04X != expected 0x%04X) at 0x%04X!\n",
+							trkID, measureID, repeatPos, cachedPos, prevPos);
+					if (trkBasePos + repeatPos == prevPos)
+						break;	// prevent recursion (just for safety)
+					
+					if (! parentPos)	// necessary for following FC command chain
+						parentPos = inPos;
+					repMeasure = measureID;
 					// YS3-25.RCP relies on using the actual offset. (*Some* of its measure numbers are off by 1.)
 					inPos = trkBasePos + repeatPos;
-				}
-				else
-				{
-					// For RCP v3 I'm not 100% that the offset calculation is correct, so I'm using cachedPos here.
-					inPos = trkBasePos + cachedPos;
-				}
+					prevPos = inPos;
+				} while(rcpData[inPos] == 0xFC);
 			}
+			cmdP0Delay = 0;
 			break;
 		case 0xFD:	// measure end
 			if (measPosCount >= 0x8000)	// prevent infinite loops (and seg. fault due to overflow in measPosAlloc)
@@ -1375,7 +1405,6 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 	UINT32 trkEndPos;
 	UINT32 trkLen;
 	UINT32 parentPos;
-	UINT16 repMeasure;
 	UINT16 measPosAlloc;
 	UINT16 measPosCount;
 	UINT32* measurePos;
@@ -1426,7 +1455,6 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 	trkEnd = 0;
 	parentPos = 0x00;
 	loopIdx = 0x00;
-	repMeasure = 0xFFFF;
 	
 	measurePos[measPosCount] = inPos;
 	measPosCount ++;
@@ -1487,20 +1515,50 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 			cmdP0Delay = 0;
 			break;
 		case 0xFC:	// repeat previous measure
+			if (parentPos)
 			{
-				UINT16 measureID = cmdP0Delay;
-				
-				cmdP0Delay = 0;
-				if (measureID >= measPosCount)
-					break;
-				if (measureID == repMeasure)
-					break;	// prevent recursion
-				
-				if (! parentPos)	// this check was verified to be necessary for some files
-					parentPos = inPos;
-				repMeasure = measureID;
-				inPos = measurePos[measureID];
+				inPos = parentPos;
+				parentPos = 0x00;
 			}
+			else
+			{
+				if (rcpInf->fileVer == 2)
+					inPos -= 0x04;
+				else if (rcpInf->fileVer == 3)
+					inPos -= 0x06;
+				do
+				{
+					UINT32 prevPos = inPos;
+					UINT32 repeatPos;
+					UINT16 measureID;
+					
+					if (rcpInf->fileVer == 2)
+					{
+						cmdP0Delay = rcpData[inPos + 0x01];
+						cmdP1 = rcpData[inPos + 0x02];
+						cmdP2 = rcpData[inPos + 0x03];
+						measureID = (cmdP0Delay << 0) | ((cmdP1 & 0x03) << 8);
+						repeatPos = ((cmdP1 & ~0x03) << 0) | (cmdP2 << 8);
+						inPos += 0x04;
+					}
+					else if (rcpInf->fileVer == 3)
+					{
+						measureID = ReadLE16(&rcpData[inPos + 0x02]);
+						repeatPos = 0x002E + (ReadLE16(&rcpData[inPos + 0x04]) - 0x0030) * 0x06;
+						inPos += 0x06;
+					}
+					if (measureID >= measPosCount)
+						break;
+					if (trkBasePos + repeatPos == prevPos)
+						break;	// prevent recursion
+					
+					if (! parentPos)	// necessary for following FC command chain
+						parentPos = inPos;
+					inPos = trkBasePos + repeatPos;
+					prevPos = inPos;
+				} while(rcpData[inPos] == 0xFC);
+			}
+			cmdP0Delay = 0;
 			break;
 		case 0xFD:	// measure end
 			if (measPosCount >= 0x8000)
@@ -1512,7 +1570,6 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 			{
 				inPos = parentPos;
 				parentPos = 0x00;
-				repMeasure = 0xFFFF;
 			}
 			if (measPosCount >= measPosAlloc)
 			{
@@ -1542,6 +1599,9 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 				trkInf->loopTick = loopTick[loopIdx];
 			}
 			break;
+		default:
+			if (cmdType >= 0xF0)
+				cmdP0Delay = 0;
 		}	// end switch(cmdType)
 		
 		trkInf->tickCnt += cmdP0Delay;
@@ -1782,33 +1842,6 @@ static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay)
 }
 
 
-static UINT8 ParseCM6File(const FILE_DATA* cm6File, CM6_INFO* cm6Inf)
-{
-	UINT8 fileVer;
-	
-	fileVer = GetFileVer(cm6File);
-	if (fileVer != 0x10)
-		return 0xFF;
-	if (cm6File->len < 0x5849)
-		return 0xF8;	// file too small
-	
-	cm6Inf->deviceType = cm6File->data[0x001A];
-	ReadRcpStr(&cm6Inf->comment, 0x40, &cm6File->data[0x0040]);
-	cm6Inf->laSystem = &cm6File->data[0x0080];
-	cm6Inf->laChnVol = &cm6File->data[0x0097];
-	cm6Inf->laPatchTemp = &cm6File->data[0x00A0];
-	cm6Inf->laRhythmTemp = &cm6File->data[0x0130];
-	cm6Inf->laTimbreTemp = &cm6File->data[0x0284];
-	cm6Inf->laPatchMem = &cm6File->data[0x0A34];
-	cm6Inf->laTimbreMem = &cm6File->data[0x0E34];
-	cm6Inf->pcmPatchTemp = &cm6File->data[0x4E34];
-	cm6Inf->pcmPatchMem = &cm6File->data[0x4EB2];
-	cm6Inf->pcmSystem = &cm6File->data[0x5832];
-	cm6Inf->pcmChnVol = &cm6File->data[0x5843];
-	
-	return 0x00;
-}
-
 static void WriteRolandSyxData(FILE_INF* fInf, MID_TRK_STATE* MTS, const UINT8* syxHdr,
 	UINT32 address, UINT32 len, const UINT8* data, UINT8 opts)
 {
@@ -1891,6 +1924,33 @@ static void WriteMetaEventFromStr(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 meta
 	return;
 }
 
+static UINT8 ParseCM6File(const FILE_DATA* cm6File, CM6_INFO* cm6Inf)
+{
+	UINT8 fileVer;
+	
+	fileVer = GetFileVer(cm6File);
+	if (fileVer != 0x10)
+		return 0xFF;
+	if (cm6File->len < 0x5849)
+		return 0xF8;	// file too small
+	
+	cm6Inf->deviceType = cm6File->data[0x001A];
+	ReadRcpStr(&cm6Inf->comment, 0x40, &cm6File->data[0x0040]);
+	cm6Inf->laSystem = &cm6File->data[0x0080];
+	cm6Inf->laChnVol = &cm6File->data[0x0097];
+	cm6Inf->laPatchTemp = &cm6File->data[0x00A0];
+	cm6Inf->laRhythmTemp = &cm6File->data[0x0130];
+	cm6Inf->laTimbreTemp = &cm6File->data[0x0284];
+	cm6Inf->laPatchMem = &cm6File->data[0x0A34];
+	cm6Inf->laTimbreMem = &cm6File->data[0x0E34];
+	cm6Inf->pcmPatchTemp = &cm6File->data[0x4E34];
+	cm6Inf->pcmPatchMem = &cm6File->data[0x4EB2];
+	cm6Inf->pcmSystem = &cm6File->data[0x5832];
+	cm6Inf->pcmChnVol = &cm6File->data[0x5843];
+	
+	return 0x00;
+}
+
 static UINT8 Cm62MidTrk(const CM6_INFO* cm6Inf, FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 mode)
 {
 	if (mode & 0x01)	// MIDI mode: convert file comment
@@ -1931,23 +1991,204 @@ static UINT8 Cm62MidTrk(const CM6_INFO* cm6Inf, FILE_INF* fInf, MID_TRK_STATE* M
 	return 0x00;
 }
 
-UINT8 Cm62Mid(const FILE_DATA* cm6File, FILE_DATA* midFile, UINT8 mode)
+static UINT8 ParseGSDFile(const FILE_DATA* gsdFile, GSD_INFO* gsdInf)
+{
+	UINT8 fileVer;
+	
+	fileVer = GetFileVer(gsdFile);
+	if (fileVer != 0x11)
+		return 0xFF;
+	if (gsdFile->len < 0xA71)
+		return 0xF8;	// file too small
+	
+	gsdInf->sysParams = &gsdFile->data[0x0020];
+	gsdInf->reverbParams = &gsdFile->data[0x0027];
+	gsdInf->chorusParams = &gsdFile->data[0x002E];
+	gsdInf->partParams = &gsdFile->data[0x0036];
+	gsdInf->drumSetup = &gsdFile->data[0x07D6];
+	gsdInf->masterTune = &gsdFile->data[0x0A6E];
+	
+	return 0x00;
+}
+
+// nibbilize, high-low order
+static void Bytes2NibblesHL(UINT32 bytes, UINT8* nibData, const UINT8* byteData)
+{
+	UINT32 curPos;
+	
+	for (curPos = 0x00; curPos < bytes; curPos ++)
+	{
+		nibData[curPos * 2 + 0] = (byteData[curPos] >> 4) & 0x0F;
+		nibData[curPos * 2 + 1] = (byteData[curPos] >> 0) & 0x0F;
+	}
+	
+	return;
+}
+
+static void GsdPartParam2BulkDump(UINT8* bulkData, const UINT8* partData)
+{
+	UINT8 partMem[0x70];
+	UINT8 curPos;
+	UINT8 curCtrl;
+	
+	partMem[0x00] = partData[0x00];	// Bank MSB
+	partMem[0x01] = partData[0x01];	// tone number
+	
+	// Rx. Pitch Bend/Ch. Pressure/Program Change/Control Change/Poly Pressure/Note Message/RPN/NRPN
+	partMem[0x02] = 0x00;
+	for (curPos = 0; curPos < 8; curPos ++)
+		partMem[0x02] |= (partData[0x03 + curPos] & 0x01) << (7 - curPos);
+	// Rx. Modulation/Volume/Panpot/Expression/Hold 1 (Sustain)/Portamento/SostenutoSoft Pedal
+	partMem[0x03] = 0x00;
+	for (curPos = 0; curPos < 8; curPos ++)
+		partMem[0x03] |= (partData[0x0B + curPos] & 0x01) << (7 - curPos);
+	partMem[0x04] = partData[0x02];	// Rx. Channel
+	
+	partMem[0x05] = (partData[0x13] & 0x01) << 7;	// Mono/Poly Mode
+	partMem[0x05] |= ((partData[0x15] & 0x03) << 5) | (partData[0x15] ? 0x10 : 0x00);	// Rhythm Part Mode
+	partMem[0x05] |= (partData[0x14] & 0x03) << 0;	// Assign Mode
+	
+	partMem[0x06] = partData[0x16];	// Pitch Key Shift
+	partMem[0x07] = ((partData[0x17] & 0x0F) << 4) | ((partData[0x18] & 0x0F) << 0);	// Pitch Offset Fine
+	partMem[0x08] = partData[0x19];	// Part Level
+	partMem[0x09] = partData[0x1C];	// Part Panpot
+	partMem[0x0A] = partData[0x1B];	// Velocity Sense Offset
+	partMem[0x0B] = partData[0x1A];	// Velocity Sense Depth
+	partMem[0x0C] = partData[0x1D];	// Key Range Low
+	partMem[0x0D] = partData[0x1E];	// Key Range High
+	
+	// Chorus Send Depth/Reverb Send Depth/Tone Modify 1-8
+	for (curPos = 0x00; curPos < 0x0A; curPos ++)
+		partMem[0x0E + curPos] = partData[0x21 + curPos];
+	partMem[0x18] = 0x00;
+	partMem[0x19] = 0x00;
+	// Scale Tuning C to B
+	for (curPos = 0x00; curPos < 0x0C; curPos ++)
+		partMem[0x1A + curPos] = partData[0x2B + curPos];
+	partMem[0x26] = partData[0x1F];	// CC1 Controller Number
+	partMem[0x27] = partData[0x20];	// CC2 Controller Number
+	
+	// Destination Controllers
+	for (curCtrl = 0; curCtrl < 6; curCtrl ++)
+	{
+		UINT8 srcPos = 0x37 + curCtrl * 0x0B;
+		UINT8 dstPos = 0x28 + curCtrl * 0x0C;
+		for (curPos = 0x00; curPos < 0x03; curPos ++)
+			partMem[dstPos + 0x00 + curPos] = partData[srcPos + 0x00 + curPos];
+		partMem[dstPos + 0x03] = (curCtrl == 2 || curCtrl == 3) ? 0x40 : 0x00;	// verified with Recomposer 3.0 PC-98
+		for (curPos = 0x00; curPos < 0x08; curPos ++)
+			partMem[dstPos + 0x04 + curPos] = partData[srcPos + 0x03 + curPos];
+	}
+	
+	Bytes2NibblesHL(0x70, bulkData, partMem);
+	return;
+}
+
+static UINT8 Gsd2MidTrk(const GSD_INFO* gsdInf, FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 mode)
+{
+	static const UINT8 PART2CHN[0x10] =
+		{0x09, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F};
+	static const UINT8 CHN2PART[0x10] =
+		{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x00, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F};
+	UINT8 voiceRes[0x10];
+	UINT8 bulkBuffer[0x100];
+	UINT8 curChn;
+	
+	// The order follows how Recomposer 3.0 sends the data.
+	if (mode & 0x10)
+		WriteMetaEventFromStr(fInf, MTS, 0x01, "SC-55 Common Settings");
+	// Recomposer 3.0 sends Master Volume (40 00 04), Key-Shift (40 00 06) and Pan (via GM SysEx) separately,
+	// but doing a bulk-dump works just fine on SC-55/88.
+	WriteRolandSyxData(fInf, MTS, SC55_SYX_HDR, 0x400000, 0x07, gsdInf->sysParams, SYXOPT_DELAY);
+	
+	for (curChn = 0x00; curChn < 0x10; curChn ++)
+		voiceRes[curChn] = gsdInf->partParams[PART2CHN[curChn] * 0x7A + 0x79];
+	if (mode & 0x10)
+		WriteMetaEventFromStr(fInf, MTS, 0x01, "SC-55 Voice Reserve");
+	WriteRolandSyxData(fInf, MTS, SC55_SYX_HDR, 0x400110, 0x10, voiceRes, SYXOPT_DELAY);
+	
+	if (mode & 0x10)
+		WriteMetaEventFromStr(fInf, MTS, 0x01, "SC-55 Reverb Settings");
+	WriteRolandSyxData(fInf, MTS, SC55_SYX_HDR, 0x400130, 0x07, gsdInf->reverbParams, SYXOPT_DELAY);
+	
+	if (mode & 0x10)
+		WriteMetaEventFromStr(fInf, MTS, 0x01, "SC-55 Chorus Settings");
+	WriteRolandSyxData(fInf, MTS, SC55_SYX_HDR, 0x400138, 0x08, gsdInf->chorusParams, SYXOPT_DELAY);
+	
+	if (mode & 0x10)
+		WriteMetaEventFromStr(fInf, MTS, 0x01, "SC-55 Part Settings");
+	for (curChn = 0x00; curChn < 0x10; curChn ++)
+	{
+		UINT32 addrOfs = 0x90 + CHN2PART[curChn] * 0xE0;
+		UINT32 syxAddr = ((addrOfs & 0x007F) << 0) | ((addrOfs & 0x3F80) << 1);
+		GsdPartParam2BulkDump(bulkBuffer, &gsdInf->partParams[curChn * 0x7A]);
+		WriteRolandSyxBulk(fInf, MTS, SC55_SYX_HDR, 0x480000 | syxAddr, 0xE0, bulkBuffer, 0x80, SYXOPT_DELAY);
+	}
+	
+	if (mode & 0x10)
+		WriteMetaEventFromStr(fInf, MTS, 0x01, "SC-55 Drum Setup");
+	for (curChn = 0; curChn < 2; curChn ++)	// 2 drum maps
+	{
+		// drum level, pan, reverb, chorus
+		static const UINT8 DRMPAR_ADDR[4] = {0x02, 0x06, 0x08, 0x0A};
+		const UINT8* drmPtr = &gsdInf->drumSetup[curChn * 0x014C];
+		UINT8 curNote;
+		UINT8 curParam;
+		UINT8 paramBuf[0x80];
+		
+		for (curParam = 0; curParam < 4; curParam ++)
+		{
+			UINT32 syxAddr = (curChn << 12) | (DRMPAR_ADDR[curParam] << 8);
+			
+			memset(paramBuf, 0x00, 0x80);
+			for (curNote = 0x00; curNote < 82; curNote ++)
+				paramBuf[27 + curNote] = drmPtr[curNote * 4 + curParam];
+			Bytes2NibblesHL(0x80, bulkBuffer, paramBuf);
+			WriteRolandSyxBulk(fInf, MTS, SC55_SYX_HDR, 0x490000 | syxAddr, 0x100, bulkBuffer, 0x80, SYXOPT_DELAY);
+		}
+	}
+	
+	// Recomposer 3.0 doesn't seem to send SysEx for the additional Master Tuning settings.
+	//gsdInf->masterTune;
+	
+	if (mode & 0x10)
+		WriteMetaEventFromStr(fInf, MTS, 0x01, "Setup Finished.");
+	
+	return 0x00;
+}
+
+UINT8 Control2Mid(const FILE_DATA* ctrlFile, FILE_DATA* midFile, UINT8 fileType, UINT8 outMode)
 {
 	UINT8 retVal;
 	FILE_INF midFInf;
 	MID_TRK_STATE MTS;
 	CM6_INFO cm6Inf;
+	GSD_INFO gsdInf;
 	
-	retVal = ParseCM6File(cm6File, &cm6Inf);
-	if (retVal)
-		return retVal;
-	printf("CM6 Control File, %s mode\n", cm6Inf.deviceType ? "CM-64" : "MT-32");
+	if (fileType == 0x10)
+	{
+		retVal = ParseCM6File(ctrlFile, &cm6Inf);
+		if (retVal)
+			return retVal;
+		printf("CM6 Control File, %s mode\n", cm6Inf.deviceType ? "CM-64" : "MT-32");
+	}
+	else if (fileType == 0x11)
+	{
+		retVal = ParseGSDFile(ctrlFile, &gsdInf);
+		if (retVal)
+			return retVal;
+		printf("GSD Control File\n");
+	}
+	else
+	{
+		return 0xFF;
+	}
 	
 	midFInf.alloc = 0x10000;	// 64 KB should be enough
 	midFInf.data = (UINT8*)malloc(midFInf.alloc);
 	midFInf.pos = 0x00;
 	
-	if (mode & 0x01)	// MIDI mode
+	if (outMode & 0x01)	// MIDI mode
 	{
 		midiTickRes = 48;
 		WriteMidiHeader(&midFInf, 0x0001, 1, midiTickRes);
@@ -1955,14 +2196,20 @@ UINT8 Cm62Mid(const FILE_DATA* cm6File, FILE_DATA* midFile, UINT8 mode)
 		WriteMidiTrackStart(&midFInf, &MTS);
 		midiTickCount = 0;
 		
-		retVal = Cm62MidTrk(&cm6Inf, &midFInf, &MTS, mode);
+		if (fileType == 0x10)
+			retVal = Cm62MidTrk(&cm6Inf, &midFInf, &MTS, outMode);
+		else
+			retVal = Gsd2MidTrk(&gsdInf, &midFInf, &MTS, outMode);
 		
 		WriteEvent(&midFInf, &MTS, 0xFF, 0x2F, 0x00);
 		WriteMidiTrackEnd(&midFInf, &MTS);
 	}
 	else
 	{
-		retVal = Cm62MidTrk(&cm6Inf, &midFInf, NULL, mode);
+		if (fileType == 0x10)
+			retVal = Cm62MidTrk(&cm6Inf, &midFInf, NULL, outMode);
+		else
+			retVal = Gsd2MidTrk(&gsdInf, &midFInf, NULL, outMode);
 	}
 	
 	midFile->data = midFInf.data;

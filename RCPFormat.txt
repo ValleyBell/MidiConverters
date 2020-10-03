@@ -237,28 +237,33 @@ GSD Format
 ----------
 0000	0E	"COME ON MUSIC" 00
 000E	12	"GS CONTROL 1.0" 00 00 00 00
-0020	07	SysEx: System Params (offset 40 00 04)
+0020	07	SysEx: System Params (offset 40 00 00)
+ +00	04	Master Tune
+ +04	01	Master Volume
+ +05	01	Master Key-Shift
+ +06	01	Master Pan
 0027	07	SysEx: Reverb Params (offset 40 01 30)
 002E	08	SysEx: Chorus Params (offset 40 01 38)
 0036	7A0	Patch Parameters [16 channels with 7Ah bytes each]
+		The data is sorted by MIDI channel. (*not* SC-55 part ID, those begin with the drum channel)
  +00	02	Bank MSB + program number (offset 40 1n 00)
  +02	01	Rx. Channel (offset 40 1n 02)
- +03	10	Rx. Pitch Bend
- +04	10	Rx. Ch. Pressure
- +05	10	Rx. Program Change
- +06	10	Rx. Control Change
- +07	10	Rx. Poly Pressure
- +08	10	Rx. Note Message
- +09	10	Rx. RPN
- +0A	10	Rx. NRPN
- +0B	10	Rx. Modulation
- +0C	10	Rx. Volume
- +0D	10	Rx. Panpot
+ +03	01	Rx. Pitch Bend
+ +04	01	Rx. Ch. Pressure
+ +05	01	Rx. Program Change
+ +06	01	Rx. Control Change
+ +07	01	Rx. Poly Pressure
+ +08	01	Rx. Note Message
+ +09	01	Rx. RPN
+ +0A	01	Rx. NRPN
+ +0B	01	Rx. Modulation
+ +0C	01	Rx. Volume
+ +0D	01	Rx. Panpot
  +0E	10	Rx. Expression
- +0F	10	Rx. Hold 1 (Sustain)
- +10	10	Rx. Portamento
- +11	10	Rx. Sostenuto
- +12	10	Rx. Soft Pedal
+ +0F	01	Rx. Hold 1 (Sustain)
+ +10	01	Rx. Portamento
+ +11	01	Rx. Sostenuto
+ +12	01	Rx. Soft Pedal
  +13	01	Mono/Poly Mode
  +14	01	Assign Mode
  +15	01	Rhythm Part Mode
@@ -285,7 +290,7 @@ GSD Format
 			5 CC2 (offset 40 2n 50)
  +79	01	Voice Reserve
 07D6	298	Drum Setup Parameters [2 drum sets, 14Ch bytes each] (offset 49 n0 00)
-		[82 drum notes, 4 bytes each, use of the 83th entry is unknown]
+		[82 drum notes (notes 27..108), 4 bytes each, use of the 83th entry is unknown]
  +00	01	Level
  +01	01	Panpot
  +02	01	Reverb Send Level
