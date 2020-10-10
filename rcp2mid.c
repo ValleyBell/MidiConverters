@@ -743,7 +743,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	UINT8 midiDev;
 	UINT8 midChn;
 	UINT8 transp;
-	INT8 startTick;
+	INT32 startTick;
 	UINT8 trkMute;
 	UINT8 tempArr[0x40];
 	RCP_STR trkName;
@@ -817,12 +817,18 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	MTS->curDly = 0;	// enforce tick 0 for track main events
 	if (trkName.length > 0)
 		WriteMetaEvent(fInf, MTS, 0x03, trkName.length, trkName.data);
+	if (trkMute && ! KEEP_DUMMY_CH)
+	{
+		// just ignore muted tracks
+		*rcpInPos = trkBasePos + trkLen;
+		return 0x00;
+	}
 	if (midiDev != 0xFF)
 	{
 		WriteMetaEvent(fInf, MTS, 0x21, 1, &midiDev);	// Meta Event: MIDI Port Prefix
 		WriteMetaEvent(fInf, MTS, 0x20, 1, &midChn);	// Meta Event: MIDI Channel Prefix
 	}
-	if (rhythmMode != 0)
+	if (rhythmMode > 0x80)
 		printf("Warning Track %u: Rhythm Mode %u!\n", trkID, rhythmMode);
 	if (transp > 0x80)
 	{
@@ -830,8 +836,6 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 		printf("Warning Track %u: Key 0x%02X!\n", trkID, transp);
 		transp = 0x00;
 	}
-	if (startTick != 0)
-		printf("Warning Track %u: Start Tick %+d!\n", trkID, startTick);
 	MTS->curDly = parentPos;
 	
 	measPosAlloc = 0x100;
@@ -847,9 +851,20 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	repMeasure = 0xFFFF;
 	RunNoteCnt = 0;
 	MTS->midChn = midChn;
-	//MTS->curDly = 0;	// initialized by caller
 	loopIdx = 0x00;
 	curBar = 0;
+	
+	// add "startTick" offset to initial delay
+	if (startTick >= 0 || -startTick <= (INT32)MTS->curDly)
+	{
+		MTS->curDly += startTick;
+		startTick = 0;
+	}
+	else
+	{
+		startTick += MTS->curDly;
+		MTS->curDly = 0;
+	}
 	
 	measurePos[measPosCount] = inPos;
 	measPosCount ++;
@@ -911,6 +926,12 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			{
 				const USER_SYX_DATA* usrSyx = &rcpInf->usrSyx[cmdType & 0x07];
 				UINT16 syxLen = ProcessRcpSysEx(usrSyx->dataLen, usrSyx->data, tempArr, cmdP1, cmdP2, midChn);
+				// append F7 byte (may be missing with UserSysEx of length 0x18)
+				if (syxLen > 0 && tempArr[syxLen - 1] != 0xF7)
+				{
+					tempArr[syxLen] = 0xF7;
+					syxLen ++;
+				}
 				//WriteMetaEvent(fInf, MTS, 0x01, usrSyx->name.length, usrSyx->name.data);
 				WriteLongEvent(fInf, MTS, 0xF0, syxLen, tempArr);
 			}
@@ -1107,12 +1128,9 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 				
 				if (cmdP2)
 					printf("Warning Track %u: Interpolated Tempo Change at 0x%04X!\n", trkID, prevPos);
-				tempoVal = (UINT32)(60000000.0 / (rcpInf->tempoBPM * cmdP1 / 64.0) + 0.5);
-				// TODO: use WriteBE32
-				tempArr[0] = (tempoVal >> 16) & 0xFF;
-				tempArr[1] = (tempoVal >>  8) & 0xFF;
-				tempArr[2] = (tempoVal >>  0) & 0xFF;
-				WriteMetaEvent(fInf, MTS, 0x51, 0x03, tempArr);
+				tempoVal = Tempo2Mid(rcpInf->tempoBPM, cmdP1);
+				WriteBE32(tempArr, tempoVal);
+				WriteMetaEvent(fInf, MTS, 0x51, 0x03, &tempArr[0x01]);
 			}
 			break;
 		case 0xEA:	// Channel Aftertouch
@@ -1386,6 +1404,21 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			break;
 		}	// end if (cmdType >= 0x80) / switch(cmdType)
 		MTS->curDly += cmdP0Delay;
+		
+		// remove ticks from curDly from all events until startTicks reaches 0
+		if (startTick < 0 && MTS->curDly > 0)
+		{
+			startTick += MTS->curDly;
+			if (startTick >= 0)
+			{
+				MTS->curDly = startTick;
+				startTick = 0;
+			}
+			else
+			{
+				MTS->curDly = 0;
+			}
+		}
 	}	// end while(! trkEnd)
 	free(txtBuffer);
 	free(measurePos);

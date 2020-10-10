@@ -78,7 +78,7 @@ Track Header [RCP]
 1 byte - rhythm mode (0x00 - off, 0x80 - on, others undefined/fall back to off?)
 1 byte - MIDI channel (0xFF = null device, 0x00..0x0F = port A ch 0..15, 0x10..0x1F = port B ch 0..15)
 1 byte - "key" (transposition, 0 = no transposition, 0x0C = +1 octave, 0x74 = -1 octave, 0x80 = special)
-1 byte - "St" (start tick? / some tick offset?)
+1 byte - tick offset (signed 8-bit, moves all events by X ticks)
 1 byte - Mute (0x00 == off, 0x01 == on, others undefined/fall back to off?)
 24h bytes - track name
 -> 2Ch bytes
@@ -90,7 +90,7 @@ Track Header [G36]
 1 byte - rhythm mode (0x80 - on, 0x00 - off)
 1 byte - MIDI channel (0xFF = null device, 0x00..0x0F = port A ch 0..15, 0x10..0x1F = port B ch 0..15)
 1 byte - "key" (key signature or transposition??)
-1 byte - "St" (start tick? / some tick offset?)
+1 byte - tick offset (signed 8-bit, moves all events by X ticks)
 1 byte - Mute (0x00 == off, 0x01 == on, others undefined/fall back to off?)
 24h bytes - track name
 -> 2Eh bytes
