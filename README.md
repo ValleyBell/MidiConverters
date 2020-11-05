@@ -198,6 +198,13 @@ Unfortunately you need to choose the driver version at compile time by setting `
 I initially wrote the tool to convert songs from Sonic Pocket Adventure. It was written based on a disassembly of its sound driver. (There's no way I could reverse-engineer a format that is based on a bitstream just by looking at bytes in a hex editor.)
 Later I disassembled the NGP BIOS sound driver as well. It turned out to have a few major differences, so I added support for its version of the format.
 
+## nwc12mid
+This tool converts songs from New World Computing's early DOS games to MIDI.
+
+This is another tool that lordskylark requested.
+
+The tool is confirmed to work with songs extracted from the MS-DOS games "Might and Magic III" and "Planet's Edge".
+
 ## pmd2mid
 This tool converts P.M.D. songs to MIDI.
 
