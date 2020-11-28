@@ -134,8 +134,10 @@ Note Mode 3:
 97 aa bb cc - ??
 98 ll mm - set Song Tempo in BPM (value mmll, clamped to 300)
 9A ss ii - Tempo Modifier
-	ss = tempo scale (0x20 = 50%, 0x40 = 100%, 0x80 = 200%)
-	ii = interpolation?
+	ss = tempo scale (0x20 = 50%, 0x40 = 100%, 0x80 = 200%, Note: value 0x00 is internally mapped to 0x100 = 400%)
+	tt = tempo slide ticks
+		When tt = 0, the tempo is changed instantly.
+		When tt > 0, the tempo is changed by 1 BPM every tt ticks until the destination tempo is reached.
 9C ii - silence channel, then set Instrument ii
 	Silencing is done by:
 		- sending Sustain Pedal Off (controller 64, data 0)

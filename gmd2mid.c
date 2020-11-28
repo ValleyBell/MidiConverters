@@ -75,7 +75,7 @@ typedef struct _track_info
 static UINT8 WriteFileData(UINT32 DataLen, const UINT8* Data, const char* FileName);
 
 static void ReadGMDChunk(UINT32 songLen, const UINT8* songData, GMD_CHUNK* gmdChk, UINT32* pos);
-static const char* strnchr(const char* str, int ch, size_t n);
+static UINT32 GetSongTitleLen(UINT32 txtLen, const char* txtData);
 UINT8 Gmd2Mid(UINT32 songLen, const UINT8* songData);
 static void WriteRPN(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8* rpnCache,
 	UINT8 mode, UINT8 msb, UINT8 lsb, UINT8 value);
@@ -83,7 +83,7 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 							TRK_INF* trkInf, FILE_INF* fInf, MID_TRK_STATE* MTS);
 static UINT8 PreparseGmdTrack(UINT32 songLen, const UINT8* songData, const GMD_INFO* gmdInf, TRK_INF* trkInf);
 static void WritePitchBend(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT16 pbBase, INT16 pbDetune);
-INLINE UINT32 Tempo2Mid(UINT16 bpm, UINT8 scale);
+INLINE UINT32 Tempo2Mid(UINT16 bpm, UINT16 scale);
 INLINE void RcpTimeSig2Mid(UINT8 buffer[4], UINT8 beatNum, UINT8 beatDen);
 static UINT8 val2shift(UINT32 value);
 static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay);
@@ -237,16 +237,26 @@ static void ReadGMDChunk(UINT32 songLen, const UINT8* songData, GMD_CHUNK* gmdCh
 	return;
 }
 
-static const char* strnchr(const char* str, int ch, size_t n)
+static UINT32 GetSongTitleLen(UINT32 txtLen, const char* txtData)
 {
-	while(n > 0)
+	// Step 1: get "real" End-Of-String (first '\0' character OR buffer end)
+	// Note: The buffer size is aligned to 2-byte words and includes the
+	//       terminating \0. If that results in an odd buffer size, it is
+	//       padded with garbage data.
+	const char* txtEnd = (const char*)memchr(txtData, '\0', txtLen);
+	if (txtEnd == NULL)
+		txtEnd = txtData + txtLen;
+	
+	// Step 2: trim off trailing spaces
+	// needed by hinadori_98
+	while(txtEnd > txtData)
 	{
-		n --;
-		if (*str == ch)
-			return str;
-		str ++;
+		if (txtEnd[-1] != ' ')
+			break;
+		txtEnd --;
 	}
-	return NULL;
+	
+	return (UINT32)(txtEnd - txtData);
 }
 
 UINT8 Gmd2Mid(UINT32 songLen, const UINT8* songData)
@@ -322,12 +332,11 @@ UINT8 Gmd2Mid(UINT32 songLen, const UINT8* songData)
 		
 		if (curTrk == 0)
 		{
+			// first track: write global song information
 			if (gmdInf.songTitle.itemCnt >= 2)	// 2 bytes are part of the chunk header
 			{
-				UINT32 bufLen = gmdInf.songTitle.itemCnt - 2;
 				const char* title = (const char*)gmdInf.songTitle.data;
-				const char* tEnd = strnchr(title, '\0', bufLen);
-				UINT32 tLen = (tEnd != NULL) ? (tEnd - title) : bufLen;
+				UINT32 tLen = GetSongTitleLen(gmdInf.songTitle.itemCnt - 2, title);
 				WriteMetaEvent(&midFInf, &MTS, 0x03, tLen, title);
 			}
 			
@@ -419,6 +428,7 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 	UINT32 trkEndPos;
 	UINT32 trkLen;
 	UINT32 parentPos;
+	UINT32 trkTick;
 	UINT8 trkID;
 	UINT8 chnMode;
 	UINT8 noteMode;
@@ -445,7 +455,8 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 	UINT8* syxBuffer;
 	UINT8 rpnCache[4];
 	UINT16 songTempo;
-	UINT8 tempoMod;
+	UINT16 curTempo;
+	UINT16 curTempoMod;
 	UINT8 noteLenMul;
 	UINT8 noteLenSub;
 	INT16 trkDetune;
@@ -454,6 +465,11 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 	UINT8 swModEnable;
 	UINT8 swModDelay;
 	INT16 swModStrength;
+	UINT16 destTempo;
+	UINT16 destTempoMod;
+	UINT32 tempoSldNextTick;
+	UINT8 tempoSldStpSize;
+	INT8 tempoSldDir;
 	
 	if (trkInf->startOfs >= songLen)
 		return 0x01;
@@ -493,7 +509,8 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 	MTS->midChn = 0x00;
 	MTS->curDly = startTick;
 	songTempo = gmdInf->tempoBPM;
-	tempoMod = 0x40;
+	curTempoMod = 0x40;
+	curTempo = songTempo;
 	noteVel = 100;	// confirmed via driver disassembly
 	noteVelAcc = 6;
 	chnVol = 100;	// confirmed via driver disassembly
@@ -512,10 +529,58 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 	susPedState = 0x00;
 	loopIdx = 0x00;
 	curBar = 0;
+	tempoSldStpSize = 0;
+	tempoSldNextTick = (UINT32)-1;
+	tempoSldDir = 0;
+	destTempoMod = curTempoMod;
+	destTempo = curTempo;
 	
+	trkTick = MTS->curDly;
 	while(inPos < trkEndPos && ! trkEnd)
 	{
 		UINT32 prevPos = inPos;
+		
+		if (tempoSldStpSize > 0)
+		{
+			// handle tempo slides
+			// used by hinadori_98/MD2_55_21.DAT
+			while(trkTick >= tempoSldNextTick && tempoSldDir != 0)
+			{
+				UINT32 tempoVal;
+				UINT8 tempArr[4];
+				UINT32 tempDly;
+				
+				tempDly = trkTick - tempoSldNextTick;
+				MTS->curDly -= tempDly;
+				
+				// tempo slide algorithm according to sound driver disassembly
+				// After applying increment/decrement, the driver actually does some
+				// clamping that is omitted here.
+				// The lower limit is 17 BPM, the upper limit is 300 BPM (CSCP) / 340 BPM (SSCP).
+				curTempo += tempoSldDir;
+				tempoSldNextTick += tempoSldStpSize;
+				if (curTempo == destTempo)
+				{
+					tempoSldStpSize = 0;
+					tempoSldNextTick = (UINT32)-1;
+					tempoSldDir = 0;
+					curTempoMod = destTempoMod;
+				}
+				
+				tempoVal = Tempo2Mid(curTempo, 0x40);
+				if (curTempo == destTempo && ! DRIVER_BUGS)
+				{
+					// Try to get a slightly more accurate "end" tempo by
+					// recalculating it using the Tempo Modifier value.
+					destTempo = songTempo * destTempoMod / 0x40;
+					curTempo = destTempo;
+					tempoVal = Tempo2Mid(songTempo, destTempoMod);
+				}
+				WriteBE32(tempArr, tempoVal);
+				WriteMetaEvent(fInf, MTS, 0x51, 0x03, &tempArr[0x01]);
+				MTS->curDly += tempDly;
+			}
+		}
 		
 		cmdType = songData[inPos];
 		if (cmdType < 0x80)
@@ -597,6 +662,7 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 			}
 			
 			MTS->curDly += noteDelay;
+			trkTick += noteDelay;
 		}
 		else switch(cmdType)
 		{
@@ -638,10 +704,12 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 					}
 				}
 				MTS->curDly += delayVal;
+				trkTick += delayVal;
 			}
 			break;
 		case 0x81:	// delay
 			MTS->curDly += songData[inPos + 0x01];
+			trkTick += songData[inPos + 0x01];
 			inPos += 0x02;
 			break;
 		case 0x82:	// Note Off
@@ -807,9 +875,16 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 				
 				printf("Warning Track %u: Song Tempo change! [may break tempo modifier]\n", trkID);
 				songTempo = ReadLE16(&songData[inPos + 0x01]);
+				// Note: CSCP (valkyrie_98) clamps the tempo to 300 BPM, SSCP to 340 BPM
+				// I'm omitting this here.
+				curTempoMod = 0x40;
+				curTempo = songTempo;
+				destTempoMod = curTempoMod;
+				destTempo = curTempo;
+				tempoSldDir = 0;
 				inPos += 0x03;
 				
-				tempoVal = Tempo2Mid(songTempo, tempoMod);
+				tempoVal = Tempo2Mid(songTempo, curTempoMod);
 				WriteBE32(tempArr, tempoVal);
 				WriteMetaEvent(fInf, MTS, 0x51, 0x03, &tempArr[0x01]);
 			}
@@ -819,18 +894,46 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 				UINT32 tempoVal;
 				UINT8 tempArr[4];
 				
-				if (songData[inPos + 0x02] != 0)
-				{
-					printf("Warning Track %u: Interpolated Tempo Modifier at 0x%04X!\n", trkID, inPos);
-					// TODO: the driver seems to be able to actually handle this
-					// TODO: used by hinadori_98/MD2_55_21.DAT
-				}
-				tempoMod = songData[inPos + 0x01];
+				destTempoMod = songData[inPos + 0x01];
+				if (! destTempoMod)
+					destTempoMod = 0x100;	// confirmed using disassembly
+				// the driver does integer arithmetic without rounding here
+				destTempo = songTempo * destTempoMod / 0x40;
+				// Note: The sound driver does the same clamping as with command 0x98 here.
+				
+				tempoSldStpSize = songData[inPos + 0x02];	// number of ticks between each tempo slide event
 				inPos += 0x03;
 				
-				tempoVal = Tempo2Mid(songTempo, tempoMod);
-				WriteBE32(tempArr, tempoVal);
-				WriteMetaEvent(fInf, MTS, 0x51, 0x03, &tempArr[0x01]);
+				if (destTempo == curTempo)
+					tempoSldStpSize = 0;
+				if (tempoSldStpSize == 0)
+				{
+					curTempoMod = destTempoMod;
+					curTempo = destTempo;
+					tempoSldDir = 0;
+					if (DRIVER_BUGS)
+						tempoVal = Tempo2Mid(curTempo, 0x40);	// not really a "bug", but mimic the actual driver implementation
+					else
+						tempoVal = Tempo2Mid(songTempo, curTempoMod);
+					WriteBE32(tempArr, tempoVal);
+					WriteMetaEvent(fInf, MTS, 0x51, 0x03, &tempArr[0x01]);
+				}
+				else
+				{
+					tempoSldNextTick = trkTick + tempoSldStpSize;
+					if (destTempo < curTempo)
+						tempoSldDir = -1;
+					else //if (destTempo > curTempo)
+						tempoSldDir = +1;
+					
+					if (! DRIVER_BUGS && tempoSldDir > 0)
+					{
+						// Try to get to the specified tempo incl. fraction.
+						// This may involve an additional tempo event, so we have to recalculate
+						// the destination tempo with integer ceil().
+						destTempo = (songTempo * destTempoMod + 0x3F) / 0x40;
+					}
+				}
 			}
 			break;
 		case 0x9C:	// Instrument
@@ -1125,7 +1228,6 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 			} while(songData[inPos] == 0xE5);
 			break;
 		case 0xE6:	// Loop Start (A)
-			printf("Warning Track %u: Loop Start A found (untested)\n", trkID);
 			{
 				UINT8 loopTimes = songData[inPos + 0x01];
 				inPos += 0x02;
@@ -1277,8 +1379,8 @@ static UINT8 GmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const GMD_INFO
 			break;
 		case 0xF7:	// Fade Out parameters
 			// Note: invalid in CSCP.BIN (valkyrie_98), valid/used in SSCP.BIN
-			printf("Warning Track %u: Fade Out Parameters: %02X %02X %02X\n",
-				trkID, cmdType, songData[inPos + 0x01], songData[inPos + 0x02], songData[inPos + 0x03]);
+		//	printf("Warning Track %u: Fade Out Parameters: %02X %02X %02X\n",
+		//		trkID, cmdType, songData[inPos + 0x01], songData[inPos + 0x02], songData[inPos + 0x03]);
 			inPos += 0x04;
 			break;
 		case 0xF8:	// Marker Set
@@ -1653,7 +1755,7 @@ static void WritePitchBend(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT16 pbBase, IN
 	return;
 }
 
-INLINE UINT32 Tempo2Mid(UINT16 bpm, UINT8 scale)
+INLINE UINT32 Tempo2Mid(UINT16 bpm, UINT16 scale)
 {
 	// formula: (60 000 000.0 / bpm) * (scale / 64.0)
 	UINT32 div = bpm * scale;
