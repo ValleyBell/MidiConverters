@@ -229,7 +229,12 @@ static UINT8 ReadMFHeader(UINT32 songLen, const UINT8* songData)
 	UINT32 valLE;
 	UINT32 valBE;
 	
-	if (memcmp(&songData[0x00], "MF", 0x02))
+	if (memcmp(&songData[0x00], "MF", 0x02) && memcmp(&songData[0x00], "MU", 0x02))
+	{
+		printf("Not a Wolfteam MF file!\n");
+		return 0x80;
+	}
+	if (songData[0x02] > 2 || songData[0x03] > 0))
 	{
 		printf("Not a Wolfteam MF file!\n");
 		return 0x80;
@@ -274,7 +279,8 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 	UINT32 tempLng;
 	//UINT16 tempSht;
 	UINT8 tempByt;
-	UINT8 tempArr[4];
+	UINT8 tempArr[10];
+	UINT8 gsParams[6];	// 0 device ID, 1 model ID, 2 address high, 3 address low
 	
 	midFileInf.alloc = MidAlloc;
 	midFileInf.data = MidData;
@@ -518,7 +524,7 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 					WriteEvent(&midFileInf, &MTS, 0xE0, (pbVal >> 0) & 0x7F, (pbVal >> 7) & 0x7F);
 					break;
 				case 0xD0:	// set Early Note Stop
-					if ((curCmd & 0x0F) == 0xFF)
+					if ((curCmd & 0x0F) == 0x0F)
 						earlyNoteOff = curDelay;	// use parameter byte directly
 					else
 						earlyNoteOff = curDelay - 1;	// underflow from 0x00 to 0xFF intended and in original driver
@@ -536,6 +542,9 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 					// However, in the PC-9801 and X68000 sound drivers I checked, they just store the
 					// parameter into the "song tempo" value - and then don't touch it again.
 					// So the command has no effect.
+					//
+					// P.S.: It is implemented properly in MFD.COM
+					// P.S.2: in MFD.COM, the formula is: songTempo = baseSongTempo + tempByt - 0x40;
 					if (! DRV_BUGS)
 					{
 						tempLng = Tempo2Mid(songTempo, tempByt);
@@ -610,11 +619,86 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 					curNoteVol = songData[inPos];
 					inPos ++;
 					break;
-				case 0xFC:	// delay + more?
-					// I haven't found any file that uses this.
-					//printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
-					// The sound driver ignores all parameters but this one.
+				case 0xFC:	// raw RCP command
+					// The Wolfteam sound driver ignores all parameters but the delay.
+					// However, MFD.COM actually implements this (with RCP commands DD/DE/DF only)
+					// and e.g. night_s_98 uses it for SysEx commands.
+					curCmd = songData[inPos + 0x00];
 					curDelay = songData[inPos + 0x01];
+					switch(curCmd)
+					{
+					case 0xDD:	// Roland Base Address
+						gsParams[2] = songData[inPos + 0x02];
+						gsParams[3] = songData[inPos + 0x03];
+						break;
+					case 0xDE:	// Roland Parameter
+						gsParams[4] = songData[inPos + 0x02];
+						gsParams[5] = songData[inPos + 0x03];
+						{
+							UINT8 chkSum;
+							UINT8 curParam;
+							
+							tempArr[0] = 0x41;	// Roland ID
+							tempArr[1] = gsParams[0];
+							tempArr[2] = gsParams[1];
+							tempArr[3] = 0x12;
+							chkSum = 0x00;	// initialize checksum
+							for (curParam = 0; curParam < 4; curParam ++)
+							{
+								tempArr[4 + curParam] = gsParams[2 + curParam];
+								chkSum += gsParams[2 + curParam];	// add to checksum
+							}
+							tempArr[8] = (0x100 - chkSum) & 0x7F;
+							tempArr[9] = 0xF7;
+							WriteLongEvent(&midFileInf, &MTS, 0xF0, 10, tempArr);
+						}
+						break;
+					case 0xDF:	// Roland Device
+						gsParams[0] = songData[inPos + 0x02];
+						gsParams[1] = songData[inPos + 0x03];
+						break;
+					case 0xF6:	// comment
+						{
+							UINT32 curPos;
+							UINT32 allDelay;
+							UINT16 txtLen;
+							UINT16 txtPos;
+							char* txtBuf;
+							
+							txtLen = 2;
+							for (curPos = inPos + 0x05; inPos < songLen; curPos += 0x05, txtLen += 2)
+							{
+								if (! (songData[curPos - 0x01] == 0xFC && songData[curPos + 0x00] == 0xF7))
+									break;
+							}
+							
+							// I know constantly doing malloc() is inefficient ... but I don't care,
+							// as comments aren't used a lot in the files.
+							txtBuf = (char*)malloc(txtLen);
+							allDelay = 0;
+							for (curPos = inPos, txtPos = 0; txtPos < txtLen; curPos += 0x05, txtPos += 2)
+							{
+								allDelay += songData[curPos + 0x01];
+								txtBuf[txtPos + 0x00] = songData[curPos + 0x02];
+								txtBuf[txtPos + 0x01] = songData[curPos + 0x03];
+							}
+							while(txtLen > 0 && txtBuf[txtLen - 1] == ' ')
+								txtLen --;	// trim off trailing spaces
+							WriteMetaEvent(&midFileInf, &MTS, 0x01, txtLen, txtBuf);
+							free(txtBuf);
+							
+							curDelay = 0;
+							MTS.curDly += allDelay;
+							inPos = curPos - 0x05;
+						}
+						break;
+					case 0xF7:	// continuation of previous command
+						printf("Warning Track %u: Unexpected RCP continuation command at 0x%04X!\n", curTrk, inPos);
+						break;
+					default:
+						printf("Warning Track %u: Unhandled RCP command %02X at 0x%04X!\n", curTrk, curCmd, inPos);
+						break;
+					}
 					inPos += 0x04;
 					break;
 				case 0xFD:	// increment measure ID
