@@ -280,11 +280,6 @@ This tool converts songs from Taito FX-1B (Zoom ZSG-2) arcade games to MIDI. Wri
 
 Use this tool with the script `TaitoZoomConv.sh`, see the script source for more information on how to use.
 
-## TG100_DemoSongDump
-This tool can be used to dump the TG100 demo song from its firmware ROM.
-
-Note that the song itself has no tempo information, so the beats aren't aligned. The tempo of the resulting MIDI might also be a bit off.
-
 ## top2mid
 This tool converts SPC files from SFC Tales of Phantasia and Star Ocean to MIDI.
 
@@ -312,15 +307,28 @@ Right now the tool uses hardcoded instrument mappings - which interestingly work
 For Wolfteam MegaDrive games with PCM drums, it can autodetect the song list and will batch-convert all songs. (compile with `PLMode = 0x01;` to enable it)
 
 ## wtmf2mid
-This tool converts Wolfteam MF music files to standard MIDIs.
+This tool converts Wolfteam MF/MU music files to standard MIDIs.
 
 I initially made this tool to get MIDIs of songs from Arcus Odyssey (because its MT-32 soundtrack is awesome).
 I disassembled a few sound drivers during the development of this tool: Arcus Odyssey, D: European Mirage, Span of Dream.
 
-The files begin with "MF" and the format has Little Endian (for PC-9801) and Big Endian (for X68000) variants.
+The files begin with "MF" or "MU" and the format has Little Endian (for PC-9801) and Big Endian (for X68000) variants.
 It has also support for multiple songs within one file, but no game seems to use that.
 
 In games on the X68000, Wolfteam MIDIs are usually stored LZSS-compressed in larger archives that have an .MID or .MDI extension.
+
+## YamahaDemoSongDump
+This tool can be used to dump demo songs from the firmware of various Yamaha MIDI modules to MIDI.
+Previously called "TG100_DemoSongDump".
+
+Currently, the program was verified to work with:
+* TG100
+* MU5, MU50, MU80, MU100, MU128
+* VL70-m
+
+The source code list the offsets of the demo songs in the respective ROMs.
+
+Note that the songs have no tempo information, so the beats aren't aligned. The tempo of the resulting MIDI might also be a bit off.
 
 ## yong2mid
 This tool converts songs from Yong Yong games to MIDI.
