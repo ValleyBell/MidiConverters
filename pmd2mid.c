@@ -72,14 +72,21 @@ typedef struct channel_info
 	UINT8 tempo;
 	UINT8 temp48;
 	
-	UINT8 rhythmKeyMask;
-	UINT8 rhythmMstVol;
-	UINT8 rhythmVol[6];
-	UINT8 rhythmPanOn[6];
+	UINT16 ssgRhyKeyMask;	// SSG / SSG-PCM rhythm (14 bits)
+	
+	UINT8 opnaRhyKeyMask;
+	UINT8 opnaRhyMstVol;
+	UINT8 opnaRhyVol[6];
+	UINT8 opnaRhyPanOn[6];
 } CHN_INF;
 
 
-static const UINT8 OPNA_RHYTHM_NOTES[6] = {0x23, 0x26, 0x33, 0x2A, 0x2D, 0x27};
+static const UINT8 OPNA_RHYTHM_NOTES[6] = {0x23, 0x41, 0x33, 0x2C, 0x2B, 0x3E};
+static const UINT8 SSG_RHYTHM_NOTES[14] =
+{
+	0x24, 0x28, 0x29, 0x2D, 0x30, 0x25, 0x26,
+	0x2A, 0x2E, 0x39, 0x0A, 0x0B, 0x0C, 0x0D,
+};
 
 
 static UINT32 ROMLen;
@@ -90,7 +97,7 @@ static UINT8* MidData;
 static UINT16 MIDI_RES = 24;
 static UINT16 NUM_LOOPS = 2;
 static UINT8 VOL_MODE = 0;	// 0  - Controller: Main Volume, 1 - Note Velocity
-static double VOL_BOOST = 0.0;
+static double VOL_BOOST = 6.0;
 
 int main(int argc, char* argv[])
 {
@@ -219,11 +226,11 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 	WriteMidiHeader(&midFileInf, 0x0001, trkCnt, MIDI_RES);
 	
 	// init those once, since parameters are shared between tracks
-	chnInf.rhythmMstVol = 0x3C;
+	chnInf.opnaRhyMstVol = 0x3C;
 	for (curNote = 0; curNote < 6; curNote ++)
 	{
-		chnInf.rhythmVol[curNote] = 0x0F;
-		chnInf.rhythmPanOn[curNote] = 0x00;
+		chnInf.opnaRhyVol[curNote] = 0x0F;
+		chnInf.opnaRhyPanOn[curNote] = 0x00;
 	}
 	for (curTrk = 0; curTrk < trkCnt; curTrk ++)
 	{
@@ -300,7 +307,8 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 		didInitCmds = 0x00;
 		chnInf.volOnce = 0xFF;
 		chnInf.earlyOff = 0;
-		chnInf.rhythmKeyMask = 0x00;
+		chnInf.ssgRhyKeyMask = 0x0000;
+		chnInf.opnaRhyKeyMask = 0x00;
 		if (inPos == 0x0000 || songData[inPos] == 0x80)
 			chnInf.flags |= CHNFLAG_STOP;
 		
@@ -345,54 +353,64 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 						rhyStackPos = 0x0000;
 						continue;
 					}
-					else if (curCmd < 0x80)
-					{
-						curNote = 0xFF;	// rest
-					}
 					else if (curCmd < 0xC0)
 					{
-						tempSSht = ((curCmd << 8) | (songData[inPos] << 0)) & 0x3FFF;
-						inPos ++;
-						curCmd &= 0x7F;
-						curNote = tempSSht & 0x7F;
-					}
-					else
-					{
-						// do usual command handling
+						curNote = curCmd;
+						curCmd = 0x00;	// assume a note
 					}
 				}
 			}
 			
-			if (curCmd < 0x80)	// note
+			// Rhythm Mode uses bytes 00..BF for notes
+			if (chnInf.trkMode == TRKMODE_RHYTHM && curCmd < 0x80)
 			{
-				if (chnInf.trkMode == TRKMODE_RHYTHM)
+				// 00..7F -> rest
+				// 80..BF xx -> mask of rhythm sounds
+				curCmd = curNote;
+				
+				// turn off all notes first
+				for (curNote = 0; curNote < 14; curNote ++)
 				{
-					if (curNote == 0x00)
-						curNote = 0x2A;
-					else if (curNote == 0x01)
-						curNote = 0x24;
-					else if (curNote == 0x02)
-						curNote = 0x28;
-					else if (curNote == 0x1A)
-						curNote = 0x26;
+					if (chnInf.ssgRhyKeyMask & (1 << curNote))
+						WriteEvent(&midFileInf, &MTS, 0x90, SSG_RHYTHM_NOTES[curNote], 0x00);
+				}
+				
+				if (curCmd < 0x80)
+				{
+					chnInf.ssgRhyKeyMask = 0x0000;	// rest
 				}
 				else
 				{
-					curNote = curCmd & 0x0F;
-					if (curNote < 0x0C)
-					{
-						curNote += (curCmd >> 4) * 12;
-						curNote += chnInf.transp + noteMove;
-					}
-					else if (curNote == 0x0F)
-					{
-						curNote = 0xFF;
-					}
-					else
-					{
-						if (curNote == 0xFF)
-							printf("Warning: Invalid Note %02X!\n", curCmd);
-					}
+					chnInf.ssgRhyKeyMask = ((curCmd << 8) | (songData[inPos] << 0)) & 0x3FFF;
+					inPos ++;
+				}
+				
+				// turn on all newly started rhythm notes
+				for (curNote = 0; curNote < 14; curNote ++)
+				{
+					if (chnInf.ssgRhyKeyMask & (1 << curNote))
+						WriteEvent(&midFileInf, &MTS, 0x90, SSG_RHYTHM_NOTES[curNote], curNoteVol);
+				}
+				
+				curDly = songData[inPos];	inPos ++;
+				MTS.curDly += curDly;
+			}
+			else if (curCmd < 0x80)	// note
+			{
+				curNote = curCmd & 0x0F;
+				if (curNote < 0x0C)
+				{
+					curNote += (curCmd >> 4) * 12;
+					curNote += chnInf.transp + noteMove;
+				}
+				else if (curNote == 0x0F)
+				{
+					curNote = 0xFF;
+				}
+				else
+				{
+					if (curNote == 0xFF)
+						printf("Warning: Invalid Note %02X!\n", curCmd);
 				}
 				
 				if (lastNote != curNote || ! (chnInf.flags & CHNFLAG_HOLD))
@@ -683,9 +701,9 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 						MTS.midChn = 0x09;
 						for (curNote = 0; curNote < 6; curNote ++)
 						{
-							if (tempByt & (1 << curNote) & chnInf.rhythmKeyMask)
+							if ((chnInf.opnaRhyKeyMask & tempByt) & (1 << curNote))
 							{
-								chnInf.rhythmKeyMask &= ~(1 << curNote);
+								chnInf.opnaRhyKeyMask &= ~(1 << curNote);
 								WriteEvent(&midFileInf, &MTS, 0x90, OPNA_RHYTHM_NOTES[curNote], 0x00);
 							}
 						}
@@ -700,11 +718,11 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 						{
 							if (tempByt & (1 << curNote))
 							{
-								if (chnInf.rhythmKeyMask & (1 << curNote))
+								if (chnInf.opnaRhyKeyMask & (1 << curNote))
 									WriteEvent(&midFileInf, &MTS, 0x90, OPNA_RHYTHM_NOTES[curNote], 0x00);
 								else
-									chnInf.rhythmKeyMask |= (1 << curNote);
-								tempVol = PMDVol2Mid(TRKMODE_RHY_CHN, chnInf.rhythmVol[curNote], chnInf.rhythmPanOn[curNote]);
+									chnInf.opnaRhyKeyMask |= (1 << curNote);
+								tempVol = PMDVol2Mid(TRKMODE_RHY_CHN, chnInf.opnaRhyVol[curNote], chnInf.opnaRhyPanOn[curNote]);
 								WriteEvent(&midFileInf, &MTS, 0x90, OPNA_RHYTHM_NOTES[curNote], tempVol);
 							}
 						}
@@ -714,13 +732,13 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 				case 0xEA:	// set OPNA Rhythm Volume
 					tempByt = songData[inPos];	inPos ++;
 					curNote = (tempByt >> 5) - 1;
-					chnInf.rhythmVol[curNote] = tempByt & 0x1F;
+					chnInf.opnaRhyVol[curNote] = tempByt & 0x1F;
 					break;
 				case 0xE9:	// set OPNA Rhythm Panning
 					tempByt = songData[inPos];	inPos ++;
 					curNote = (tempByt >> 5) - 1;
 					tempByt = PanBits2MidiPan(tempByt & 0x03);
-					chnInf.rhythmPanOn[curNote] = (tempByt == 0x40) ? 0x00 : 0x01;
+					chnInf.opnaRhyPanOn[curNote] = (tempByt == 0x40) ? 0x00 : 0x01;
 					{
 						UINT8 midChnBak = MTS.midChn;
 						MTS.midChn = 0x09;
@@ -731,11 +749,11 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 					}
 					break;
 				case 0xE8:	// set OPNA Rhythm Master Volume
-					chnInf.rhythmMstVol = songData[inPos];	inPos ++;
+					chnInf.opnaRhyMstVol = songData[inPos];	inPos ++;
 					{
 						UINT8 midChnBak = MTS.midChn;
 						MTS.midChn = 0x09;
-						tempVol = PMDVol2Mid(TRKMODE_RHY_MST, chnInf.rhythmMstVol, 0x00);
+						tempVol = PMDVol2Mid(TRKMODE_RHY_MST, chnInf.opnaRhyMstVol, 0x00);
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempVol);	// Data MSB
 						MTS.midChn = midChnBak;
 					}
@@ -744,15 +762,15 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 					chnInf.transp += (INT8)songData[inPos];	inPos ++;
 					break;
 				case 0xE6:	// add to OPNA Rhythm Master Volume
-					chnInf.rhythmMstVol += songData[inPos];	inPos ++;
-					if (chnInf.rhythmMstVol >= 0x80)
-						chnInf.rhythmMstVol = 0x00;
-					else if (chnInf.rhythmMstVol > 0x3F)
-						chnInf.rhythmMstVol = 0x3F;
+					chnInf.opnaRhyMstVol += songData[inPos];	inPos ++;
+					if (chnInf.opnaRhyMstVol >= 0x80)
+						chnInf.opnaRhyMstVol = 0x00;
+					else if (chnInf.opnaRhyMstVol > 0x3F)
+						chnInf.opnaRhyMstVol = 0x3F;
 					{
 						UINT8 midChnBak = MTS.midChn;
 						MTS.midChn = 0x09;
-						tempVol = PMDVol2Mid(TRKMODE_RHY_MST, chnInf.rhythmMstVol, 0x00);
+						tempVol = PMDVol2Mid(TRKMODE_RHY_MST, chnInf.opnaRhyMstVol, 0x00);
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempVol);	// Data MSB
 						MTS.midChn = midChnBak;
 					}
@@ -760,11 +778,11 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 				case 0xE5:	// add to OPNA Rhythm Volume
 					tempByt = songData[inPos];	inPos ++;
 					curNote = (tempByt >> 5) - 1;
-					chnInf.rhythmVol[curNote] += songData[inPos];	inPos ++;
-					if (chnInf.rhythmVol[curNote] & 0x80)
-						chnInf.rhythmVol[curNote] = 0x00;
-					else if (chnInf.rhythmVol[curNote] > 0x1F)
-						chnInf.rhythmVol[curNote] = 0x1F;
+					chnInf.opnaRhyVol[curNote] += songData[inPos];	inPos ++;
+					if (chnInf.opnaRhyVol[curNote] & 0x80)
+						chnInf.opnaRhyVol[curNote] = 0x00;
+					else if (chnInf.opnaRhyVol[curNote] > 0x1F)
+						chnInf.opnaRhyVol[curNote] = 0x1F;
 					break;
 				case 0xE3:	// Volume Up
 					tempByt = songData[inPos];	inPos ++;
@@ -915,15 +933,24 @@ UINT8 PMD2Mid(UINT8 fileVer, UINT16 songLen, UINT8* songData)
 		}
 		if (lastNote != 0xFF)
 			WriteEvent(&midFileInf, &MTS, 0x90, lastNote, 0x00);
-		if (chnInf.rhythmKeyMask)
+		if (chnInf.ssgRhyKeyMask)
+		{
+			for (curNote = 0; curNote < 14; curNote ++)
+			{
+				if (chnInf.ssgRhyKeyMask & (1 << curNote))
+					WriteEvent(&midFileInf, &MTS, 0x90, SSG_RHYTHM_NOTES[curNote], 0x00);
+			}
+			chnInf.ssgRhyKeyMask = 0x0000;
+		}
+		if (chnInf.opnaRhyKeyMask)
 		{
 			MTS.midChn = 0x09;
 			for (curNote = 0; curNote < 6; curNote ++)
 			{
-				if (chnInf.rhythmKeyMask & (1 << curNote))
+				if (chnInf.opnaRhyKeyMask & (1 << curNote))
 					WriteEvent(&midFileInf, &MTS, 0x90, OPNA_RHYTHM_NOTES[curNote], 0x00);
 			}
-			chnInf.rhythmKeyMask = 0x00;
+			chnInf.opnaRhyKeyMask = 0x00;
 		}
 		WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
 		
