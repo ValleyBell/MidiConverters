@@ -56,8 +56,9 @@ INLINE UINT32 BPM2Mid(UINT16 valBPM);
 INLINE UINT8 BPM2OPMTimerB(UINT16 valBPM);
 INLINE UINT32 OPMTimerB2Mid(UINT8 timerVal);
 
-static UINT16 ReadBE16(const UINT8* data);
-static UINT32 ReadBE32(const UINT8* data);
+INLINE UINT32 MulDivCeil(UINT32 val, UINT32 mul, UINT32 div);
+INLINE UINT16 ReadBE16(const UINT8* data);
+INLINE UINT32 ReadBE32(const UINT8* data);
 
 
 static UINT32 ROMLen;
@@ -175,16 +176,18 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 	UINT16 mstLoopPos;	// master loop file offset
 	UINT16 mstLoopCur;
 	
-	//UINT32 tempLng;
+	UINT32 tempLng;
 	UINT16 tempSht;
 	INT16 tempSSht;
 	UINT8 tempByt;
 	UINT8 tempArr[4];
+	char tempStr[0x40];
 	
 	UINT8 curNote;
 	UINT8 curNoteLen;
 	UINT8 curNoteVol;
 	INT16 curPBend;
+	UINT8 curChnVol;
 	
 	UINT32 sysExAlloc;
 	UINT32 sysExLen;
@@ -193,6 +196,9 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 	UINT16 songTempo;
 	const char* gameTitle;
 	const char* songTitle;
+	UINT16 initSyxLen;
+	const UINT8* initSyxData;
+	UINT32 initDelay;
 	
 	MidData = NULL;
 	MidLen = 0x00;
@@ -202,7 +208,7 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 		return 0x80;
 	}
 	// verified versions: 0x14 (Cyber Block Metal Orange EX, Magical Block Carat)
-	if (songData[0x07] > 0x15)
+	if (songData[0x07] > 0x20)
 	{
 		printf("Unsupported ZMD version %02X!\n", songData[0x07]);
 		return 0x80;
@@ -211,6 +217,7 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 	songTempo = 120;
 	gameTitle = NULL;
 	songTitle = NULL;
+	initSyxData = NULL;
 	
 	inPos = 0x08;
 	trkEnd = 0;
@@ -225,10 +232,9 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 			break;
 		//case 0x15:	// "base channel setting"?? (FM vs. MIDI)
 		case 0x18:	// "MIDI data transfer" (for initialization SysEx)
-			tempSht = ReadBE16(&songData[inPos + 0x00]);
-			//sysExData = &songData[inPos + 0x02];
-			printf("Warning! Found SysEx Initialization Block! (skipped)\n");
-			inPos += 0x02 + tempSht;
+			initSyxLen = ReadBE16(&songData[inPos + 0x00]);
+			initSyxData = &songData[inPos + 0x02];
+			inPos += 0x02 + initSyxLen;
 			break;
 		case 0x04:	// FM instrument (m_vset format)
 		case 0x1B:	// FM instrument (m_vset2 format)
@@ -290,32 +296,68 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 	sysExAlloc = 0x20;
 	sysExLen = 0x00;
 	sysExData = (UINT8*)malloc(sysExAlloc);
+	initDelay = 0;
 	
-	WriteMidiHeader(&midFileInf, 0x0001, trkCnt, MIDI_RES);
+	WriteMidiHeader(&midFileInf, 0x0001, 1 + trkCnt, MIDI_RES);
 	
-	for (curTrk = 0x00; curTrk < trkCnt; curTrk ++)
+	// song header track
+	WriteMidiTrackStart(&midFileInf, &MTS);
+	if (songTitle != NULL)
+		WriteMetaEvent(&midFileInf, &MTS, 0x03, strlen(songTitle), songTitle);
+	if (gameTitle != NULL)
+		WriteMetaEvent(&midFileInf, &MTS, 0x01, strlen(gameTitle), gameTitle);
+	if (USE_OPM_TMR)
+		WriteBE32(tempArr, OPMTimerB2Mid(BPM2OPMTimerB(songTempo)));
+	else
+		WriteBE32(tempArr, BPM2Mid(songTempo));
+	WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
+	
+	if (initSyxData != NULL)
+	{
+		UINT32 tempoTicks = BPM2Mid(songTempo);
+		UINT32 barTicks;
+		UINT16 syxPos;
+		UINT16 syxSt;
+		
+		for (syxPos = 0x00; syxPos < initSyxLen; syxPos ++)
+		{
+			if (initSyxData[syxPos] == 0xF0)
+			{
+				syxSt = syxPos;
+				while(syxPos < initSyxLen && initSyxData[syxPos] != 0xF7)
+					syxPos ++;
+				if (syxPos >= initSyxLen)
+					syxPos --;	// we include the "terminating" byte by default, so let's assume there is one
+				WriteLongEvent(&midFileInf, &MTS, initSyxData[syxSt], syxPos - syxSt, &initSyxData[syxSt + 1]);
+				
+				// ticks/second = midiTickRes * 1 000 000 / midiTempoTicks
+				// tick_delay = ceil(ticks/second * dataLength / 3125)
+				MTS.curDly += MulDivCeil(syxPos + 1 - syxSt, MIDI_RES * 320, tempoTicks);
+				initDelay += MTS.curDly;
+			}
+		}
+		
+		//barTicks = 4 * MIDI_RES;	// assume 4/4 time signature
+		barTicks = 1 * MIDI_RES;	// assume 1/4 time signature
+		// round initDelay up to a full bar
+		initDelay = (initDelay + barTicks - 1) / barTicks * barTicks;
+	}
+	WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
+	WriteMidiTrackEnd(&midFileInf, &MTS);
+	
+	for (curTrk = 0; curTrk < trkCnt; curTrk ++)
 	{
 		inPos = trkInf[curTrk].startOfs;
 		
 		WriteMidiTrackStart(&midFileInf, &MTS);
 		
-		if (curTrk == 0)
-		{
-			if (songTitle != NULL)
-				WriteMetaEvent(&midFileInf, &MTS, 0x03, strlen(songTitle), songTitle);
-			if (gameTitle != NULL)
-				WriteMetaEvent(&midFileInf, &MTS, 0x01, strlen(gameTitle), gameTitle);
-			if (USE_OPM_TMR)
-				WriteBE32(tempArr, OPMTimerB2Mid(BPM2OPMTimerB(songTempo)));
-			else
-				WriteBE32(tempArr, BPM2Mid(songTempo));
-			WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
-		}
-		
 		trkEnd = 0;
 		loopIdx = 0x00;
 		mstLoopPos = 0x0000;
 		mstLoopCur = 0;
+		// The driver was confirmed to initialize it to this.
+		sysExData[0x00] = 0x41;	sysExData[0x01] = 0x10;
+		sysExData[0x02] = 0x16;	sysExData[0x03] = 0x12;
 		
 		if (trkInf[curTrk].chnMode < 0x08)
 			MTS.midChn = (UINT8)trkInf[curTrk].chnMode;
@@ -326,7 +368,9 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 		WriteMetaEvent(&midFileInf, &MTS, 0x20, 0x01, &MTS.midChn);
 		curNoteVol = 0x7F;
 		curPBend = 0;
+		curChnVol = 0x00;
 		RunNoteCnt = 0;
+		MTS.curDly += initDelay;
 		
 		while(! trkEnd && inPos < songLen)
 		{
@@ -425,28 +469,64 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 				case 0xA6:	// Fade In/Out (TODO)
 					// param: 0 = cancel, -85..-1 = fade in, +1..+85 = fade out
 					tempByt = songData[inPos + 0x01];
-					printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+					printf("Fade Out (speed %d) on track %u at %04X\n", tempByt, curTrk, inPos);
+					tempLng = sprintf(tempStr, "Fade Out (speed %d)", (INT8)tempByt);
+					WriteMetaEvent(&midFileInf, &MTS, 0x01, tempLng, tempStr);
 					inPos += 0x02;
 					break;
-				case 0xA7:	// Damper Pedal (TODO)
+				case 0xA7:	// Sustain Pedal
 					tempByt = songData[inPos + 0x01];
-					printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+					if (tempByt > 0)
+						printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x40, tempByt);
 					inPos += 0x02;
 					break;
-				case 0xA8:	// Pitch Bend Range (TODO)
+				case 0xA8:	// Pitch Bend Range
 					tempByt = songData[inPos + 0x01];
-					printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+					// Note: The driver sends Bx 64 00  Bx 65 00  Bx 06 vv (i.e. RPN LSB first)
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x65, 0x00);
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x64, 0x00);
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x06, tempByt);
 					inPos += 0x02;
 					break;
+				case 0xAA:	// Channel Volume Increase
+					tempSSht = (INT16)curChnVol - songData[inPos + 0x01];
+					if (tempSSht < 0x00)
+						tempSSht = 0x00;
+					curChnVol = (UINT8)tempSSht;
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, curChnVol ^ 0x7F);
+					inPos += 0x02;
+					break;
+				case 0xAB:	// Channel Volume Decrease
+					tempSSht = (INT16)curChnVol + songData[inPos + 0x01];
+					if (tempSSht > 0x7F)
+						tempSSht = 0x7F;
+					curChnVol = (UINT8)tempSSht;
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, curChnVol ^ 0x7F);
+					inPos += 0x02;
+					break;
 				case 0xAC:	// No Key-Off Mode (TODO)
+					// effectively disables any Note Off event for the current track
 					tempByt = songData[inPos + 0x01];
 					if (tempByt)
-						printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+						printf("Event %02X with value %02X on track %u (MIDI channel %u) at %04X\n", curCmd, tempByt, curTrk, MTS.midChn, inPos);
 					inPos += 0x02;
+					break;
+				case 0xB0:	// Pan Centre (FM: sound off)
+				case 0xB1:	// Pan Left
+				case 0xB2:	// Pan Right
+				case 0xB3:	// Pan Centre
+					// FM mode: The driver uses the 2 low bits as Panning bits for the YM2151, this B0 results in silence.
+					// MIDI mode: The low 2 bits are used on a conversion table: {0x40, 0x00, 0x7F, 0x40}
+					tempByt = songData[inPos + 0x00] & 0x03;
+					if (tempByt == 0x01)
+						tempByt = 0x00;
+					else if (tempByt == 0x02)
+						tempByt = 0x7F;
+					else
+						tempByt = 0x40;
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, tempByt);
+					inPos += 0x01;
 					break;
 				case 0xB4:	// Set Pan
 					tempByt = songData[inPos + 0x01];
@@ -458,8 +538,8 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 					inPos += 0x03;
 					break;
 				case 0xB6:	// Set Channel Volume
-					tempByt = songData[inPos + 0x01] ^ 0x7F;
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, tempByt);
+					curChnVol = songData[inPos + 0x01];
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, curChnVol ^ 0x7F);
 					inPos += 0x02;
 					break;
 				case 0xB9:	// Set Note Velocity
@@ -544,8 +624,8 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 					inPos += 0x02;
 					break;
 				case 0xC1:	// Loop Start
-					loopCur[loopIdx] = 0x00;
-					loopMax[loopIdx] = 0x00;
+					loopCur[loopIdx] = 0;
+					loopMax[loopIdx] = 0;
 					inPos += 0x01;
 					
 					if (songData[inPos] == 0xCF)	// look ahead for Master Loop marker
@@ -558,6 +638,8 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 						printf("Warning: Loop Start NOT followed by Loop Count Set on track %u at %04X\n", curTrk, inPos);
 					}
 					loopIdx ++;
+					tempLng = sprintf(tempStr, "Loop %u Start (x%u)", loopIdx, songData[inPos + 1]);
+					WriteMetaEvent(&midFileInf, &MTS, 0x01, tempLng, tempStr);
 					break;
 				case 0xC2:	// Loop End
 					if (! loopIdx)
@@ -570,7 +652,6 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 					inPos += 0x03;
 					
 					loopIdx --;
-					loopCur[loopIdx] ++;
 					if (loopMax[loopIdx] >= 0xF0)
 					{
 						// master loop
@@ -582,18 +663,39 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 					else
 					{
 						if (loopCur[loopIdx] >= loopMax[loopIdx])
+						{
+							tempLng = sprintf(tempStr, "Loop End %u = %u (fin)", 1 + loopIdx, loopCur[loopIdx]);
+							WriteMetaEvent(&midFileInf, &MTS, 0x01, tempLng, tempStr);
 							break;
+						}
 					}
 					// loop back
 					inPos -= tempSht;
+					tempLng = sprintf(tempStr, "Loop End %u = %u (loop)", 1 + loopIdx, loopCur[loopIdx]);
+					WriteMetaEvent(&midFileInf, &MTS, 0x01, tempLng, tempStr);
 					loopIdx ++;
 					break;
-				//case 0xC3:	// Loop Jump 1
-				//	tempByt = songData[inPos + 0x01];	// loop counter
-				//	tempSht = ReadBE16(&songData[inPos + 0x02]);
-				//	inPos += 0x03;
-				//	break;
-				case 0xC4:	// Loop Jump 2
+				case 0xC3:	// Loop Conditional
+					// confirmed working with sion268snd/HEADQUATERS.ZMD
+					tempByt = songData[inPos + 0x01];	// loop counter
+					tempSht = ReadBE16(&songData[inPos + 0x02]);
+					inPos += 0x04;
+					
+					loopIdx --;
+					if (loopCur[loopIdx] != tempByt)	// == -> execute, != -> skip (thus take the jump)
+					{
+						inPos += tempSht;
+						tempLng = sprintf(tempStr, "Loop Jump %u: %u=%u (skip)", 1 + loopIdx, loopCur[loopIdx], tempByt);
+						WriteMetaEvent(&midFileInf, &MTS, 0x01, tempLng, tempStr);
+					}
+					else
+					{
+						tempLng = sprintf(tempStr, "Loop Jump %u: %u=%u (exec)", 1 + loopIdx, loopCur[loopIdx], tempByt);
+						WriteMetaEvent(&midFileInf, &MTS, 0x01, tempLng, tempStr);
+					}
+					loopIdx ++;
+					break;
+				case 0xC4:	// Loop Exit
 					printf("Warning: Loop Exit found!\n");
 					if (! loopIdx)
 					{
@@ -605,13 +707,16 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 					inPos += 0x03;
 					
 					loopIdx --;
-					loopCur[loopIdx] ++;
-					if (loopCur[loopIdx] + 1 == loopMax[loopIdx])
+					if (loopCur[loopIdx] == loopMax[loopIdx])
 					{
 						// jump out of the loop
 						inPos += tempSht;
+						tempLng = sprintf(tempStr, "Loop End %u = %u (exit)", 1 + loopIdx, loopCur[loopIdx]);
+						WriteMetaEvent(&midFileInf, &MTS, 0x01, tempLng, tempStr);
 						break;
 					}
+					tempLng = sprintf(tempStr, "Loop End %u = %u (cont)", 1 + loopIdx, loopCur[loopIdx]);
+					WriteMetaEvent(&midFileInf, &MTS, 0x01, tempLng, tempStr);
 					loopIdx ++;
 					break;
 				case 0xCD:	// Chord Note
@@ -649,6 +754,7 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 						break;
 					}
 					loopIdx --;
+					loopCur[loopIdx] ++;
 					loopMax[loopIdx] = songData[inPos + 0x01];
 					loopIdx ++;
 					inPos += 0x02;
@@ -661,28 +767,94 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 					WriteEvent(&midFileInf, &MTS, 0xE0, (tempSSht >> 0) & 0x7F, (tempSSht >> 7) & 0x7F);
 					inPos += 0x05;
 					break;
-				//case 0xD2:	// set NRPN
-				//	WriteEvent(&midFileInf, &MTS, 0xB0, 0x63, songData[inPos + 0x01]);
-				//	WriteEvent(&midFileInf, &MTS, 0xB0, 0x62, songData[inPos + 0x02]);
-				//	WriteEvent(&midFileInf, &MTS, 0xB0, 0x06, songData[inPos + 0x03]);
-				//	WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, songData[inPos + 0x04]);
-				//	inPos += 0x05;
-				//	break;
+				case 0xD2:	// set NRPN
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x63, songData[inPos + 0x01]);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x62, songData[inPos + 0x02]);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x06, songData[inPos + 0x03]);
+					if (songData[inPos + 0x04] < 0x80)	// real driver confirmed to do this
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, songData[inPos + 0x04]);
+					inPos += 0x05;
+					break;
 				case 0xD3:	// Bank MSB/LSB
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x00, songData[inPos + 0x01]);
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x20, songData[inPos + 0x02]);
 					inPos += 0x03;
 					break;
-				case 0xE2:	// Chord Note (TODO)
-					printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+				//case 0xE0:	// Portamento
+				//	MTS.curDly += ReadBE16(&songData[inPos + 0x01]);
+				//	inPos += 0x0C;
+				//	break;
+				//case 0xE1:
+				//	inPos += 0x0C;
+				//	break;
+				case 0xE2:	// Chord
+					//printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+					CheckRunningNotes(&midFileInf, &MTS.curDly);
+					
+					tempSht = ReadBE16(&songData[inPos + 0x03]);
+					if (songData[inPos + 0x05] > 0)
+						printf("Warning: Chord with delay on track %u at %04X\n", curTrk, inPos);
+					for (tempByt = 0; tempByt < 8; tempByt ++)
+					{
+						curNote = songData[inPos + 0x06 + tempByt];
+						if (curNote == 0xFF)
+							continue;
+						WriteEvent(&midFileInf, &MTS, 0x90, curNote, curNoteVol);
+						if (RunNoteCnt < MAX_RUN_NOTES)
+						{
+							RunNotes[RunNoteCnt].midChn = MTS.midChn;
+							RunNotes[RunNoteCnt].note = curNote;
+							RunNotes[RunNoteCnt].remLen = 0xFFFF;
+							RunNotes[RunNoteCnt].flags = FLAG_START_THIS_TICK;
+							RunNoteCnt ++;
+						}
+					}
+					for (curNote = 0; curNote < RunNoteCnt; curNote ++)
+					{
+						if (RunNotes[curNote].flags & FLAG_START_THIS_TICK)
+						{
+							// continue playing all notes that were called during this tick
+							RunNotes[curNote].remLen = (UINT16)MTS.curDly + tempSht;
+							RunNotes[curNote].flags &= ~FLAG_START_THIS_TICK;
+						}
+						else
+						{
+							// and stop all other ones (required by CRTXI_.ZMD)
+							RunNotes[curNote].remLen = (UINT16)MTS.curDly;
+						}
+					}
+					
+					MTS.curDly += ReadBE16(&songData[inPos + 0x01]);
 					inPos += 0x0E;
+					break;
+				case 0xE3:	// Channel Pressure Envelope
+					printf("Ignored event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
+					inPos += 0x09;
+					break;
+				case 0xE4:	// Modulation Envelope
+					// data[1..8] = modulation values sent (0xFF == don't send this tick)
+					// During every "envelope tick", one of the values is sent.
+					printf("Ignored event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
+					inPos += 0x09;
+					break;
+				case 0xE5:
+					printf("Ignored event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
+					inPos += 0x09;
 					break;
 				case 0xE6:	// Set Modulation
 					tempByt = songData[inPos + 0x01];
 					if (tempByt)
-						printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+						printf("Event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x01, songData[inPos + 0x02]);
 					inPos += 0x03;
+					break;
+				case 0xE8:	// Modulation Delay parameters??
+					printf("Ignored event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
+					inPos += 0x05;
 					break;
 				case 0xEA:	// Send SysEx Data
 					for (sysExLen = 0x01; inPos + sysExLen < songLen; sysExLen ++)
@@ -707,7 +879,6 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 					sysExData[0x00] = songData[inPos + 0x01];	// Manufacturer ID
 					sysExData[0x01] = songData[inPos + 0x02];	// Device ID
 					sysExData[0x02] = songData[inPos + 0x03];	// Model ID
-					sysExData[0x03] = 0x12;	// the command seems to be hardcoded?
 					inPos += 0x04;
 					break;
 				case 0xEC:	// Send SysEx Data (with length)
@@ -718,11 +889,42 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 						printf("Invalid Raw-Data-Write on track %u at %04X\n", curTrk, inPos);
 					inPos += 0x03 + sysExLen;
 					break;
-				case 0xED:	// MT-32 Effect Control (TODO)
-					// Params: +01 = Reverb Level, +02 = Chorus Level, +03 = unused
-					// MT-32/CM-64 Params: +01 = Part Number, +02 = Reverb Switch, +03 = unused
-					// Parameter == 0xFF -> omit
-					printf("Event %02X with value %02X on track %u at %04X\n", curCmd, tempByt, curTrk, inPos);
+				case 0xED:	// Effect Control
+					if (sysExData[0x00] == 0x41)
+					{
+						switch(sysExData[0x02])	// yes, that is how the driver checks what to do
+						{
+						case 0x16:	// MT-32
+							// MT-32/CM-64 Params: +01 = Part Number, +02 = Reverb Switch, +03 = unused
+							if (songData[inPos + 0x01] >= 0x80)
+								break;	// confirmed using the driver
+							// send F0 41 dev 16 12 03 00 p1 p2 cc F7
+							sysExData[0x04] = 0x03;
+							sysExData[0x05] = 0x00;
+							sysExData[0x06] = songData[inPos + 0x01];
+							sysExData[0x07] = songData[inPos + 0x02];
+							sysExData[0x08] = 0x00;
+							for (tempByt = 0x04; tempByt < 0x08; tempByt ++)
+								sysExData[0x08] -= sysExData[tempByt];
+							sysExData[0x08] &= 0x7F;
+							sysExData[0x09] = 0xF7;
+							WriteLongEvent(&midFileInf, &MTS, 0xF0, 0x0A, sysExData);
+							break;
+						case 0x42:	// GS
+						case 0x45:	// Sound Canvas
+							// GS Params: +01 = Reverb Level, +02 = Chorus Level, +03 = unused
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x5B, songData[inPos + 0x01]);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x5D, songData[inPos + 0x02]);
+							break;
+						default:
+							printf("Warning: MIDI FX event for unknown Roland device on track %u at %04X\n", curTrk, inPos);
+							break;
+						}
+					}
+					else
+					{
+						printf("Warning: MIDI FX event for unknown MIDI device on track %u at %04X\n", curTrk, inPos);
+					}
 					inPos += 0x04;
 					break;
 				case 0xF0:	// NOP command
@@ -760,15 +962,7 @@ UINT8 Zmd2Mid(UINT16 songLen, const UINT8* songData)
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
 					inPos += 0x04;
 					break;
-				case 0xB1:	// TODO
-				case 0xB2:	// TODO
-				case 0xB3:	// TODO
-					printf("Ignored event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
-					inPos += 0x01;
-					break;
 				case 0x98:	// TODO
-				case 0xAA:	// TODO
 					printf("Ignored event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
 					inPos += 0x02;
@@ -841,13 +1035,23 @@ static void PreparseZmd(UINT32 songLen, const UINT8* songData, TRK_INFO* trkInf)
 			cmdLen = 0x00;
 			switch(curCmd)
 			{
+			case 0xB0:	// Pan Centre (FM: sound off)
+			case 0xB1:	// Pan Left
+			case 0xB2:	// Pan Right
+			case 0xB3:	// Pan Centre
 			case 0xBA:
-			case 0xBF:
+			case 0xBF:	// force key off
 			case 0xF0:
 				cmdLen = 0x01;
 				break;
 			case 0xA0:	// Set Instrument
 			case 0xA3:
+			case 0xA6:	// Fade In/Out
+			case 0xA7:	// Sustain Pedal
+			case 0xA8:	// Pitch Bend Range
+			case 0xAA:	// Channel Volume Increase
+			case 0xAB:	// Channel Volume Decrease
+			case 0xAC:	// No Key-Off Mode
 			case 0xB4:	// Set Pan
 			case 0xB6:	// Set Channel Volume
 			case 0xB9:	// Set Note Velocity
@@ -861,6 +1065,8 @@ static void PreparseZmd(UINT32 songLen, const UINT8* songData, TRK_INFO* trkInf)
 			case 0x97:	// relative Pitch Bend down
 			case 0xB5:	// MIDI Controller
 			case 0xD3:	// Bank MSB/LSB
+			case 0xD4:
+			case 0xD5:
 			case 0xE6:	// Set Modulation
 			case 0xFC:	// stop playing note length
 				cmdLen = 0x03;
@@ -869,7 +1075,32 @@ static void PreparseZmd(UINT32 songLen, const UINT8* songData, TRK_INFO* trkInf)
 				cmdLen = 0x04;
 				break;
 			case 0xD1:	// Pitch Bend
+			case 0xD2:	// set NRPN
+			case 0xD6:
+			case 0xE8:
 				cmdLen = 0x05;
+				break;
+			case 0xE3:
+			case 0xE4:	// Modulation Envelope
+			case 0xE5:
+				cmdLen = 0x09;
+				break;
+			case 0xE1:
+				cmdLen = 0x0C;
+				break;
+			case 0xE0:
+				tempSht = ReadBE16(&songData[inPos + 0x01]);
+				trkInf->tickCnt += tempSht;
+				if (! trkInf->loopOfs)
+					trkInf->loopTick += tempSht;
+				cmdLen = 0x0C;
+				break;
+			case 0xE2:	// Chord
+				tempSht = ReadBE16(&songData[inPos + 0x01]);
+				trkInf->tickCnt += tempSht;
+				if (! trkInf->loopOfs)
+					trkInf->loopTick += tempSht;
+				cmdLen = 0x0E;
 				break;
 			case 0xC0:	// Loop thing
 				cmdLen = 0x02;
@@ -919,6 +1150,18 @@ static void PreparseZmd(UINT32 songLen, const UINT8* songData, TRK_INFO* trkInf)
 					loopIdx ++;
 				}
 				break;
+			case 0xC3:	// Loop Conditional
+				tempByt = songData[inPos + 0x01];
+				tempSht = ReadBE16(&songData[inPos + 0x02]);
+				cmdLen = 0x04;
+				if (loopIdx)
+				{
+					loopIdx --;
+					if (loopCur[loopIdx] + 1 != tempByt)
+						inPos += tempSht;
+					loopIdx ++;
+				}
+				break;
 			case 0xC4:	// Loop Exit
 				if (! loopIdx)
 				{
@@ -929,7 +1172,6 @@ static void PreparseZmd(UINT32 songLen, const UINT8* songData, TRK_INFO* trkInf)
 				cmdLen = 0x03;
 				
 				loopIdx --;
-				loopCur[loopIdx] ++;
 				if (loopCur[loopIdx] + 1 == loopMax[loopIdx])
 				{
 					// jump out of the loop
@@ -1146,12 +1388,17 @@ INLINE UINT32 OPMTimerB2Mid(UINT8 timerVal)
 }
 
 
-static UINT16 ReadBE16(const UINT8* data)
+INLINE UINT32 MulDivCeil(UINT32 val, UINT32 mul, UINT32 div)
+{
+	return (UINT32)( ((UINT64)val * mul + div - 1) / div );
+}
+
+INLINE UINT16 ReadBE16(const UINT8* data)
 {
 	return (data[0x00] << 8) | (data[0x01] << 0);
 }
 
-static UINT32 ReadBE32(const UINT8* data)
+INLINE UINT32 ReadBE32(const UINT8* data)
 {
 	return	(data[0x03] << 24) | (data[0x02] << 16) |
 			(data[0x01] <<  8) | (data[0x00] <<  0);
