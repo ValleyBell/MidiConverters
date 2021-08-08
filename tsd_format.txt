@@ -1,0 +1,226 @@
+Header
+------
+Pos	Len	Desc
+00	10h*02h	track pointers (0 = unused)
+20	10h*02h	channel ID
+		OPN: 06/08/0A/0C/0E/10
+		OPNA: 00/02/../10/12
+		MIDI: 14/16/../32
+		Beep: 34
+40	02h	SSG instrument data pointer
+42	01h	number of FM instruments (20h bytes per instrument)
+43	01h	number of SSG instruments (6 bytes per instrument)
+44	0Ch	??
+50	...	FM instrument data
+...	...	SSG instrument data
+...	...	track data
+
+Commands
+--------
+00..7E dd [d1 d2] - Note, duration dd
+	-> dd = FFh -> read 2 additonal bytes, duration = d2d1
+	Note: The command order for portamento + pitch bend is: [note] [portamento] [pitch bend]
+		e.g. 40 0C  89 4C 64  83  4C 0C
+7F dd [d1 d2] - delay dd
+80 tt xx - loop start, loop tt times, xx = always 00 (maybe used as loop counter?)
+81 aa bb - loop exit
+	-> jumps to [offset of next command] + bbaa
+82 aa bb - loop end, offset bbaa
+	-> jumps back to [offset of next command] + bbaa + 1
+83 - do pitch bend to next note
+	example: 40 0C 83 42 0C -> play note 40 for 12 ticks, then pitch by +2 semitones
+	Note: The note doesn't need to follow the command directly. (It is often used at the loop *end*.)
+84 - dummy
+85 tt - set Tempo to tt BPM
+86 aa bb - pitch bend detune, set detune to bbaa
+	Note: raw, unscaled pitch bend value
+87 aa bb - note duration modifier, mode (bbaa & C000h), value (bbaa & 3FFFh)
+	Mode 0000h: note duration = ceil(note dd * value / 100)
+	Mode 4000h: note duration = value
+	Mode 8000h/C000h: note duration = note dd - value
+88 aa bb cc dd - Software Vibrato
+	aa - delay (ticks before activation)
+	bb - speed
+	cc - strength
+	dd - vibrato type
+		00 - triangle (0, 32, 64, 96, 128, 160, 192, 224, 255, 224, .., -255, .. -32, 0, 32, ..)
+		01 - sine (0, 27, 79, 128, 171, 207, 234, 250, 255, 250, .., -255, .. -27, 0, 27, ..)
+89 nn pp - Portamento (of the last note) to note nn, execute pp/100% of the portamento
+	Notes:
+		- The duration of the slide is defined by the last note's duration.
+		- The Portamento command is placed *after* the note.
+	-> example sequence: 40 0C  89 4C 64 -> slide from 40h to 4Ch over 12 ticks
+8A ii vv - enable/disable effect ii, vv = enable/disable
+	ii = 00: vibrato
+		Bit 0 (01h): 0 = enable ??, 1 = disable ??
+		Bit 7 (80h): 0 = enable vibrato, 1 = disable vibrato
+	ii = 01: pitch slide (00 = enable, 01..FFh = disable)
+	ii = 02: tremolo (00 = enable, 01..FFh = disable)
+	ii = 03: volume envelope (00 = enable, 01..FFh = disable)
+8B aa bb - Jump
+	-> jumps to [offset of next command] + bbaa
+	-> bbaa == 0 -> end track
+8C vv - set Pan, value vv
+	[MIDI] send vv as MIDI CC 10, data vv
+	[FM/OPNA Rhythm] set stereo mask
+		bit 0 (01h): enable right speaker
+		bit 1 (02h): enable left speaker
+	[SSG/beeper] ignored
+8D vv - Expression controller, value vv
+8E vv - Expression change, increment by vv
+	Note: track volume is clamped to 0 on underflow (TODO: overflow? sets to 0 when NOT "jns")
+8F - dummy
+90 ii - instrument change, value ii
+91 vv - set SSG noise frequency (register 06h, value vv)
+92 aa bb cc dd ee ff - set volume envelope parameters
+	aa - attack level
+	bb - attack time
+	cc - decay time
+	dd - decay level
+	ee - sustain rate (converted to actual time using a lookup table)
+	ff - release time
+93 mm - set SSG noise mode
+94 vv - set marker to vv
+95 aa bb - Pitch Slide
+	aa - delay (ticks before activation)
+	bb - per-frame delta (raw, unscaled pitch bend value)
+96 vv - set note velocity, value vv
+	Note: Then vv is 80h..FFh, the velocity is temporary and affects the next note only.
+97 cc vv - MIDI controller cc, value vv
+98 aa bb cc dd - Software Tremolo
+	aa - delay (ticks before activation)
+	bb - speed
+	cc - strength
+	dd - volume scale
+	As soon as tremolo kicks in, the volume is reduced from 100% to (dd/7Fh).
+	The actual tremolo is applied on that and further reduces the volume.
+	Tremolo uses a triangle shape.
+99 rr vv - [FM] write OPN register rr, value vv
+	Note: rr gets the channel bits added in
+9A F0...F7 - [MIDI] SysEx data (driver sends anything until an F7 is reached)
+9A ... - [FM] set FM instrument to "..." (19h bytes of instrument data)
+9A vv - [SSG] - set SSG envelope from global envelope list
+9A vv - [OPNA Rhythm] - set OPNA rhythm master volume
+9A xx - [beeper] ignored
+9B - set marker flag
+9C - clear marker flag
+
+
+PC-98 TotalSoundDriver
+======================
+Registers
+---------
+	CX - remaining tracks
+	DI - track RAM
+	SI - sequence data pointer
+
+RAM Map
+-------
+180F		OPNA Rhythm: destination volume
+1816/17		global tick counter?
+1820/41		global volume divisor
+182A/2B		I/O port: MIDI - data
+182C/2D		I/O port: MIDI - control
+1832/33		global flags
+		Bit  6 (0040h): Marker flag
+1838/39		Song Tempo in BPM
+183A/3B		SFX Tempo in BPM
+1840/41		global volume multiplier
+1864/65		Marker value (for music -> game callback)
+1866-1CB5	Music Track RAM x16 (45h bytes per track)
+1CB6-1D85	SFX Track RAM x3 (45h bytes per track)
+1E9B-9C		I/O port: FM 1
+1E9D-9E		I/O port: FM 2
+
+Track RAM
+---------
+00/01	channel mode
+		0000/0001 - FM
+		0002 - SSG
+		0003 - OPNA Rhythm
+		0004 - MIDI
+		0005 - Beeper
+02/03	channel ID (from sequence header)
+04	[FM] FM operator channel (0/1/2)
+	[SSG] SSG channel (0/1/2)
+	[OPNA Rhythm] rhythm channel (= (note % 12) / 2)
+	[MIDI] midi channel (0..0Fh)
+05	[FM] FM KeyOn channel (0/1/2/4/5/6)
+	[SSG] defaults to 1
+	?? (set by command 93)
+	[OPNA Rhythm] key on/off mask
+	[MIDI/Beeper] always 0
+06/07	sequence data pointer
+08/09	Flags
+		Bit  0 (0001h): track disabled
+		Bit  1 (0002h): is rest
+		Bit  2 (0004h): portamento enable
+		Bit  3 (0008h): enable software vibrato (frequency modulation)
+		Bit  4 (0010h): pitch slide enable
+		Bit  5 (0020h): early note off enable
+		Bit  6 (0040h): volume envelope enable
+		Bit  7 (0080h): enable software tremolo (volume modulation)
+		Bit  9 (0200h): disable vibrato during portamento
+		Bit 10 (0400h): "no-attack" mode
+		Bit 15 (8000h): SFX mode
+		default: 0202h (music) / 8202h (SFX)
+0A/0B	remaining ticks until next event
+0C	track volume (default: 0)
+0D	last sent volume (default: FFh)
+0E/0F	note duration modifier
+10/11	Note Off tick (value of 0A/0B where note is turned off)
+
+12/13	current frequency (= note * 30h)
+14/15	last sent frequency (incl. all frequency effects)
+16	current base note
+17	last MIDI Note On value (== TrkRAM+16)
+18/19	detune value
+
+1A	[FM] current FM algorithm (register B0h, lower 3 bits)
+1B	[FM] current instrument
+1C	[FM] current stereo mask (0 = silent, 1 = right, 2 = left, 3 = centre)
+1D	[unused]
+
+1E	tremolo delay
+1F	remaining ticks until tremolo activation
+20	tremolo strength (00..FF)
+21	tremolo volume scale (00..7F), constant factor applied when tremolo is active
+22	tremolo speed
+23/24	tremolo step counter (does not wrap around)
+
+25	vibrato delay
+26	remaining ticks until vibrato activation
+27	vibrato strength
+28	vibrato speed
+29	vibrato type (00 or 01)
+2A/2B	vibrato step counter (000h..1FFh, wraps around at 200h)
+
+2C/2D	portamento frequency distance (for total slide)
+2E/2F	portamento duration
+
+30	remaining ticks until pitch slide activation
+31	pitch slide delay
+32/33	pitch slide delta per tick
+34/35	pitch slide frequency
+
+36	volume envelope: attack level
+37	volume envelope: attack time
+38	volume envelope: decay time
+39	volume envelope: decay level
+3A	volume envelope: sustain rate
+3B	volume envelope: release time
+3C	volume envelope phase
+		0 - attack
+		2 - decay
+		4 - sustain
+		6 - sustain silent
+		8 - release
+		0Ah - note off
+3D/3E	volume envelope: position counter
+3F	volume envelope: last envelope volume (used by release phase)
+
+40-41	[unused]
+42	Note Velocity (80-FF: use "temporary Note Velocity" once, then reset bit 7)
+43	temporary Note Velocity
+44	SSG noise frequency
+-> 45 bytes

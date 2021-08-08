@@ -298,6 +298,21 @@ This tool converts songs from Turbo OutRun (Arcade) to MIDI.
 
 The tool is written based on a sound driver disassembly of Turbo OutRun.
 
+## tsd2mid
+This tool converts files for Falcom's PC-98 TotalSoundDriver to MIDI.
+
+I wrote it primarily to convert the MIDI soundtrack from Brandish VT. It has a really nice OST.
+
+So far the tool can convert all songs from Brandish VT and The Legend of Heroes IV.
+All variants (`.N_` = OPN, `.A_` = OPNA, `.M_` = MIDI, `.B_` = beeper) are supported.
+
+This is probably the MIDI converter I spent the most time working on. From start to finish it took me two weeks of intense work almost every evening.
+This is because the sound driver has lots of effects (portamento, vibrato, tremolo, volume envelopes, ...) that I had to replicate accurately in the converter. Yes, even the MIDIs songs make extensive use of those effects.
+So I disassembled the sound driver, made MIDI logs from the original sound driver output and verified that all effects and interactions are replicated properly.
+
+As a bonus, the converter is a bit friendlier to Yamaha MIDI synths, as it places the Expression controllers *before* the Note On event. (The driver places it after the note is turned on.)
+
+
 ## wtmd2mid
 This tool converts songs from MegaDrive Wolfteam games to MIDI.
 
