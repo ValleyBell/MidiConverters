@@ -52,16 +52,45 @@ typedef struct _track_info
 
 static UINT8 WriteFileData(UINT32 DataLen, const UINT8* Data, const char* FileName);
 
+INLINE INT16 VibratoLUT(UINT8 table, UINT16 index);
+INLINE INT16 TremoloLUT(UINT16 index);
 UINT8 Tsd2Mid(UINT32 songLen, const UINT8* songData);
 static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 							TRK_INF* trkInf, FILE_INF* fInf, MID_TRK_STATE* MTS);
 static UINT8 PreparseTsdTrack(UINT32 songLen, const UINT8* songData, TRK_INF* trkInf, UINT8 mode);
-INLINE INT32 NoteFrac2PitchBend(INT16 noteFrac);
+INLINE INT32 NoteFrac2PitchBend(INT16 noteTransp, INT32 noteFrac);
 static void WritePitchBend(FILE_INF* fInf, MID_TRK_STATE* MTS, INT32 pbVal);
 INLINE UINT32 Tempo2Mid(UINT16 bpm, UINT16 scale);
 INLINE UINT8 Note_OPNARhy2MidiDrum(UINT8 note);
 INLINE UINT16 ReadLE16(const UINT8* data);
 
+
+static const INT16 VIBRATO_TBLS[2][0x20] = {
+	{
+		// triangle
+		  32,  64,  96, 128, 160, 192, 224, 255,
+		 224, 192, 160, 128,  96,  64,  32,   0,
+		 -32, -64, -96,-128,-160,-192,-224,-255,
+		-224,-192,-160,-128, -96, -64, -32,   0,
+	},
+	{
+		// sine-like
+		  27,  79, 128, 171, 207, 234, 250, 255,
+		 250, 234, 207, 171, 128,  79,  27,   0,
+		 -27, -79,-128,-171,-207,-234,-250,-255,
+		-250,-234,-207,-171,-128, -79, -27,   0,
+	}
+};
+static const INT16 SUSTAIN_RATES[0x80] = {
+	   1,    2,    3,    4,    5,    6,    8,   10,   12,   14,   16,   18,   20,   24,   28,   30,
+	  36,   34,   36,   40,   42,   44,   46,   48,   52,   54,   56,   60,   64,   68,   72,   76,
+	  80,   84,   88,   92,   96,  100,  110,  120,  128,  136,  144,  152,  160,  168,  176,  184,
+	 188,  192,  216,  240,  264,  288,  312,  336,  360,  384,  408,  432,  456,  480,  504,  528,
+	 552,  576,  600,  624,  648,  672,  696,  720,  744,  768,  792,  816,  840,  864,  888,  912,
+	 936,  960,  984, 1008, 1032, 1056, 1080, 1104, 1128, 1152, 1176, 1200, 1224, 1248, 1272, 1296,
+	1320, 1344, 1368, 1392, 1416, 1440, 1464, 1488, 1512, 1536, 1560, 1584, 1608, 1632, 1656, 1680,
+	1704, 1728, 1752, 1776, 1800, 1824, 1848, 1872, 1896, 3000, 5000, 7000,10000,20000,30000,    0,
+};
 
 static UINT32 ROMLen;
 static UINT8* ROMData;
@@ -73,6 +102,9 @@ static UINT16 MIDI_RES = 48;
 static UINT16 NUM_LOOPS = 2;
 static UINT8 NO_LOOP_EXT = 0;
 static UINT8 DRIVER_BUGS = 0;
+static UINT8 NO_TRK_NAMES = 0;
+static UINT8 HIGH_PREC_PB = 0;
+static UINT8 HIGH_PREC_VIB = 0;
 
 int main(int argc, char* argv[])
 {
@@ -89,6 +121,10 @@ int main(int argc, char* argv[])
 		printf("    -NoLpExt    No Loop Extension\n");
 		printf("                Do not fill short tracks to the length of longer ones.\n");
 		printf("    -DriverBugs include oddities and bugs from the sound driver\n");
+		printf("    -NoTrkNames omit channel/track names\n");
+		printf("    -PrecisePB  enable higher-precision pitch bend calculations\n");
+		printf("    -PreciseVib enable higher-precision vibrato (requires -PrecisePB)\n");
+		printf("                Warning: This may result in slightly stronger vibarto.\n");
 		return 0;
 	}
 	
@@ -109,6 +145,12 @@ int main(int argc, char* argv[])
 			NO_LOOP_EXT = 1;
 		else if (! stricmp(argv[argbase] + 1, "DriverBugs"))
 			DRIVER_BUGS = 1;
+		else if (! stricmp(argv[argbase] + 1, "NoTrkNames"))
+			NO_TRK_NAMES = 1;
+		else if (! stricmp(argv[argbase] + 1, "PrecisePB"))
+			HIGH_PREC_PB = 1;
+		else if (! stricmp(argv[argbase] + 1, "PreciseVib"))
+			HIGH_PREC_VIB = 1;
 		else
 			break;
 		argbase ++;
@@ -147,7 +189,7 @@ int main(int argc, char* argv[])
 	free(ROMData);	ROMData = NULL;
 	
 #ifdef _DEBUG
-	getchar();
+	//getchar();
 #endif
 	
 	return 0;
@@ -170,6 +212,28 @@ static UINT8 WriteFileData(UINT32 DataLen, const UINT8* Data, const char* FileNa
 	return 0;
 }
 
+INLINE INT16 VibratoLUT(UINT8 table, UINT16 index)
+{
+	INT16 result = VIBRATO_TBLS[table][index & 0x1F];
+	if (HIGH_PREC_PB && HIGH_PREC_VIB)	// don't do this in "non-precise vibrato" mode - due to lower precision 255 actually fits better
+	{
+		// patch 255 to 256, for a nicer triangle shape
+		// The code divides by 256 anyway.
+		if (result == -255)
+			result = -256;
+		else if (result == +255)
+			result = +256;
+	}
+	return result;
+}
+
+INLINE INT16 TremoloLUT(UINT16 index)
+{
+	INT16 result = VIBRATO_TBLS[0][0x10 | (index & 0x0F)];
+	if (HIGH_PREC_PB && result == -255)
+		result = -256;
+	return result;
+}
 
 UINT8 Tsd2Mid(UINT32 songLen, const UINT8* songData)
 {
@@ -263,30 +327,6 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 							TRK_INF* trkInf, FILE_INF* fInf, MID_TRK_STATE* MTS)
 {
 	static const UINT8 OPNA_PAN_LUT[0x04] = {0x3F, 0x7F, 0x01, 0x40};
-	static const INT16 VIBRATO_TBLS[2][0x20] = {
-		{
-			  32,  64,  96, 128, 160, 192, 224, 255,
-			 224, 192, 160, 128,  96,  64,  32,   0,
-			 -32, -64, -96,-128,-160,-192,-224,-255,
-			-224,-192,-160,-128, -96, -64, -32,   0,
-		},
-		{
-			  27,  79, 128, 171, 207, 234, 250, 255,
-			 250, 234, 207, 171, 128,  79,  27,   0,
-			 -27, -79,-128,-171,-207,-234,-250,-255,
-			-250,-234,-207,-171,-128, -79, -27,   0,
-		}
-	};
-	static const INT16 SUSTAIN_RATES[0x80] = {
-		   1,    2,    3,    4,    5,    6,    8,   10,   12,   14,   16,   18,   20,   24,   28,   30,
-		  36,   34,   36,   40,   42,   44,   46,   48,   52,   54,   56,   60,   64,   68,   72,   76,
-		  80,   84,   88,   92,   96,  100,  110,  120,  128,  136,  144,  152,  160,  168,  176,  184,
-		 188,  192,  216,  240,  264,  288,  312,  336,  360,  384,  408,  432,  456,  480,  504,  528,
-		 552,  576,  600,  624,  648,  672,  696,  720,  744,  768,  792,  816,  840,  864,  888,  912,
-		 936,  960,  984, 1008, 1032, 1056, 1080, 1104, 1128, 1152, 1176, 1200, 1224, 1248, 1272, 1296,
-		1320, 1344, 1368, 1392, 1416, 1440, 1464, 1488, 1512, 1536, 1560, 1584, 1608, 1632, 1656, 1680,
-		1704, 1728, 1752, 1776, 1800, 1824, 1848, 1872, 1896, 3000, 5000, 7000,10000,20000,30000,    0,
-	};
 	UINT32 inPos;
 	UINT32 trkTick;
 	UINT8 chnMode;
@@ -321,7 +361,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 	UINT32 noteOffTick;
 	INT16 pbDetune;
 	UINT16 portaDurat;
-	INT16 portaRange;
+	INT32 portaRange;
 	
 	UINT8 vibDelay;	// 25 initial delay
 	UINT8 vibCurDly;	// 26 current delay
@@ -441,7 +481,8 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 		chnVol = 0x7F;	// not what the driver does, but the beeper doesn't have volume control anyway
 		noteTransp = +4*12;
 	}
-	WriteMetaEvent(fInf, MTS, 0x03, strlen(tempStr), tempStr);
+	if (! NO_TRK_NAMES)
+		WriteMetaEvent(fInf, MTS, 0x03, strlen(tempStr), tempStr);
 	if (chnMode == 0x01 || chnMode == 0x20)
 		WriteEvent(fInf, MTS, 0xC0, 0x50, 0x00);	// square wave
 	
@@ -478,12 +519,12 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			UINT32 evtTicks = MTS->curDly - noteStartTick;
 			UINT32 remTicks;
 			INT32 portaPos = 0;
-			INT32 pitchBase = ((INT16)curNote - lastNote) * 0x30;
+			INT16 pitchTransp = (INT16)curNote - lastNote;
 			
 			MTS->curDly = noteStartTick;
 			for (remTicks = evtTicks; remTicks > 0; remTicks --, MTS->curDly ++)
 			{
-				INT32 noteFreq = pitchBase;
+				INT32 noteFreq = 0;
 				INT32 tempPB;
 				UINT8 tempVol = chnVol;
 				UINT8 vibAllow = 1;
@@ -491,7 +532,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 				// handle portamento
 				if ((chnFlags & 0x10) && portaPos < portaDurat)
 				{
-					INT32 portaOffset = portaRange * portaPos / portaDurat;
+					INT32 portaOffset = portaRange * portaPos / (INT32)portaDurat;
 					noteFreq += portaOffset;
 					portaPos ++;
 					vibAllow = (chnFlags & 0x80);	// vibrato may be disabled during portamento
@@ -506,8 +547,14 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 					else
 					{
 						INT16 tblIdx = (INT16)vibSpeed * vibPos / 0x1F;
-						INT16 vibVal = VIBRATO_TBLS[vibType][(0x1F + tblIdx) & 0x1F];
-						INT32 vibOffset = (INT16)vibStrength * vibVal / 0x100;
+						INT16 vibVal = VibratoLUT(vibType, tblIdx - 1);	// start with value 0, like the actual driver
+						INT32 vibOffset;
+						if (! HIGH_PREC_PB)
+							vibOffset = (INT32)vibStrength * vibVal / 0x100;	// driver formula
+						else if (! HIGH_PREC_VIB)
+							vibOffset = ((INT32)vibStrength * vibVal / 0x100) * 0x1000;	// original vibrato precision with accurate PBs
+						else
+							vibOffset = (INT32)vibStrength * vibVal * 0x10;	// with increased precision
 						noteFreq += vibOffset;
 						vibPos = (vibPos + 1) & 0x1FF;
 					}
@@ -520,7 +567,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 					else
 						psldFreq += psldDelta;
 				}
-				tempPB = NoteFrac2PitchBend(noteFreq) + pbDetune + psldFreq;
+				tempPB = pbDetune + psldFreq + NoteFrac2PitchBend(pitchTransp, noteFreq);
 				if (tempPB != lastPB)
 				{
 					lastPB = tempPB;
@@ -616,7 +663,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 					else
 					{
 						UINT16 tblIdx = trmSpeed * trmPos / 0x20;
-						INT16 trmVal = VIBRATO_TBLS[0][0x10 + (tblIdx & 0x0F)];
+						INT16 trmVal = TremoloLUT(tblIdx);
 						UINT16 trmVolume;
 						INT16 trmOffset;
 						tempVol = tempVol * trmVolScale / 0x7F;
@@ -702,6 +749,8 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			{
 				//printf("Track %u: Portamento at position 0x%04X\n", trkInf->id, inPos);
 				portaRange = (songData[inPos + 0x01] - curNote) * 0x30;
+				if (HIGH_PREC_PB)
+					portaRange *= 0x1000;	// Note: considering [pos+2] being 0..100, this overflows for a distance >= 0x6D
 				portaRange = portaRange * songData[inPos + 0x02] / 100;
 				portaDurat = noteDelay;
 				chnFlags |= 0x10;	// enable portamento
@@ -762,7 +811,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			if (! (chnFlags & 0x01))
 			{
 				// Write Channel Volume and Pitch Bend states, so that they get set *BEFORE* Note On.
-				// This improves sound especially on XG devices.
+				// This improves sound especially on Yamaha devices.
 				// When we DON'T do a note on, the Effects Processor will set the proper values and we don't need this.
 				INT32 tempPB;
 				UINT8 tempVol;
@@ -775,10 +824,10 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 					lastVol = tempVol;
 					WriteEvent(fInf, MTS, 0xB0, 0x0B, lastVol * chnVolScale);
 				}
-			
+				
 				tempPB = pbDetune + psldFreq;
-				if (chnFlags & 0x01)
-					tempPB += NoteFrac2PitchBend(((INT16)curNote - lastNote) * 0x30);
+				//if (chnFlags & 0x01)
+				//	tempPB += NoteFrac2PitchBend((INT16)curNote - lastNote, 0);
 				if (tempPB != lastPB)	// omit the PB when same as before
 				{
 					lastPB = tempPB;
@@ -946,6 +995,8 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			break;
 		case 0x89:	// Portamento
 			portaRange = (songData[inPos + 0x01] - curNote) * 0x30;
+			if (HIGH_PREC_PB)
+				portaRange *= 0x1000;
 			portaRange = portaRange * songData[inPos + 0x02] / 100;
 			portaDurat = 0;	// this is what happens when the slide is at the wrong spot
 			chnFlags |= 0x10;	// enable portamento
@@ -1076,6 +1127,8 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			vevDecLvl = songData[inPos + 0x04];
 			vevSusRate = songData[inPos + 0x05];
 			vevRelTime = songData[inPos + 0x06];
+			vevPhase = 0;	// done by the driver and required by VT_12_MD.M_
+			vevTick = 0;
 			chnFlags |= 0x200;	// enable volume envelope
 			inPos += 0x07;
 			break;
@@ -1419,10 +1472,23 @@ static UINT8 PreparseTsdTrack(UINT32 songLen, const UINT8* songData, TRK_INF* tr
 }
 
 
-INLINE INT32 NoteFrac2PitchBend(INT16 noteFrac)
+INLINE INT32 NoteFrac2PitchBend(INT16 noteTransp, INT32 noteFrac)
 {
-	return noteFrac * 683 / 0x30;	// driver formula
-	//return noteFrac * 0x2000 / PB_RANGE / 0x30;	// slightly more accurate
+	if (! HIGH_PREC_PB)
+	{
+		noteFrac += noteTransp * 0x30;
+		return noteFrac * 683 / 0x30;	// original driver formula
+	}
+	else
+	{
+		noteFrac += noteTransp * 0x30000;
+		if (noteFrac < 0)	// add 0.5 for better rounding
+			noteFrac -= (PB_RANGE * 0x18 / 2);
+		else
+			noteFrac += (PB_RANGE * 0x18 / 2);
+		//return noteFrac * 0x2000 / PB_RANGE / 0x30000;	// slightly more accurate
+		return noteFrac / PB_RANGE / 0x18;	// optimized
+	}
 }
 
 static void WritePitchBend(FILE_INF* fInf, MID_TRK_STATE* MTS, INT32 pbVal)
