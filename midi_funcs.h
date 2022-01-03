@@ -17,6 +17,7 @@ typedef struct _midi_track_state
 	UINT32 trkBase;
 	UINT32 curDly;	// delay until next event
 	UINT8 midChn;
+	UINT8 runStat;
 } MID_TRK_STATE;
 
 typedef struct file_information
@@ -31,8 +32,10 @@ typedef struct file_information
 #define INLINE static
 #endif
 
-static void WriteMidiDelay(FILE_INF* fInf, UINT32* delay);
-static void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT8 val1, UINT8 val2);
+INLINE void WriteMidiDelay(FILE_INF* fInf, UINT32* delay);
+static void WriteEventOpt(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT8 val1, UINT8 val2);
+INLINE void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT8 val1, UINT8 val2);
+INLINE void WriteEvent2(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 opt, UINT8 evt, UINT8 val1, UINT8 val2);
 static void WriteLongEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT32 dataLen, const void* data);
 static void WriteMetaEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 metaType, UINT32 dataLen, const void* data);
 static void WriteMidiValue(FILE_INF* fInf, UINT32 value);
@@ -49,7 +52,7 @@ INLINE void WriteBE16(UINT8* buffer, UINT16 value);
 // Returning nonzero makes it skip writing the delay.
 static UINT8 (*MidiDelayCallback)(FILE_INF* fInf, UINT32* delay) = NULL;
 
-static void WriteMidiDelay(FILE_INF* fInf, UINT32* delay)
+INLINE void WriteMidiDelay(FILE_INF* fInf, UINT32* delay)
 {
 	if (MidiDelayCallback != NULL && MidiDelayCallback(fInf, delay))
 		return;
@@ -60,8 +63,10 @@ static void WriteMidiDelay(FILE_INF* fInf, UINT32* delay)
 	return;
 }
 
-static void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT8 val1, UINT8 val2)
+static void WriteEventOpt(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT8 val1, UINT8 val2)
 {
+	UINT8 chnEvt = evt | MTS->midChn;
+	
 	WriteMidiDelay(fInf, &MTS->curDly);
 	
 	File_CheckRealloc(fInf, 0x03);
@@ -72,18 +77,29 @@ static void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT8 val1
 	case 0xA0:
 	case 0xB0:
 	case 0xE0:
-		fInf->data[fInf->pos + 0x00] = evt | MTS->midChn;
-		fInf->data[fInf->pos + 0x01] = val1;
-		fInf->data[fInf->pos + 0x02] = val2;
-		fInf->pos += 0x03;
+		if (MTS->runStat != chnEvt)
+		{
+			MTS->runStat = chnEvt;
+			fInf->data[fInf->pos] = chnEvt;
+			fInf->pos ++;
+		}
+		fInf->data[fInf->pos + 0x00] = val1;
+		fInf->data[fInf->pos + 0x01] = val2;
+		fInf->pos += 0x02;
 		break;
 	case 0xC0:
 	case 0xD0:
-		fInf->data[fInf->pos + 0x00] = evt | MTS->midChn;
-		fInf->data[fInf->pos + 0x01] = val1;
-		fInf->pos += 0x02;
+		if (MTS->runStat != chnEvt)
+		{
+			MTS->runStat = chnEvt;
+			fInf->data[fInf->pos] = chnEvt;
+			fInf->pos ++;
+		}
+		fInf->data[fInf->pos + 0x00] = val1;
+		fInf->pos += 0x01;
 		break;
 	case 0xF0:	// for Meta Event: Track End
+		MTS->runStat = 0x00;
 		fInf->data[fInf->pos + 0x00] = evt;
 		fInf->data[fInf->pos + 0x01] = val1;
 		fInf->data[fInf->pos + 0x02] = val2;
@@ -96,11 +112,29 @@ static void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT8 val1
 	return;
 }
 
+INLINE void WriteEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT8 val1, UINT8 val2)
+{
+	MTS->runStat = 0x00;
+	WriteEventOpt(fInf, MTS, evt, val1, val2);
+	
+	return;
+}
+
+INLINE void WriteEvent2(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 opt, UINT8 evt, UINT8 val1, UINT8 val2)
+{
+	if (!opt)
+		MTS->runStat = 0x00;
+	WriteEventOpt(fInf, MTS, evt, val1, val2);
+	
+	return;
+}
+
 static void WriteLongEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT32 dataLen, const void* data)
 {
 	WriteMidiDelay(fInf, &MTS->curDly);
 	
 	File_CheckRealloc(fInf, 0x01 + 0x04 + dataLen);	// worst case: 4 bytes of data length
+	MTS->runStat = 0x00;
 	fInf->data[fInf->pos + 0x00] = evt;
 	fInf->pos += 0x01;
 	WriteMidiValue(fInf, dataLen);
@@ -115,6 +149,7 @@ static void WriteMetaEvent(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 metaType, U
 	WriteMidiDelay(fInf, &MTS->curDly);
 	
 	File_CheckRealloc(fInf, 0x02 + 0x05 + dataLen);	// worst case: 5 bytes of data length
+	MTS->runStat = 0x00;
 	fInf->data[fInf->pos + 0x00] = 0xFF;
 	fInf->data[fInf->pos + 0x01] = metaType;
 	fInf->pos += 0x02;
@@ -199,6 +234,7 @@ static void WriteMidiTrackStart(FILE_INF* fInf, MID_TRK_STATE* MTS)
 	
 	MTS->trkBase = fInf->pos;
 	MTS->curDly = 0;
+	MTS->runStat = 0x00;
 	
 	return;
 }

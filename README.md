@@ -172,6 +172,14 @@ Just like most other Wolfteam music formats, the MMU format is based on the RCP 
 This one in particular appears to just be RCP with a smaller file and track headers.
 ZAN3.MTN (from Zan 3 on the PC-98) is also just a .CM6 file with the first 0C4h bytes being cut off.
 
+## mps2mid
+This tool converts songs from MicroProse music format to standard MIDIs.
+
+I made this tool to get clean MIDIs of the Transport Tycoon songs.
+So far I only tested it with the original TT and TT Deluxe (DOS).
+
+Converting the TT Deluxe (DOS) songs with default options results in MIDIs that are mostly the same as the MIDIs that come with TT Deluxe (Windows), except that they have a slightly lower resolution. (24 vs. 384 ticks per beat)
+
 ## msdrv2mid
 This tool converts songs from PC-98 games that use the MsDRV sound driver to MIDI.
 

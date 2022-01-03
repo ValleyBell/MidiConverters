@@ -1,0 +1,63 @@
+MicroProse Music Format
+=======================
+used by Transport Tycoon
+
+There are two variants: an AdLib and a MIDI version. There are minor differences between them.
+
+General Layout (MIDI)
+--------------
+1 byte - Tempo (BPM)
+1 byte - macro count
+?? bytes - macros
+1 byte - track count
+?? bytes - tracks
+
+General Layout (AdLib)
+--------------
+1 byte - Tempo (BPM)
+1 byte - number of instruments ni
+18h*ni bytes - FM instrument data
+	register order: 20 23 40 43 60 63 80 83 E0 E3 C0 [+ 0Dh unused bytes]
+1 byte - macro count
+?? bytes - macros
+1 byte - track count
+?? bytes - tracks
+
+Macro
+-----
+4 bytes - size of data (includes this value) nn
+n-4 bytes - macro data
+
+Track (MIDI)
+-----
+1 byte - channel ID
+4 bytes - size of data (includes this value) nn
+n-4 bytes - track data
+
+Track (AdLib)
+-----
+4 bytes - size of data (includes this value) nn
+1 byte - channel ID
+n-5 bytes - track data
+
+Commands are the same as with MIDI, except:
+
+Track Data
+----------
+The structure is similar to MIDI:
+  [delay] [command] [delay] [command] ...
+
+Commands are MIDI-like and include "running status" support.
+
+80 nn vv - Note Off, note nn, velocity vv
+90 nn vv - Note On/Off, note nn, velocity vv
+B0 cc vv - Control Change cc, value vv
+C0 vv - Patch Change, value vv
+	Note: value 7Eh is used as a loop marker and is not sent.
+E0 ll mm - [MIDI] Pitch Bend, value mmll (raw MIDI value)
+E0 vv - [AdLib] Pitch Bend, value vv
+	00h = 1 semitone down, 10h = centre, 20h = 1 semitone up
+FD - Macro End
+FE ii - call Macro ii
+FF 2F - Track End
+	Note: The driver only checks for the "FF" byte.

@@ -234,7 +234,7 @@ static UINT8 ReadMFHeader(UINT32 songLen, const UINT8* songData)
 		printf("Not a Wolfteam MF file!\n");
 		return 0x80;
 	}
-	if (songData[0x02] > 2 || songData[0x03] > 0))
+	if (songData[0x02] > 2 || songData[0x03] > 0)
 	{
 		printf("Not a Wolfteam MF file!\n");
 		return 0x80;
