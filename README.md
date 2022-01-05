@@ -60,6 +60,13 @@ Currently the tool supports only MIDI FMP songs. OPN/OPNA FMP songs are unsuppor
 Please note that TGL FMP is *not* the popular FMP format that uses files with .OPI/.OVI/.OZI extension.
 See fmp2mid.c for a list of games that use TGL FMP.
 
+## fuga2rcp
+This tool converts FUGA Systems MIDI songs to RCP format.
+
+You may wonder Why I'm converting to RCP here. The answer is simple: The original is just an RCP file with a simplified header.
+
+The tool was written for/tested with Amaranth II (NEC PC-98).
+
 ## gems2mid
 This tool converts songs from the GEMS sound driver to MIDI.
 
@@ -176,8 +183,9 @@ ZAN3.MTN (from Zan 3 on the PC-98) is also just a .CM6 file with the first 0C4h 
 This tool converts songs from MicroProse music format to standard MIDIs.
 
 I made this tool to get clean MIDIs of the Transport Tycoon songs.
-So far I only tested it with the original TT and TT Deluxe (DOS).
+The tool works with the files extracted from ADLIB.CAT / GM.CAT / ROLAND.CAT.
 
+So far I only tested it with the original TT and TT Deluxe (DOS).
 Converting the TT Deluxe (DOS) songs with default options results in MIDIs that are mostly the same as the MIDIs that come with TT Deluxe (Windows), except that they have a slightly lower resolution. (24 vs. 384 ticks per beat)
 
 ## msdrv2mid
