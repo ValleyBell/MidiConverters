@@ -170,6 +170,15 @@ The tool needs "RO" files ripped from ScummVM's RAM as I couldn't figure out the
 The "RO" signature must be at byte 0x0C. (I apparently ripped some bytes from the memory block header.)  
 MI1-Midi_Data.7z contains the files that I used with the converter.
 
+## mmd2mid
+This tool converts M.M.D. songs to standard MIDIs.
+
+M.M.D. is Masahiro Kajihara's MIDI driver.
+The music from Studio Twinkle's "Mime" was enough of a reason for researching the format.
+
+As it turned out, MMD is basically a size-optimized version of the RCP format.
+And so both, the disassembling the MMD driver and writing the converter tool was done pretty quickly.
+
 ## mmu2mid
 This tool converts Wolfteam MMU music files to standard MIDIs.
 

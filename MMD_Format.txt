@@ -1,0 +1,142 @@
+MMD Format
+==========
+
+Header
+------
+Pos	Len	Description
+00	01	Song Tempo in BPM (using 48 [dec] / 30h ticks per beat)
+01	01	unused (always 0)
+02	48	Track Headers (18 [dec] tracks, 4 bytes per header)
+4A	02	User SysEx Data Pointer
+4C	04	unused (always 00)
+50	??	Song Title, terminated with 00
+??	??	Track Data
+
+Track Header
+------------
+2 bytes - track data pointer
+1 byte - transposition
+	00h = no change
+	01h..3Fh = transpose +1..+63 semitones
+	40h..7Fh = transpose -64..-1 semitones
+	80h = drum channel
+1 byte- MIDI channel (00h..0Fh = MIDI channels 1..16, FFh = disabled)
+
+User SysEx Data
+---------------
+8*2 bytes - pointer to SysEx data
+
+Each data set is terminated by a F7 byte.
+
+
+Track Data
+----------
+Command Format for 00..7F, 90..FF:
+	cc dd p1 p2 - command cc, parameters dd, p1, p2
+Commands 80..8F:
+	These are variablen-length commands.
+	Each bit in the lower nibble determines whether or not a byte is read.
+	80 - keep previous command
+	81 p2 - set new parameter p2
+	82 p1 - set new parameter p1
+	84 dd - set new delay
+	88 cc - set new command cc
+	8A cc p1 - set new command cc, set new parameter p1
+	The way this works is, that there is a per-track cache for the values cc, dd, p1 and p2.
+	"Normal" commands just replace all 4 values. Commands 80..8F only replace some of them.
+	Afterwards, the full 4-byte command from the cache is processed.
+
+dd is usually a delay that follows the event - except for commands F8/F9/FD/FE, which never cause any delay.
+
+00..7F dd ll vv - play note, length ll, velocity vv
+80..8F dd xx xx - unused
+90..97 dd p1 p2 - send User SysEx Data (from global table)
+98 dd p1 p2 [data] - send SysEx data, terminated by F7 byte
+	For the SysEx data in 90..98, the following values are special:
+		80 - send p1
+		81 - send p2
+		82 - send current MIDI channel
+		83 - initialize Roland checksum (don't send anything)
+		84 - send Roland checksum
+C0 dd p1 p2 - send SysEx command F0 43 cc aa p1 p2 F7, nn=08h
+C1 dd p1 p2 - send SysEx command F0 43 cc aa p1 p2 F7, nn=00h
+C2 dd p1 p2 - send SysEx command F0 43 cc aa p1 p2 F7, nn=04h
+C3 dd p1 p2 - send SysEx command F0 43 cc aa p1 p2 F7, nn=11h
+C7 dd p1 p2 - send SysEx command F0 43 cc aa p1 p2 F7, nn=12h
+C8 dd p1 p2 - send SysEx command F0 43 cc aa p1 p2 F7, nn=13h
+C9 dd p1 p2 - send SysEx command F0 43 cc aa p1 p2 F7, nn=10h
+CC dd p1 p2 - send SysEx command F0 43 cc aa p1 p2 F7, nn=1Bh
+CD dd p1 p2 - send SysEx command F0 43 cc aa p1 p2 F7, nn=18h
+CE dd p1 p2 - send SysEx command F0 43 cc aa p1 p2 F7, nn=19h
+	cc = (10h + MIDI channel)
+	aa = (p1/80h | nn)
+	Note: The driver should probably mask out bit 7 when sending p1, but it doesn't.
+	      Thus, p1 = 80h..FFh will result in invalid SysEx data being sent.
+C5 dd p1 p2 - send SysEx command F0 43 cc 15 p1 [p2] a1 a2 F7
+	cc = (10h + MIDI channel)
+	p2 is only sent when p1 < 40h
+	a1 = (p2 >> 0) & 0Fh
+	a2 = (p2 >> 4) & 0Fh
+C6 dd p1 p2 - send SysEx command F0 43 75 cc 10 p1 p2 F7
+	cc = MIDI channel
+CA dd p1 p2 - send SysEx command F0 43 cc 7B p1 p2 F7
+CB dd p1 p2 - send SysEx command F0 43 cc 7C p1 p2 F7
+	cc = (10h + MIDI channel)
+CF dd p1 p2 - send SysEx command F0 43 cc p1 p2 F7
+CF dd p1 p2 - send SysEx command F0 43 cc p1 a1 a2 F7
+	cc = (10h + MIDI channel)
+	When p1 = 00..17 or p1 = 60..7F, then it sends p2 as it is.
+	When p1 = 18..5F, then it sends a1/a2 using the following formula:
+		a1 = p2 / 80h
+		a2 = p2 & 7Fh
+DC dd p1 p2 - send SysEx command F0 41 32 cc p1 p2 F7
+DD dd p1 p2 - set Roland Address H = p1, Roland Address M = p2
+DE dd p1 p2 - send Roland SysEx command: F0 41 di mi 12 ah am p1 p2 ck F7
+	di = Device ID
+	mi = Model ID
+	ah = Address H
+	am = Address M
+	p1 = Address L
+	p2 = data
+	ck = checksum: ((0 - ah - am - p1 - p2) & 7Fh)
+DF dd p1 p2 - set Roland Device ID = p1, Roland Model ID = p2
+E2 dd ii bb - send Bank MSB = bb, LSB = 00, Instrument = ii
+E6 dd cc xx - set MIDI Channel to (cc-1)
+	00h = mute
+	01h..10h = channel 0..15
+	-> same as "MIDI channel" from header, except 1-based
+E7 dd p1 p2 - set Song Tempo
+	p1 = multiplicator, 20h = 50%, 40h = 100%, 80h = 200%
+	p2 = 0 - just set tempo, 1..FF - interpolate tempo
+EA dd vv xx - send Channel Aftertouch, value vv
+EB dd cc vv - send Control Change cc, value vv
+EC dd ii xx - send Instrument = ii
+ED dd nn vv - send Note Aftertouch, note nn, value vv
+EE dd p1 p2 - send Pitch Bend, data p1 p2
+F8 ll xx xx - Loop End, ll = number of loops, 00 = infinite looping
+F9 xx xx xx - Loop Start
+FE - Track End
+
+MMD Track RAM
+-------------
+00/01	track data pointer
+02	MIDI channel (00..0F = valid, 10..FF = skip processing)
+03	transposition
+04	remaining ticks until next event
+05..14	remaining length of active notes
+15..24	list of active notes
+	Note: value 00h means "no note"
+25	sequence command (default: 00h)
+26	command parameter 1 (default: 00h)
+27	command parameter 2 (default: 00h)
+28	command parameter 3 (default: 00h)
+29	channel volume (default: 7Fh)
+2A	Loop Stack Level
+2B..3A	Loop Start pointers
+3B..42	Loop Counters
+43..62	Loop Command Cache (copy of +25..+28)
+63	SysEx Roland Device ID (default: 10h)
+64	SysEx Roland Model ID (default: 16h = MT-32)
+65	SysEx Roland Address H (default: 10h)
+66	SysEx Roland Address M (default: 00h)
+-> 67h bytes
