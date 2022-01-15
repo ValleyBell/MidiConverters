@@ -5,21 +5,31 @@ Header
 ------
 Pos	Len	Description
 00	01	Song Tempo in BPM (using 48 [dec] / 30h ticks per beat)
+01	01	global transposition
+	00h = no change
+	01h..7Fh = transpose +1..+127 semitones
+	80h..FFh = transpose -128..-1 semitones
 01	01	unused (always 0)
 02	48	Track Headers (18 [dec] tracks, 4 bytes per header)
-4A	02	User SysEx Data Pointer
-4C	04	unused (always 00)
-50	??	Song Title, terminated with 00
+4A	02	User SysEx Data Pointer*
+4C	04	unused* (always 00)
+50	??	Song Title*, terminated with 00
 ??	??	Track Data
+
+* Note: An early version of the MMD format (used e.g. in Princess Maker 1), omits these fields.
+The first track begins at offset 0x4A there.
+
 
 Track Header
 ------------
 2 bytes - track data pointer
-1 byte - transposition
+1 byte - track transposition
 	00h = no change
 	01h..3Fh = transpose +1..+63 semitones
 	40h..7Fh = transpose -64..-1 semitones
-	80h = drum channel
+	80h..FFh = drum channel, no transposition
+	Note: The track's final transposition is calculated by adding "global" and "track" transposition values together.
+	      The difference between "00h" and "80h..FFh" is, that in the latter case the global transposition is ignored.
 1 byte- MIDI channel (00h..0Fh = MIDI channels 1..16, FFh = disabled)
 
 User SysEx Data
@@ -49,6 +59,7 @@ Commands 80..8F:
 dd is usually a delay that follows the event - except for commands F8/F9/FD/FE, which never cause any delay.
 
 00..7F dd ll vv - play note, length ll, velocity vv
+	Note: Both ll=0 and vv=0 result in the command not issueing a new note. This is often used for rests.
 80..8F dd xx xx - unused
 90..97 dd p1 p2 - send User SysEx Data (from global table)
 98 dd p1 p2 [data] - send SysEx data, terminated by F7 byte

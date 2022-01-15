@@ -31,6 +31,7 @@
 typedef struct MMD_INFO
 {
 	UINT8 tempoBPM;
+	INT8 gblTransp;
 	UINT16 trkCnt;
 	const UINT8* usrSyx[8];
 	const char* songTitle;
@@ -198,6 +199,7 @@ UINT8 Mmd2Mid(UINT32 songLen, const UINT8* songData)
 	midFInf.pos = 0x00;
 	
 	mmdInf.tempoBPM = songData[0x00];
+	mmdInf.gblTransp = (INT8)songData[0x01];
 	mmdInf.trkCnt = 18;	// track count is fixed
 	inPos = 0x02;
 	for (curTrk = 0; curTrk < mmdInf.trkCnt; curTrk ++, inPos += 0x04)
@@ -208,20 +210,25 @@ UINT8 Mmd2Mid(UINT32 songLen, const UINT8* songData)
 		tempTInf->channel = songData[inPos + 0x03];
 	}
 	inPos = ReadLE16(&songData[0x4A]);
-	if (inPos && inPos < songLen)
+	for (curTrk = 0; curTrk < 8; curTrk ++)
+		mmdInf.usrSyx[curTrk] = NULL;
+	// Princess Maker 1 (MMD v2.0) has the first track starting at 0x4A and no User SysEx pointers or data.
+	if (trkInf[0].startOfs >= 0x4C && inPos && inPos < songLen)
 	{
-		for (curTrk = 0; curTrk < 8; curTrk ++, inPos += 0x02)
+		for (curTrk = 0; curTrk < 8 && inPos + 0x01 < songLen; curTrk ++, inPos += 0x02)
 		{
 			UINT16 syxPos = ReadLE16(&songData[inPos]);
+			if (syxPos >= songLen)
+			{
+				printf("Warning: User SysEx %u is pointing beyond EOF!\n", curTrk);
+				continue;
+			}
 			mmdInf.usrSyx[curTrk] = &songData[syxPos];
 		}
+		if (curTrk < 8)
+			printf("Error: Early EOF in User SysEx Table!\n");
 	}
-	else
-	{
-		for (curTrk = 0; curTrk < 8; curTrk ++)
-			mmdInf.usrSyx[curTrk] = NULL;
-	}
-	if (trkInf[curTrk].startOfs > 0x50)
+	if (trkInf[0].startOfs > 0x50)
 		mmdInf.songTitle = (const char*)&songData[0x50];
 	else
 		mmdInf.songTitle = NULL;
@@ -284,7 +291,7 @@ static UINT8 MmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMD_INFO
 	UINT32 inPos;
 	UINT8 midiDev;
 	UINT8 midChn;
-	UINT8 transp;
+	INT8 transp;
 	UINT8 tempArr[0x40];
 	UINT16 curBar;
 	UINT8 trkEnd;
@@ -321,14 +328,18 @@ static UINT8 MmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMD_INFO
 	
 	if (midiDev != 0xFF)
 	{
-		WriteMetaEvent(fInf, MTS, 0x21, 1, &midiDev);	// Meta Event: MIDI Port Prefix
+		//WriteMetaEvent(fInf, MTS, 0x21, 1, &midiDev);	// Meta Event: MIDI Port Prefix
 		WriteMetaEvent(fInf, MTS, 0x20, 1, &midChn);	// Meta Event: MIDI Channel Prefix
 	}
-	if (transp > 0x80)
+	if (transp & 0x80)
 	{
-		// known values are: 0x00..0x3F (+0 .. +63), 0x40..0x7F (-64 .. -1), 0x80 (drums)
-		printf("Warning Track %u: Key 0x%02X!\n", trkID, transp);
-		transp = 0x00;
+		// bit 7 set = rhythm channel -> ignore transposition setting
+		transp = 0;
+	}
+	else
+	{
+		transp = (transp & 0x40) ? (-0x80 + transp) : transp;	// 7-bit -> 8-bit sign extension
+		transp += mmdInf->gblTransp;	// add global transposition
 	}
 	
 	txtBufSize = 0x00;
@@ -375,23 +386,27 @@ static UINT8 MmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMD_INFO
 			UINT8 curNote;
 			UINT8 curRN;
 			UINT8 noteDur = cmdMem[2];
+			// (duration == 0) -> no note, (velocity == 0) -> no note
+			UINT8 doNote = (noteDur > 0) && (cmdMem[3] > 0);
 			
-			CheckRunningNotes(fInf, &MTS->curDly, &RunNoteCnt, RunNotes);
-			
-			curNote = (cmdType + transp) & 0x7F;
-			for (curRN = 0; curRN < RunNoteCnt; curRN ++)
+			if (doNote)
 			{
-				if (RunNotes[curRN].note == curNote)
+				CheckRunningNotes(fInf, &MTS->curDly, &RunNoteCnt, RunNotes);
+				
+				curNote = (cmdType + transp) & 0x7F;
+				for (curRN = 0; curRN < RunNoteCnt; curRN ++)
 				{
-					// note already playing - set new length
-					RunNotes[curRN].remLen = (UINT16)MTS->curDly + noteDur;
-					noteDur = 0;	// prevent adding note below
-					break;
+					if (RunNotes[curRN].note == curNote)
+					{
+						// note already playing - set new length
+						RunNotes[curRN].remLen = (UINT16)MTS->curDly + noteDur;
+						doNote = 0;	// prevent adding note below
+						break;
+					}
 				}
 			}
 			
-			// duration == 0 -> no note
-			if (noteDur > 0 && midiDev != 0xFF)
+			if (doNote && midiDev != 0xFF)
 			{
 				WriteEvent(fInf, MTS, 0x90, curNote, cmdMem[3]);
 				AddRunningNote(MAX_RUN_NOTES, &RunNoteCnt, RunNotes,
@@ -406,10 +421,15 @@ static UINT8 MmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMD_INFO
 				break;
 			{
 				const UINT8* usrSyx = mmdInf->usrSyx[cmdType & 0x07];
-				UINT16 syxLen = ProcessRcpSysEx(sizeof(tempArr), usrSyx, tempArr, cmdMem[2], cmdMem[3], midChn);
+				UINT16 syxLen;
+				if (usrSyx == NULL)
+				{
+					printf("Error Track %u: Using undefined User SysEx %u at 0x%04X!\n", trkID, cmdType & 0x07, prevPos);
+					break;
+				}
+				syxLen = ProcessRcpSysEx(sizeof(tempArr), usrSyx, tempArr, cmdMem[2], cmdMem[3], midChn);
 				if (syxLen > 1)	// length 1 == contains only F7 byte
 					WriteLongEvent(fInf, MTS, 0xF0, syxLen, tempArr);
-				printf("Using User Syx %u!\n", cmdType & 0x07);
 			}
 			break;
 		case 0x98:	// send SysEx
@@ -594,7 +614,7 @@ static UINT8 MmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMD_INFO
 			{
 				midiDev = tempByt >> 4;	// port ID
 				midChn = tempByt & 0x0F;	// channel ID
-				WriteMetaEvent(fInf, MTS, 0x21, 1, &midiDev);	// Meta Event: MIDI Port Prefix
+				//WriteMetaEvent(fInf, MTS, 0x21, 1, &midiDev);	// Meta Event: MIDI Port Prefix
 				WriteMetaEvent(fInf, MTS, 0x20, 1, &midChn);	// Meta Event: MIDI Channel Prefix
 			}
 			MTS->midChn = midChn;
@@ -603,8 +623,8 @@ static UINT8 MmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMD_INFO
 			{
 				UINT32 tempoVal;
 				
-				if (cmdMem[3] == 1)
-					printf("Warning Track %u: Interpolated Tempo Change at 0x%04X!\n", trkID, prevPos);
+				if (cmdMem[3] != 0)
+					printf("Warning Track %u: Gradual Tempo Change (speed 0x%02X) at 0x%04X!\n", trkID, cmdMem[3], prevPos);
 				tempoVal = Tempo2Mid(mmdInf->tempoBPM, cmdMem[2]);
 				WriteBE32(tempArr, tempoVal);
 				WriteMetaEvent(fInf, MTS, 0x51, 0x03, &tempArr[0x01]);
@@ -696,7 +716,8 @@ static UINT8 MmdTrk2MidTrk(UINT32 songLen, const UINT8* songData, const MMD_INFO
 			trkEnd = 1;
 			break;
 		default:
-			printf("Warning Track %u: Unhandled MMD command 0x%02X at position 0x%04X!\n", trkID, cmdType, prevPos);
+			printf("Warning Track %u: Unknown MMD command 0x%02X at position 0x%04X!\n", trkID, cmdType, prevPos);
+			WriteEvent(fInf, MTS, 0xB0, 0x70, cmdType & 0x7F);
 			break;
 		}	// end if (cmdType >= 0x80) / switch(cmdType)
 		MTS->curDly += cmdDelay;
@@ -816,6 +837,8 @@ static UINT16 ProcessRcpSysEx(UINT16 syxMaxLen, const UINT8* syxData, UINT8* syx
 	UINT16 outPos;
 	UINT8 chkSum;
 	
+	if (syxData == NULL)
+		return 0x00;
 	chkSum = 0x00;
 	outPos = 0x00;
 	for (inPos = 0x00; inPos < syxMaxLen; inPos ++)
