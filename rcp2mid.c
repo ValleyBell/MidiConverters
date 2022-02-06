@@ -73,11 +73,12 @@ typedef struct _rcp_info
 typedef struct _track_info
 {
 	UINT32 startOfs;
+	UINT32 trkLen;
 	UINT32 loopOfs;
 	UINT32 tickCnt;
 	UINT32 loopTick;
-	//UINT16 loopTimes;
-} TRK_INFO;
+	UINT16 loopTimes;
+} TRK_INF;
 
 typedef struct _cm6_info
 {
@@ -110,6 +111,7 @@ typedef struct _gsd_info
 
 
 #define RUNNING_NOTES
+#define BALANCE_TRACK_TIMES
 #include "midi_utils.h"
 
 
@@ -129,9 +131,9 @@ static const char* GetFileExt(const char* fileName);
 static UINT8 GetFileVer(const FILE_DATA* rcpFile);
 UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile);
 static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* rcpInf,
-							UINT32* rcpInPos, FILE_INF* fInf, MID_TRK_STATE* MTS);
+							UINT32* rcpInPos, TRK_INF* trkInf, FILE_INF* fInf, MID_TRK_STATE* MTS);
 static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* rcpInf,
-							UINT32 startPos, TRK_INFO* trkInf);
+							UINT32 startPos, TRK_INF* trkInf);
 static UINT16 GetMultiCmdDataSize(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* rcpInf,
 									UINT32 startPos, UINT8 flags);
 static UINT16 ReadMultiCmdData(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* rcpInf,
@@ -210,8 +212,8 @@ int main(int argc, char* argv[])
 		printf("\n");
 		printf("Options:\n");
 		printf("    -Loops n    Loop each track at least n times. (default: 2)\n");
-	//	printf("    -NoLpExt    No Loop Extension\n");
-	//	printf("                Do not fill short tracks to the length of longer ones.\n");
+		printf("    -NoLpExt    No Loop Extension\n");
+		printf("                Do not fill short tracks to the length of longer ones.\n");
 		printf("    -WtLoop     Wolfteam Loop mode (loop from measure 2 on)\n");
 		printf("    -KeepDummyCh convert data with MIDI channel set to -1\n");
 		printf("                channel -1 is invalid, some RCPs use it for muting\n");
@@ -307,7 +309,7 @@ int main(int argc, char* argv[])
 	free(outFile.data);
 	
 #ifdef _DEBUG
-	getchar();
+	//getchar();
 #endif
 	
 	return result;
@@ -404,6 +406,8 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 	const UINT8* rcpData = rcpFile->data;
 	UINT8 tempArr[0x20];
 	RCP_INFO rcpInf;
+	TRK_INF* trkInf;
+	TRK_INF* tempTInf;
 	UINT16 curTrk;
 	UINT32 inPos;
 	UINT32 tempLng;
@@ -480,6 +484,27 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 		
 		inPos += 0x80 * 0x10;	// skip rhythm definitions
 	}
+	
+	if (rcpInf.trkCnt == 0)
+		rcpInf.trkCnt = 18;	// early RCP files have the value set to 0 and assume always 18 tracks
+	
+	trkInf = (TRK_INF*)calloc(rcpInf.trkCnt, sizeof(TRK_INF));
+	{
+		UINT32 pos = inPos;
+		pos += 0x30 * 8;	// skip User SysEx data
+		for (curTrk = 0; curTrk < rcpInf.trkCnt; curTrk ++)
+		{
+			tempTInf = &trkInf[curTrk];
+			retVal = PreparseRcpTrack(rcpFile->len, rcpFile->data, &rcpInf, pos, tempTInf);
+			if (retVal)
+				break;
+			tempTInf->loopTimes = tempTInf->loopOfs ? NUM_LOOPS : 0;
+			pos += tempTInf->trkLen;
+		}
+	}
+	
+	if (! NO_LOOP_EXT)
+		BalanceTrackTimes(rcpInf.trkCnt, trkInf, rcpInf.tickRes / 4, 0xFF);
 	
 	ctrlTrkCnt = 0;
 	initDelay = 0;
@@ -559,13 +584,6 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 			}
 		}
 	}
-	
-	// In MDPlayer/RCP.cs, allowed values for trkCnt are 18 and 36.
-	// For RCP files, trkCnt == 0 is also allowed and makes it assume 36 tracks.
-	// Invalid values result in undefined behaviour due to not setting the rcpVer variable.
-	// For G36 files, invalid values fall back to 18 tracks.
-	if (rcpInf.trkCnt == 0)
-		rcpInf.trkCnt = 36;
 	
 	WriteMidiHeader(&midFInf, 0x0001, 1 + ctrlTrkCnt + rcpInf.trkCnt, rcpInf.tickRes);
 	midiTickRes = rcpInf.tickRes;
@@ -703,7 +721,7 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 		midiTickCount = 0;
 		
 		MTS.curDly = initDelay;
-		retVal = RcpTrk2MidTrk(rcpFile->len, rcpFile->data, &rcpInf, &inPos, &midFInf, &MTS);
+		retVal = RcpTrk2MidTrk(rcpFile->len, rcpFile->data, &rcpInf, &inPos, &trkInf[curTrk], &midFInf, &MTS);
 		
 		WriteEvent(&midFInf, &MTS, 0xFF, 0x2F, 0x00);
 		WriteMidiTrackEnd(&midFInf, &MTS);
@@ -725,17 +743,17 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 	midFInf.pos = 0x00;
 	WriteMidiHeader(&midFInf, 0x0001, 1 + ctrlTrkCnt + curTrk, rcpInf.tickRes);
 	
+	free(trkInf);
 	return retVal;
 }
 
 static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* rcpInf,
-							UINT32* rcpInPos, FILE_INF* fInf, MID_TRK_STATE* MTS)
+							UINT32* rcpInPos, TRK_INF* trkInf, FILE_INF* fInf, MID_TRK_STATE* MTS)
 {
 	UINT32 inPos;
 	UINT32 trkBasePos;
 	UINT32 trkEndPos;
 	UINT32 trkLen;
-	TRK_INFO trkInf;
 	UINT32 parentPos;
 	UINT16 repMeasure;
 	UINT8 trkID;
@@ -789,8 +807,6 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 		trkEndPos = rcpLen;
 	if (inPos + 0x2A > rcpLen)
 		return 0x01;	// not enough bytes to read the header
-	
-	PreparseRcpTrack(rcpLen, rcpData, rcpInf, trkBasePos, &trkInf);
 	
 	trkID = rcpData[inPos + 0x00];		// track ID
 	rhythmMode = rcpData[inPos + 0x01];	// rhythm mode
@@ -932,8 +948,12 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 					tempArr[syxLen] = 0xF7;
 					syxLen ++;
 				}
-				//WriteMetaEvent(fInf, MTS, 0x01, usrSyx->name.length, usrSyx->name.data);
-				WriteLongEvent(fInf, MTS, 0xF0, syxLen, tempArr);
+				if (usrSyx->name.length > 0 && 0)
+					WriteMetaEvent(fInf, MTS, 0x01, usrSyx->name.length, usrSyx->name.data);
+				if (syxLen > 1)
+					WriteLongEvent(fInf, MTS, 0xF0, syxLen, tempArr);
+				else
+					printf("Warning Track %u: Using empty User SysEx command %u at 0x%04X\n", trkID, cmdType & 0x07, prevPos);
 			}
 			break;
 		case 0x98:	// send SysEx
@@ -1222,7 +1242,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 					if (loopCnt[loopIdx] < 0x80 && midiDev != 0xFF)
 						WriteEvent(fInf, MTS, 0xB0, 0x6F, (UINT8)loopCnt[loopIdx]);
 					
-					if (loopCnt[loopIdx] < NUM_LOOPS)
+					if (loopCnt[loopIdx] < trkInf->loopTimes)
 						takeLoop = 1;
 				}
 				else
@@ -1258,7 +1278,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			}
 			else
 			{
-				if (inPos == trkInf.loopOfs && midiDev != 0xFF)
+				if (inPos == trkInf->loopOfs && midiDev != 0xFF)
 					WriteEvent(fInf, MTS, 0xB0, 0x6F, 0);
 				
 				loopPPos[loopIdx] = parentPos;	// required by YS-2･018.RCP
@@ -1431,7 +1451,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 }
 
 static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* rcpInf,
-							UINT32 startPos, TRK_INFO* trkInf)
+							UINT32 startPos, TRK_INF* trkInf)
 {
 	UINT32 inPos;
 	UINT32 trkBasePos;
@@ -1477,6 +1497,7 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 	inPos += 0x2A;
 	
 	trkInf->startOfs = trkBasePos;
+	trkInf->trkLen = trkLen;
 	trkInf->loopOfs = 0x00;
 	trkInf->tickCnt = 0;
 	trkInf->loopTick = 0;
