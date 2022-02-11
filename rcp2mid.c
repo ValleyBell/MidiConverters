@@ -811,7 +811,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	trkID = rcpData[inPos + 0x00];		// track ID
 	rhythmMode = rcpData[inPos + 0x01];	// rhythm mode
 	midChn = rcpData[inPos + 0x02];		// MIDI channel
-	if (midChn == 0xFF)
+	if (midChn & 0x80)
 	{
 		// When the KeepDummyCh option is off, prevent events from being
 		// written to the MIDI by setting midiDev to 0xFF.
@@ -1123,7 +1123,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 		case 0xE6:	// MIDI channel
 			//printf("Warning Track %u: Set MIDI Channel command found at 0x%04X\n", trkID, prevPos);
 			cmdP1 --;	// It's same as in the track header, except 1 added.
-			if (cmdP1 == 0xFF)
+			if (cmdP1 & 0x80)
 			{
 				// When the KeepDummyCh option is off, ignore the event.
 				// Else set midiDev to 0xFF to prevent events from being written.
@@ -1284,8 +1284,8 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 				loopPPos[loopIdx] = parentPos;	// required by YS-2･018.RCP
 				loopPos[loopIdx] = inPos;
 				loopCnt[loopIdx] = 0;
-				if (loopIdx > 0 && loopPos[loopIdx] == loopPos[loopIdx - 1])
-					loopIdx --;	// ignore loop command (required by YS-2･018.RCP)
+				//if (loopIdx > 0 && loopPos[loopIdx] == loopPos[loopIdx - 1])
+				//	loopIdx --;	// ignore loop command (required by YS-2･018.RCP)
 				loopIdx ++;
 			}
 			cmdP0Delay = 0;
@@ -1562,8 +1562,8 @@ static UINT8 PreparseRcpTrack(UINT32 rcpLen, const UINT8* rcpData, const RCP_INF
 				loopPos[loopIdx] = inPos;
 				loopTick[loopIdx] = trkInf->tickCnt;
 				loopCnt[loopIdx] = 0;
-				if (loopIdx > 0 && loopPos[loopIdx] == loopPos[loopIdx - 1])
-					loopIdx --;	// ignore loop command
+				//if (loopIdx > 0 && loopPos[loopIdx] == loopPos[loopIdx - 1])
+				//	loopIdx --;	// ignore loop command
 				loopIdx ++;
 			}
 			cmdP0Delay = 0;
