@@ -60,7 +60,7 @@ typedef struct _rcp_info
 	UINT8 beatNum;
 	UINT8 beatDen;
 	UINT8 keySig;
-	UINT8 playBias;
+	INT8 gblTransp;
 	RCP_STR songTitle;
 	UINT16 cmntLineSize;
 	RCP_STR comments;
@@ -445,7 +445,7 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 		rcpInf.beatNum = rcpData[inPos + 0x1C2];
 		rcpInf.beatDen = rcpData[inPos + 0x1C3];
 		rcpInf.keySig = rcpData[inPos + 0x1C4];
-		rcpInf.playBias = rcpData[inPos + 0x1C5];
+		rcpInf.gblTransp = (INT8)rcpData[inPos + 0x1C5];
 		
 		// names of additional files
 		ReadRcpStr0(&rcpInf.cm6File, 0x10, &rcpData[inPos + 0x1C6]);
@@ -473,7 +473,7 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 		rcpInf.beatNum = rcpData[inPos + 0x020E];
 		rcpInf.beatDen = rcpData[inPos + 0x020F];
 		rcpInf.keySig = rcpData[inPos + 0x0210];
-		rcpInf.playBias = rcpData[inPos + 0x0211];
+		rcpInf.gblTransp = (INT8)rcpData[inPos + 0x0211];
 		
 		// names of additional files
 		ReadRcpStr0(&rcpInf.gsdFile1, 0x10, &rcpData[inPos + 0x298]);
@@ -631,9 +631,6 @@ UINT8 Rcp2Mid(const FILE_DATA* rcpFile, FILE_DATA* midFile)
 	RcpKeySig2Mid(tempArr, rcpInf.keySig);
 	WriteMetaEvent(&midFInf, &MTS, 0x59, 0x02, tempArr);
 	
-	if (rcpInf.playBias)
-		printf("Warning: PlayBIAS == %u!\n", rcpInf.playBias);
-	
 	WriteEvent(&midFInf, &MTS, 0xFF, 0x2F, 0x00);
 	WriteMidiTrackEnd(&midFInf, &MTS);
 	
@@ -760,7 +757,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 	UINT8 rhythmMode;
 	UINT8 midiDev;
 	UINT8 midChn;
-	UINT8 transp;
+	INT8 transp;
 	INT32 startTick;
 	UINT8 trkMute;
 	UINT8 tempArr[0x40];
@@ -844,13 +841,19 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 		WriteMetaEvent(fInf, MTS, 0x21, 1, &midiDev);	// Meta Event: MIDI Port Prefix
 		WriteMetaEvent(fInf, MTS, 0x20, 1, &midChn);	// Meta Event: MIDI Channel Prefix
 	}
-	if (rhythmMode > 0x80)
-		printf("Warning Track %u: Rhythm Mode %u!\n", trkID, rhythmMode);
-	if (transp > 0x80)
+	// For rhythmMode, values 0 (melody channel) and 0x80 (rhythm channel) are common.
+	// Some songs use different values, but the actual meaning of the value is unknown.
+	if (rhythmMode != 0 && rhythmMode != 0x80)
+		printf("Track %u: Rhythm Mode 0x%02X\n", trkID, rhythmMode);
+	if (transp & 0x80)
 	{
-		// known values are: 0x00..0x3F (+0 .. +63), 0x40..0x7F (-64 .. -1), 0x80 (drums)
-		printf("Warning Track %u: Key 0x%02X!\n", trkID, transp);
-		transp = 0x00;
+		// bit 7 set = rhythm channel -> ignore transposition setting
+		transp = 0;
+	}
+	else
+	{
+		transp = (transp & 0x40) ? (-0x80 + transp) : transp;	// 7-bit -> 8-bit sign extension
+		transp += rcpInf->gblTransp;	// add global transposition
 	}
 	MTS->curDly = parentPos;
 	
@@ -1146,8 +1149,8 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 			{
 				UINT32 tempoVal;
 				
-				if (cmdP2)
-					printf("Warning Track %u: Interpolated Tempo Change at 0x%04X!\n", trkID, prevPos);
+				if (cmdP2 != 0)
+					printf("Warning Track %u: Gradual Tempo Change (speed 0x40) at 0x%04X!\n", trkID, cmdP2, prevPos);
 				tempoVal = Tempo2Mid(rcpInf->tempoBPM, cmdP1);
 				WriteBE32(tempArr, tempoVal);
 				WriteMetaEvent(fInf, MTS, 0x51, 0x03, &tempArr[0x01]);
@@ -1347,9 +1350,9 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 					}
 					
 					cachedPos = measurePos[measureID] - trkBasePos;
-					if (cachedPos != repeatPos)
-						printf("Warning Track %u: Repeat Measure %u: offset mismatch (file: 0x%04X != expected 0x%04X) at 0x%04X!\n",
-							trkID, measureID, repeatPos, cachedPos, prevPos);
+					//if (cachedPos != repeatPos)
+					//	printf("Warning Track %u: Repeat Measure %u: offset mismatch (file: 0x%04X != expected 0x%04X) at 0x%04X!\n",
+					//		trkID, measureID, repeatPos, cachedPos, prevPos);
 					if (trkBasePos + repeatPos == prevPos)
 						break;	// prevent recursion (just for safety)
 					

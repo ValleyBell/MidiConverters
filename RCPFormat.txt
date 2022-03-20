@@ -13,7 +13,7 @@ Pos	Len	Description
 1C2	01	Beat Numerator
 1C3	01	Beat Denominator
 1C4	01	Key Signature (see sequence command F5)
-1C5	01	"PlayBIAS" ??
+1C5	01	"PlayBIAS" (global transposition)
 1C6	10	CM6 file name
 1D6	10	GSD file name
 1E6	01	Track Count
@@ -38,7 +38,7 @@ Header v3 [G36]
 20E	01	Beat Numerator
 20F	01	Beat Denominator
 210	01	Key Signature (see sequence command F5)
-211	01	"PlayBIAS" ??
+211	01	"PlayBIAS" (global transposition)
 212	06	dummy ??
 218	10	??
 228	70	??
@@ -77,7 +77,9 @@ Track Header [RCP]
 1 byte - track ID (1-based)
 1 byte - rhythm mode (0x00 - off, 0x80 - on, others undefined/fall back to off?)
 1 byte - MIDI channel (0xFF = null device, 0x00..0x0F = port A ch 0..15, 0x10..0x1F = port B ch 0..15)
-1 byte - "key" (transposition, 0 = no transposition, 0x0C = +1 octave, 0x74 = -1 octave, 0x80 = special)
+1 byte - "key" (transposition in semitones, 7-bit signed)
+	0 = no transposition, 0x0C = +1 octave, 0x74 = -1 octave, added together with global transposition
+	0x80..0xFF = rhythm track (no per-track transposition, ignores global transposition as well)
 1 byte - tick offset (signed 8-bit, moves all events by X ticks)
 1 byte - Mute (0x00 == off, 0x01 == on, others undefined/fall back to off?)
 24h bytes - track name
@@ -89,7 +91,7 @@ Track Header [G36]
 1 byte - track ID (1-based)
 1 byte - rhythm mode (0x80 - on, 0x00 - off)
 1 byte - MIDI channel (0xFF = null device, 0x00..0x0F = port A ch 0..15, 0x10..0x1F = port B ch 0..15)
-1 byte - "key" (key signature or transposition??)
+1 byte - "key" (transposition)
 1 byte - tick offset (signed 8-bit, moves all events by X ticks)
 1 byte - Mute (0x00 == off, 0x01 == on, others undefined/fall back to off?)
 24h bytes - track name
