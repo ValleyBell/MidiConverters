@@ -4,7 +4,7 @@
 // based on GMD -> Midi Converter
 // Note: volume scaling for non-MIDI channels is not fully accurate
 // TODO:
-//	- "improvement" mode with higher pitch bend accuracy and chord support (which the driver lacks)
+//	- "improvement" mode with chord support (which the driver lacks)
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -57,6 +57,7 @@ INLINE INT16 TremoloLUT(UINT16 index);
 UINT8 Tsd2Mid(UINT32 songLen, const UINT8* songData);
 static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 							TRK_INF* trkInf, FILE_INF* fInf, MID_TRK_STATE* MTS);
+static UINT8 LookAheadCommand(UINT32 songLen, const UINT8* songData, UINT32 startPos, UINT8 cmd, UINT8 chnMode);
 static UINT8 PreparseTsdTrack(UINT32 songLen, const UINT8* songData, TRK_INF* trkInf, UINT8 mode);
 INLINE INT32 NoteFrac2PitchBend(INT16 noteTransp, INT32 noteFrac);
 static void WritePitchBend(FILE_INF* fInf, MID_TRK_STATE* MTS, INT32 pbVal);
@@ -74,11 +75,29 @@ static const INT16 VIBRATO_TBLS[2][0x20] = {
 		-224,-192,-160,-128, -96, -64, -32,   0,
 	},
 	{
-		// sine-like
+		// sine
+		// formula: val = round(sin(PI * (index + 0.5) / 15) * 256)
 		  27,  79, 128, 171, 207, 234, 250, 255,
 		 250, 234, 207, 171, 128,  79,  27,   0,
 		 -27, -79,-128,-171,-207,-234,-250,-255,
 		-250,-234,-207,-171,-128, -79, -27,   0,
+	}
+};
+// high-precision values
+static const INT32 VIBRATO_TBLS_HP[2][0x20] = {
+	{
+		// triangle
+		 0x20000, 0x40000, 0x60000, 0x80000, 0xA0000, 0xC0000, 0xE0000, 0x100000,
+		 0xE0000, 0xC0000, 0xA0000, 0x80000, 0x60000, 0x40000, 0x20000,  0x00000,
+		-0x20000,-0x40000,-0x60000,-0x80000,-0xA0000,-0xC0000,-0xE0000,-0x100000,
+		-0xE0000,-0xC0000,-0xA0000,-0x80000,-0x60000,-0x40000,-0x20000,  0x00000,
+	},
+	{
+		// sine
+		 0x1AC26, 0x4F1BC, 0x80000, 0xAB4C2, 0xCF1BC, 0xE9DE2, 0xFA67E, 0x100000,
+		 0xFA67E, 0xE9DE2, 0xCF1BC, 0xAB4C2, 0x80000, 0x4F1BC, 0x1AC26,  0x00000,
+		-0x1AC26,-0x4F1BC,-0x80000,-0xAB4C2,-0xCF1BC,-0xE9DE2,-0xFA67E,-0x100000,
+		-0xFA67E,-0xE9DE2,-0xCF1BC,-0xAB4C2,-0x80000,-0x4F1BC,-0x1AC26,  0x00000,
 	}
 };
 static const INT16 SUSTAIN_RATES[0x80] = {
@@ -102,6 +121,8 @@ static UINT16 MIDI_RES = 48;
 static UINT16 NUM_LOOPS = 2;
 static UINT8 NO_LOOP_EXT = 0;
 static UINT8 DRIVER_BUGS = 0;
+static UINT8 TIE_LOOKAHEAD = 0;
+static UINT8 ED4_MODE = 0;
 static UINT8 NO_TRK_NAMES = 0;
 static UINT8 HIGH_PREC_PB = 0;
 static UINT8 HIGH_PREC_VIB = 0;
@@ -121,6 +142,8 @@ int main(int argc, char* argv[])
 		printf("    -NoLpExt    No Loop Extension\n");
 		printf("                Do not fill short tracks to the length of longer ones.\n");
 		printf("    -DriverBugs include oddities and bugs from the sound driver\n");
+		printf("    -TieLAH     improved look-ahead for note tie (fixes VT_15_MD.M_)\n");
+		printf("    -ED4        Legend of Heroes IV mode (enable additional bugs/oddities)\n");
 		printf("    -NoTrkNames omit channel/track names\n");
 		printf("    -PrecisePB  enable higher-precision pitch bend calculations\n");
 		printf("    -PreciseVib enable higher-precision vibrato (requires -PrecisePB)\n");
@@ -145,6 +168,10 @@ int main(int argc, char* argv[])
 			NO_LOOP_EXT = 1;
 		else if (! stricmp(argv[argbase] + 1, "DriverBugs"))
 			DRIVER_BUGS = 1;
+		else if (! stricmp(argv[argbase] + 1, "TieLAH"))
+			TIE_LOOKAHEAD = 1;
+		else if (! stricmp(argv[argbase] + 1, "ED4"))
+			ED4_MODE = 1;
 		else if (! stricmp(argv[argbase] + 1, "NoTrkNames"))
 			NO_TRK_NAMES = 1;
 		else if (! stricmp(argv[argbase] + 1, "PrecisePB"))
@@ -409,7 +436,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 	nVelSingle = 0;
 	chnVol = 0x00;	// driver default
 	chnPan = 0x40;
-	lastVol = chnVol;
+	lastVol = 0xFF;
 	lastPB = 0;
 	transp = 0;
 	noteLenMod = 0;
@@ -556,7 +583,9 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 						else
 							vibOffset = (INT32)vibStrength * vibVal * 0x10;	// with increased precision
 						noteFreq += vibOffset;
-						vibPos = (vibPos + 1) & 0x1FF;
+						vibPos ++;
+						if (! ED4_MODE)
+							vibPos &= 0x1FF;	// only done by Brandish VT's driver
 					}
 				}
 				// handle pitch slides
@@ -673,6 +702,8 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 						trmPos ++;
 					}
 				}
+				if (DRIVER_BUGS && lastNote == 0xFF)
+					tempVol = lastVol;	// don't output when no note is playing
 				if (tempVol != lastVol && ! (chnVolScale & 0x80))
 				{
 					lastVol = tempVol;
@@ -743,7 +774,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			if (chnVolScale & 0x80)
 				curNoteVel = chnVol * (chnVolScale & 0x7F);	// for OPNA Rhythm, use Channel Volume as note velocity
 			else if (chnMode != 0x10)
-				curNoteVel = 0x7F;	// note velocity affects only MIDI channel
+				curNoteVel = 0x7F;	// note velocity affects only MIDI channels
 			
 			if (songData[inPos] == 0x89)
 			{
@@ -756,7 +787,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 				chnFlags |= 0x10;	// enable portamento
 				inPos += 0x03;
 			}
-			if (noteLenMod == 0 || songData[inPos] == 0x83)	// yes, the driver looks ahead for command 83 here
+			if (noteLenMod == 0 || LookAheadCommand(songLen, songData, inPos, 0x83, chnMode))	// yes, the driver looks ahead for command 83 here
 			{
 				chnFlags &= ~0x02;
 				noteLen = noteDelay;
@@ -773,8 +804,21 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 				{
 					// The driver uses this algorithm.
 					UINT16 stopTick = (100 - noteLenMod) * noteDelay / 100;
-					if (stopTick == 0)
-						stopTick = 1;
+					{
+						// The original code does SUB (for [100-noteLenMod]), then MOV, MUL, DIV [/100], then JNZ.
+						// However only the SUB sets the flags, so the JNZ effectively checks the result of the SUB command.
+						// So this is how it really works.
+						if (noteLenMod == 100)
+							stopTick = 1;
+					}
+					{
+						// I assume that it was originally intended to behave a bit differently though.
+						// It was probably intended to check the result of the DIV (stopTick) and clamp it to 1.
+						// Doing this breaks some songs. (obvious example: ED415.M: guitar in bar 20)
+						// Thanks to Ristar for helping me to find this oddity.
+						//if (stopTick == 0)
+						//	stopTick = 1;
+					}
 					noteOffTick = stopTick;
 				}
 				noteLen = noteDelay - (UINT16)noteOffTick;
@@ -792,7 +836,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			{
 				// This is reached when:
 				//	- (chnFlags & 0x01) is not set
-				//	- current note == base note
+				//	- current note != base note
 				// This has the effect, that sometimes the values are reset when doing pitch bends
 				// to other notes. (The driver does this and VT_04_MD.M_ requires this to work properly.)
 				vibCurDly = vibDelay;
@@ -845,7 +889,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			}
 			chnFlags &= ~0x01;
 			
-			// TODO: optimal improvement - support chords when noteDelay == 0 (The actual driver does NOT support chords.)
+			// TODO: optional improvement - support chords when noteDelay == 0 (The actual driver does NOT support chords.)
 			noteStartTick = MTS->curDly;
 			MTS->curDly += noteDelay;
 			trkTick += noteDelay;
@@ -1072,6 +1116,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			break;
 		case 0x8D:	// Channel Volume
 			chnVol = songData[inPos + 0x01];
+			inPos += 0x02;
 			if (chnFlags & 0x200)
 			{
 				// for software envelopes, ensure Expression is rewritten,
@@ -1080,15 +1125,19 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			}
 			else if (! (chnVolScale & 0x80))
 			{
+				if (DRIVER_BUGS && lastNote == 0xFF)
+					break;	// The driver applies the channel volume later - when playing notes or running the envelope generator.
+				// applying immediately is nicer for analyzing the original data though
+				if (lastVol == 0 && chnVol > 0)
+					break;	// however it causes stray notes in ED411.M, bar 30, so delay the volume change in this case
 				WriteEvent(fInf, MTS, 0xB0, 0x0B, chnVol * chnVolScale);	// yes, this goes to MIDI Expression
 				lastVol = chnVol;
 			}
-			inPos += 0x02;
 			break;
 		case 0x8E:	// Channel Volume Accumulation
 			{
 				INT16 vol16 = chnVol + (INT8)songData[inPos + 0x01];
-				if (0)
+				if (DRIVER_BUGS)
 				{
 					// The driver only checks the "sign" and resets the volume to 0 when negative.
 					// Thus, it actually only checks *underflow* and not overflow.
@@ -1105,8 +1154,14 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 				chnVol = (UINT8)vol16;
 				inPos += 0x02;
 			}
-			if (songData[inPos] != cmdType && ! (chnVolScale & 0x80))	// don't write when there are consecutive events
+			if (songData[inPos] == cmdType)
+				break;	// don't write when there are consecutive events
+			if (! (chnVolScale & 0x80))
 			{
+				if (DRIVER_BUGS && lastNote == 0xFF)
+					break;
+				if (lastVol == 0 && chnVol > 0)
+					break;
 				WriteEvent(fInf, MTS, 0xB0, 0x0B, chnVol * chnVolScale);
 				lastVol = chnVol;
 			}
@@ -1246,6 +1301,88 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 		WriteEvent(fInf, MTS, 0x90, (lastNote + noteTransp) & 0x7F, 0x00);
 	
 	return 0x00;
+}
+
+static UINT8 LookAheadCommand(UINT32 songLen, const UINT8* songData, UINT32 startPos, UINT8 cmd, UINT8 chnMode)
+{
+	UINT32 inPos = startPos;
+	
+	if (! TIE_LOOKAHEAD)
+		return songData[inPos] == cmd;
+	
+	// advanced look-ahead, fixes fading sawtooth lead in VT_16_MD.M_, bar 15
+	while(inPos < songLen)
+	{
+		if (songData[inPos] == cmd)
+			return 1;	// found the searched command
+		
+		if (songData[inPos] < 0x80)
+			return 0;	// found note/delay - stop looking further ahead
+		switch(songData[inPos])
+		{
+		case 0x80:	// Loop Start
+		case 0x81:	// Loop Exit
+		case 0x82:	// Loop End
+		case 0x8B:	// Jump
+			return 0;	// stop at loop or jump
+		case 0x83:	// Pitch Bend / no-attack mode
+		case 0x9B:	// set Marker Flag
+		case 0x9C:	// clear Marker Flag
+			inPos += 0x01;
+			break;
+		case 0x85:	// Song Tempo
+		case 0x8C:	// Pan
+		case 0x8D:	// Channel Volume
+		case 0x8E:	// Channel Volume Accumulation
+		case 0x90:	// Instrument
+		case 0x91:	// set SSG noise frequency
+		case 0x93:	// set SSG noise mode
+		case 0x94:	// set Marker
+		case 0x96:	// set Note Velocity
+			inPos += 0x02;
+			break;
+		case 0x86:	// Detune Set
+		case 0x87:	// Note Duration Modifier
+		case 0x89:	// Portamento
+		case 0x8A:	// Effect Disable
+		case 0x95:	// Pitch Slide
+		case 0x97:	// Control Change
+		case 0x99:	// FM channel register write
+			inPos += 0x03;
+			break;
+		case 0x88:	// Software Vibrato
+		case 0x98:	// Software Tremolo
+			inPos += 0x05;
+			break;
+		case 0x92:	// set Volume Envelope
+			inPos += 0x07;
+			break;
+		case 0x9A:	// SysEx command
+			if (chnMode == 0x00)	// inline FM instrument
+				inPos += 0x1A;
+			else if (chnMode == 0x01)	// use global SSG instrument
+				inPos += 0x02;
+			else if (chnMode == 0x02)	// set OPNA Rhythm master volume
+				inPos += 0x02;
+			else if (chnMode == 0x10)	// inline FM instrument
+			{
+				inPos += 0x01;
+				for (; inPos < songLen; inPos ++)
+				{
+					if (songData[inPos] == 0xF7)
+					{
+						inPos ++;
+						break;
+					}
+				}
+			}
+			else
+				inPos += 0x02;
+			break;
+		}
+	}
+	
+	return 0;	// not found
 }
 
 static UINT8 PreparseTsdTrack(UINT32 songLen, const UINT8* songData, TRK_INF* trkInf, UINT8 mode)
@@ -1494,10 +1631,23 @@ INLINE INT32 NoteFrac2PitchBend(INT16 noteTransp, INT32 noteFrac)
 static void WritePitchBend(FILE_INF* fInf, MID_TRK_STATE* MTS, INT32 pbVal)
 {
 	INT32 pbFinal = (INT32)0x2000 + pbVal;
-	if (pbFinal < 0x0000)
-		pbFinal = 0x0000;
-	else if (pbFinal > 0x3FFF)
-		pbFinal = 0x3FFF;
+	if (! ED4_MODE)
+	{
+		if (pbFinal < 0x0000)
+			pbFinal = 0x0000;
+		else if (pbFinal > 0x3FFF)
+			pbFinal = 0x3FFF;
+	}
+	else
+	{
+		// The slightly older sound driver version from Legend of Heroes IV performs no boundary checking.
+		// This may result in it sending garbage pitch bend parameter bytes (>= 0x80).
+		// The PB commands with invalid values seem to get discarded at some point and have no audible effect,
+		// so let's just discard them for the conversion.
+		// ED447.M_, track "MIDI 7", bar 17 requires this.
+		if (pbFinal < 0x0000 || pbFinal > 0x3FFF)
+			return;
+	}
 	
 	WriteEvent(fInf, MTS, 0xE0, (pbFinal >> 0) & 0x7F, (pbFinal >> 7) & 0x7F);
 	return;
