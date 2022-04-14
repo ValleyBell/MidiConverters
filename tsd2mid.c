@@ -436,7 +436,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 	nVelSingle = 0;
 	chnVol = 0x00;	// driver default
 	chnPan = 0x40;
-	lastVol = 0xFF;
+	lastVol = 0x80 | chnVol;
 	lastPB = 0;
 	transp = 0;
 	noteLenMod = 0;
@@ -527,9 +527,15 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 	if (! (trkInf->useFlags & 0x20))
 		WriteEvent(fInf, MTS, 0xB0, 0x0A, 0x40);
 	if (chnVolScale & 0x80)
+	{
+		lastVol = 0x80 | 0x7F;
 		WriteEvent(fInf, MTS, 0xB0, 0x0B, 0x7F);
+	}
 	else if (! (trkInf->useFlags & 0x08))
+	{
+		lastVol = 0x80 | chnVol;
 		WriteEvent(fInf, MTS, 0xB0, 0x0B, chnVol * chnVolScale);
+	}
 	if (! (trkInf->useFlags & 0x40))
 		WriteEvent(fInf, MTS, 0xB0, 0x5B, 0);
 	if (! (trkInf->useFlags & 0x80))
@@ -789,6 +795,8 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			}
 			if (noteLenMod == 0 || LookAheadCommand(songLen, songData, inPos, 0x83, chnMode))	// yes, the driver looks ahead for command 83 here
 			{
+				if (noteLenMod > 0 && songData[inPos] != 0x83)
+					printf("Track %u: Lookahead found far Tie command at 0x%04X\n", trkInf->id, prevPos);
 				chnFlags &= ~0x02;
 				noteLen = noteDelay;
 				noteOffTick = 0;
@@ -814,7 +822,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 					{
 						// I assume that it was originally intended to behave a bit differently though.
 						// It was probably intended to check the result of the DIV (stopTick) and clamp it to 1.
-						// Doing this breaks some songs. (obvious example: ED415.M: guitar in bar 20)
+						// Doing this breaks some songs. (obvious example: ED415.M_: guitar in bar 20)
 						// Thanks to Ristar for helping me to find this oddity.
 						//if (stopTick == 0)
 						//	stopTick = 1;
@@ -861,6 +869,8 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 				UINT8 tempVol;
 				
 				tempVol = chnVol;
+				if (lastVol == 0x80 && chnVol == 0)	// when volume was set at "init" tick and unchanged, don't resend
+					lastVol &= 0x7F;	// required to fix start of ED442.M_ track 11, which was broken by the ED411.M_ fix
 				if (chnFlags & 0x200)
 					tempVol = tempVol * vevAtkLvl / 0x7F;
 				if (tempVol != lastVol && ! (chnVolScale & 0x80))
@@ -1129,7 +1139,7 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 					break;	// The driver applies the channel volume later - when playing notes or running the envelope generator.
 				// applying immediately is nicer for analyzing the original data though
 				if (lastVol == 0 && chnVol > 0)
-					break;	// however it causes stray notes in ED411.M, bar 30, so delay the volume change in this case
+					break;	// however it causes stray notes in ED411.M_, bar 30, so delay the volume change in this case
 				WriteEvent(fInf, MTS, 0xB0, 0x0B, chnVol * chnVolScale);	// yes, this goes to MIDI Expression
 				lastVol = chnVol;
 			}
