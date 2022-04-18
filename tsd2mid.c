@@ -5,12 +5,13 @@
 // Note: volume scaling for non-MIDI channels is not fully accurate
 // TODO:
 //	- "improvement" mode with chord support (which the driver lacks)
+//	  This mode would make 0-tick notes longer when on a drum track OR the sustain pedal is pressed.
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 
-#include <stdtype.h>
+#include "stdtype.h"
 
 #ifndef INLINE
 #if defined(_MSC_VER)
@@ -45,6 +46,67 @@ typedef struct _track_info
 	// bit 8: sets pitch bend before first note
 	UINT16 useFlags;
 } TRK_INF;
+
+typedef struct _track_ram
+{
+	// bit 0: pitch to next note / "no attack" mode
+	// bit 1: enable early Note Off
+	// bit 4/5/6/7: [frequency effects] enable portamento / vibrato / pitch slide / vibrato during portamento
+	// bit 8/9: [volume effects] enable tremolo / envelope
+	UINT16 chnFlags;
+	
+	UINT8 curNote;
+	UINT8 lastNote;
+	INT8 noteTransp;	// transposition for non-MIDI channels
+	UINT8 chnVolScale;
+	UINT8 chnVol;
+	UINT8 lastVol;
+	UINT8 noteVel;	// 42
+	UINT8 nVelSingle;	// 43
+	UINT8 chnPan;
+	INT32 lastPB;
+	
+	UINT8 loopIdx;
+	UINT32 loopPos[8];
+	UINT16 loopMax[8];	// total loop count
+	UINT16 loopCnt[8];	// remaining loops
+	
+	UINT16 noteLenMod;	// 0E/0F
+	UINT32 noteStartTick;
+	UINT32 noteOffTick;	// 0A/0B
+	INT16 pbDetune;	// 18/19
+	UINT16 portaDurat;	// 2E/2F
+	INT32 portaRange;	// 2C/2D
+	
+	UINT8 vibDelay;	// 25 initial delay
+	UINT8 vibCurDly;	// 26 current delay
+	INT8 vibStrength;	// 27
+	INT8 vibSpeed;	// 28
+	UINT8 vibType;	// 29
+	INT16 vibPos;	// 2A/2B
+	
+	UINT8 trmDelay;	// 1E initial delay
+	UINT8 trmCurDly;	// 1F current delay
+	UINT8 trmStrength;	// 20
+	UINT8 trmVolScale;	// 21
+	UINT8 trmSpeed;	// 22
+	UINT16 trmPos;	// 23/24
+	
+	UINT8 psldDelay;	// 31
+	UINT8 psldCurDly;	// 30
+	INT16 psldDelta;	// 32/33
+	INT16 psldFreq;	// 34/35
+	
+	UINT8 vevAtkLvl;	// 36
+	UINT8 vevAtkTime;	// 37
+	UINT8 vevDecTime;	// 38
+	UINT8 vevDecLvl;	// 39
+	UINT8 vevSusRate;	// 3A
+	UINT8 vevRelTime;	// 3B
+	UINT8 vevPhase;	// 3C
+	INT16 vevTick;	// 3D
+	UINT8 vevVol;	// 3F
+} TRK_RAM;
 
 #define BALANCE_TRACK_TIMES
 #include "midi_utils.h"
@@ -350,74 +412,199 @@ UINT8 Tsd2Mid(UINT32 songLen, const UINT8* songData)
 	return retVal;
 }
 
+static void ProcessTsdTrkFX(TRK_RAM* trk, FILE_INF* fInf, MID_TRK_STATE* MTS)
+{
+	// run Effects Processor
+	UINT32 evtTicks = MTS->curDly - trk->noteStartTick;
+	UINT32 remTicks;
+	INT32 portaPos = 0;
+	INT16 pitchTransp = (INT16)trk->curNote - trk->lastNote;
+	
+	MTS->curDly = trk->noteStartTick;
+	for (remTicks = evtTicks; remTicks > 0; remTicks --, MTS->curDly ++)
+	{
+		INT32 noteFreq = 0;
+		INT32 tempPB;
+		UINT8 tempVol = trk->chnVol;
+		UINT8 vibAllow = 1;
+		
+		// handle portamento
+		if ((trk->chnFlags & 0x10) && portaPos < trk->portaDurat)
+		{
+			INT32 portaOffset = trk->portaRange * portaPos / (INT32)trk->portaDurat;
+			noteFreq += portaOffset;
+			portaPos ++;
+			vibAllow = (trk->chnFlags & 0x80);	// vibrato may be disabled during portamento
+		}
+		// handle software vibrato
+		if ((trk->chnFlags & 0x20) && vibAllow)
+		{
+			if (trk->vibCurDly > 0)
+			{
+				trk->vibCurDly --;
+			}
+			else
+			{
+				INT16 tblIdx = (INT16)trk->vibSpeed * trk->vibPos / 0x1F;
+				INT16 vibVal = VibratoLUT(trk->vibType, tblIdx - 1);	// start with value 0, like the actual driver
+				INT32 vibOffset;
+				if (! HIGH_PREC_PB)
+					vibOffset = (INT32)trk->vibStrength * vibVal / 0x100;	// driver formula
+				else if (! HIGH_PREC_VIB)
+					vibOffset = ((INT32)trk->vibStrength * vibVal / 0x100) * 0x1000;	// original vibrato precision with accurate PBs
+				else
+					vibOffset = (INT32)trk->vibStrength * vibVal * 0x10;	// with increased precision
+				noteFreq += vibOffset;
+				trk->vibPos ++;
+				if (! ED4_MODE)
+					trk->vibPos &= 0x1FF;	// only done by Brandish VT's driver
+			}
+		}
+		// handle pitch slides
+		if (trk->chnFlags & 0x40)
+		{
+			if (trk->psldCurDly > 0)
+				trk->psldCurDly --;
+			else
+				trk->psldFreq += trk->psldDelta;
+		}
+		tempPB = trk->pbDetune + trk->psldFreq + NoteFrac2PitchBend(pitchTransp, noteFreq);
+		if (tempPB != trk->lastPB)
+		{
+			trk->lastPB = tempPB;
+			WritePitchBend(fInf, MTS, trk->lastPB);
+		}
+		
+		// handle early note off
+		// Note: The order of all this stuff is important. (else the Note Off in VT_06_MD.M_ is triggered too late)
+		if (trk->chnFlags & 0x02)
+		{
+			if (remTicks == trk->noteOffTick)
+			{
+				trk->chnFlags &= ~0x02;
+				if ((trk->chnFlags & 0x200) && trk->vevPhase != 5)
+				{
+					trk->vevPhase = 4;
+					trk->vevTick = 0;
+				}
+				else if (trk->lastNote != 0xFF)
+				{
+					WriteEvent(fInf, MTS, 0x90, (trk->lastNote + trk->noteTransp) & 0x7F, 0x00);
+					trk->lastNote = 0xFF;
+				}
+			}
+		}
+		
+		// handle software tremolo
+		if (trk->chnFlags & 0x200)
+		{
+			INT16 volDelta = 0;
+			INT16 phaseDurat = 0;
+			INT16 envVolume = 0;
+			UINT8 skip = 0;
+			switch(trk->vevPhase)
+			{
+			case 0:	// attack
+				phaseDurat = trk->vevAtkTime;
+				envVolume = trk->vevAtkLvl;
+				volDelta = 0x7F - trk->vevAtkLvl;
+				break;
+			case 1:	// decay
+				phaseDurat = trk->vevDecTime;
+				envVolume = 0x7F;
+				volDelta = trk->vevDecLvl - 0x7F;
+				break;
+			case 2:	// sustain
+				phaseDurat = SUSTAIN_RATES[trk->vevSusRate & 0x7F];
+				envVolume = trk->vevDecLvl;
+				volDelta = 0x00 - trk->vevDecLvl;
+				break;
+			case 3:	// sustain silent
+				skip = 1;
+				tempVol = 0x00;
+				break;
+			case 4:	// release
+				phaseDurat = trk->vevRelTime;
+				envVolume = trk->vevVol;
+				volDelta = 0x00 - trk->vevVol;
+				break;
+			case 5:	// key off
+				skip = 1;
+				tempVol = 0x00;
+				if (trk->lastNote != 0xFF)
+				{
+					WriteEvent(fInf, MTS, 0x90, (trk->lastNote + trk->noteTransp) & 0x7F, 0x00);
+					trk->lastNote = 0xFF;
+				}
+				break;
+			}
+			if (! skip)
+			{
+				if (phaseDurat != 0)
+				{
+					volDelta = volDelta * (INT16)trk->vevTick / phaseDurat;
+					envVolume += volDelta;
+					if (trk->vevTick == phaseDurat)
+					{
+						trk->vevPhase ++;
+						trk->vevTick = 0;
+					}
+				}
+				trk->vevVol = (UINT8)envVolume;
+				tempVol = tempVol * envVolume / 0x7F;
+				trk->vevTick ++;
+			}
+		}
+		if (trk->chnFlags & 0x100)
+		{
+			if (trk->trmCurDly > 0)
+			{
+				trk->trmCurDly --;
+			}
+			else
+			{
+				UINT16 tblIdx = trk->trmSpeed * trk->trmPos / 0x20;
+				INT16 trmVal = TremoloLUT(tblIdx);
+				UINT16 trmVolume;
+				INT16 trmOffset;
+				tempVol = tempVol * trk->trmVolScale / 0x7F;
+				trmVolume = tempVol * trk->trmStrength / 0xFF;
+				trmOffset = (INT16)trmVolume * trmVal / 0x100;
+				tempVol += trmOffset;
+				trk->trmPos ++;
+			}
+		}
+		if (DRIVER_BUGS && trk->lastNote == 0xFF)
+			tempVol = trk->lastVol;	// don't output when no note is playing
+		if (tempVol != trk->lastVol && ! (trk->chnVolScale & 0x80))
+		{
+			trk->lastVol = tempVol;
+			WriteEvent(fInf, MTS, 0xB0, 0x0B, trk->lastVol * trk->chnVolScale);
+		}
+		if (trk->lastNote == 0xFF)
+			break;	// a Note Off stops all effect processing (see VT_06_MD.M_)
+	}
+	trk->chnFlags &= ~0x011;
+	MTS->curDly += remTicks;
+	trk->noteStartTick = MTS->curDly;
+	return;
+}
+
 static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 							TRK_INF* trkInf, FILE_INF* fInf, MID_TRK_STATE* MTS)
 {
 	static const UINT8 OPNA_PAN_LUT[0x04] = {0x3F, 0x7F, 0x01, 0x40};
+	TRK_RAM trkRAM;
+	TRK_RAM* trk = &trkRAM;
 	UINT32 inPos;
 	UINT32 trkTick;
 	UINT8 chnMode;
 	UINT8 chnID;
-	// bit 0: pitch to next note / "no attack" mode
-	// bit 1: enable early Note Off
-	// bit 4/5/6/7: [frequency effects] enable portamento / vibrato / pitch slide / vibrato during portamento
-	// bit 8/9: [volume effects] enable tremolo / envelope
-	UINT16 chnFlags;
-	UINT8 transp;
 	UINT8 trkEnd;
 	UINT8 cmdType;
-	INT8 noteTransp;	// transposition for non-MIDI channels
-	UINT8 chnVolScale;
-	UINT8 curNote;
-	UINT8 lastNote;
-	UINT8 noteVel;
-	UINT8 nVelSingle;
-	UINT8 chnVol;
-	UINT8 chnPan;
-	UINT8 lastVol;
-	INT32 lastPB;
-	UINT8 loopIdx;
 	UINT16 mstLoopCnt;
-	UINT32 loopPos[8];
-	UINT16 loopMax[8];	// total loop count
-	UINT16 loopCnt[8];	// remaining loops
 	char tempStr[0x20];
 	UINT16 songTempo;
-	UINT16 noteLenMod;
-	UINT32 noteStartTick;
-	UINT32 noteOffTick;
-	INT16 pbDetune;
-	UINT16 portaDurat;
-	INT32 portaRange;
-	
-	UINT8 vibDelay;	// 25 initial delay
-	UINT8 vibCurDly;	// 26 current delay
-	INT8 vibStrength;	// 27
-	INT8 vibSpeed;	// 28
-	UINT8 vibType;	// 29
-	INT16 vibPos;	// 2A
-	
-	UINT8 trmDelay;	// 1E initial delay
-	UINT8 trmCurDly;	// 1F current delay
-	UINT8 trmStrength;	// 20
-	UINT8 trmVolScale;	// 21
-	UINT8 trmSpeed;	// 22
-	UINT16 trmPos;	// 23
-	
-	UINT8 psldDelay;
-	UINT8 psldCurDly;
-	INT16 psldDelta;
-	INT16 psldFreq;
-	
-	UINT8 vevAtkLvl;	// 36
-	UINT8 vevAtkTime;	// 37
-	UINT8 vevDecTime;	// 38
-	UINT8 vevDecLvl;	// 39
-	UINT8 vevSusRate;	// 3A
-	UINT8 vevRelTime;	// 3B
-	UINT8 vevPhase;	// 3C
-	INT16 vevTick;	// 3D
-	UINT8 vevVol;	// 3F
 	
 	if (trkInf->startOfs >= songLen)
 		return 0x01;
@@ -426,34 +613,33 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 	
 	trkEnd = 0;
 	inPos = trkInf->startOfs;
-	chnFlags = 0x080;	// "vibrato during portamento" is enabled by default
+	trk->chnFlags = 0x080;	// "vibrato during portamento" is enabled by default
 	songTempo = 120;
-	noteTransp = 0;
-	chnVolScale = 1;
-	curNote = 0xFF;
-	lastNote = 0xFF;
-	noteVel = 0;	// driver default
-	nVelSingle = 0;
-	chnVol = 0x00;	// driver default
-	chnPan = 0x40;
-	lastVol = 0x80 | chnVol;
-	lastPB = 0;
-	transp = 0;
-	noteLenMod = 0;
-	noteOffTick = 0;
-	noteStartTick = 0;
-	pbDetune = 0;
-	vibDelay = 0;
-	vibCurDly = 0;
-	trmDelay = 0;
-	trmCurDly = 0;
-	psldDelay = 0;
-	psldCurDly = 0;
-	psldDelta = 0;
-	psldFreq = 0;
-	loopIdx = 0x00;
+	trk->noteTransp = 0;
+	trk->chnVolScale = 1;
+	trk->curNote = 0xFF;
+	trk->lastNote = 0xFF;
+	trk->noteVel = 0;	// driver default
+	trk->nVelSingle = 0;
+	trk->chnVol = 0x00;	// driver default
+	trk->chnPan = 0x40;
+	trk->lastVol = 0x80 | trk->chnVol;
+	trk->lastPB = 0;
+	trk->noteLenMod = 0;
+	trk->noteOffTick = 0;
+	trk->noteStartTick = 0;
+	trk->pbDetune = 0;
+	trk->vibDelay = 0;
+	trk->vibCurDly = 0;
+	trk->trmDelay = 0;
+	trk->trmCurDly = 0;
+	trk->psldDelay = 0;
+	trk->psldCurDly = 0;
+	trk->psldDelta = 0;
+	trk->psldFreq = 0;
+	trk->loopIdx = 0x00;
 	mstLoopCnt = 0;
-	vevPhase = 0;
+	trk->vevPhase = 0;
 	MTS->curDly = 0;
 	
 	if (trkInf->mode < 0x14)	// OPN/OPNA channels
@@ -467,29 +653,29 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			MTS->midChn = chnID;
 			chnMode = 0;
 			sprintf(tempStr, "FM %u", 1 + chnID);
-			noteTransp = +1*12;
+			trk->noteTransp = +1*12;
 		}
 		else if (chnMode == 1)	 // FM 1..3
 		{
 			MTS->midChn = chnID;
 			chnMode = 0x00;
 			sprintf(tempStr, "FM %u", 1 + chnID);
-			noteTransp = +1*12;
+			trk->noteTransp = +1*12;
 		}
 		else if (chnMode == 2)	// SSG 1..3
 		{
 			MTS->midChn = 0x0A + chnID;
 			chnMode = 0x01;
 			sprintf(tempStr, "SSG %u", 1 + chnID);
-			noteTransp = +2*12;
-			chnVolScale = 8;	// 0x0..0xF -> 0x00..0x7F
+			trk->noteTransp = +2*12;
+			trk->chnVolScale = 8;	// 0x0..0xF -> 0x00..0x7F
 		}
 		else //if (chnMode == 3)	// Rhythm
 		{
 			MTS->midChn = 0x09;
 			chnMode = 0x02;
 			sprintf(tempStr, "Rhythm");
-			chnVolScale = 0x80 | 4;	// 0x0..0x1F -> 0x00..0x7F
+			trk->chnVolScale = 0x80 | 4;	// 0x0..0x1F -> 0x00..0x7F
 		}
 	}
 	else if (trkInf->mode < 0x34)	// MIDI channels
@@ -505,8 +691,8 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 		chnID = 0x00;
  		MTS->midChn = chnID;
 		sprintf(tempStr, "Beeper");
-		chnVol = 0x7F;	// not what the driver does, but the beeper doesn't have volume control anyway
-		noteTransp = +4*12;
+		trk->chnVol = 0x7F;	// not what the driver does, but the beeper doesn't have volume control anyway
+		trk->noteTransp = +4*12;
 	}
 	if (! NO_TRK_NAMES)
 		WriteMetaEvent(fInf, MTS, 0x03, strlen(tempStr), tempStr);
@@ -520,21 +706,21 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 		WriteEvent(fInf, MTS, 0xB0, 0x64, 0x00);
 		WriteEvent(fInf, MTS, 0xB0, 0x06, PB_RANGE);
 		if (! (trkInf->useFlags & 0x100))
-			WritePitchBend(fInf, MTS, lastPB + pbDetune + psldFreq);
+			WritePitchBend(fInf, MTS, trk->lastPB + trk->pbDetune + trk->psldFreq);
 	}
 	if (! (trkInf->useFlags & 0x10))
 		WriteEvent(fInf, MTS, 0xB0, 0x07, 105);
 	if (! (trkInf->useFlags & 0x20))
 		WriteEvent(fInf, MTS, 0xB0, 0x0A, 0x40);
-	if (chnVolScale & 0x80)
+	if (trk->chnVolScale & 0x80)
 	{
-		lastVol = 0x80 | 0x7F;
+		trk->lastVol = 0x80 | 0x7F;
 		WriteEvent(fInf, MTS, 0xB0, 0x0B, 0x7F);
 	}
 	else if (! (trkInf->useFlags & 0x08))
 	{
-		lastVol = 0x80 | chnVol;
-		WriteEvent(fInf, MTS, 0xB0, 0x0B, chnVol * chnVolScale);
+		trk->lastVol = 0x80 | trk->chnVol;
+		WriteEvent(fInf, MTS, 0xB0, 0x0B, trk->chnVol * trk->chnVolScale);
 	}
 	if (! (trkInf->useFlags & 0x40))
 		WriteEvent(fInf, MTS, 0xB0, 0x5B, 0);
@@ -546,182 +732,9 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 	{
 		UINT32 prevPos = inPos;
 		
-		if (MTS->curDly > noteStartTick && lastNote != 0xFF)
-		{
-			// run Effects Processor
-			UINT32 evtTicks = MTS->curDly - noteStartTick;
-			UINT32 remTicks;
-			INT32 portaPos = 0;
-			INT16 pitchTransp = (INT16)curNote - lastNote;
-			
-			MTS->curDly = noteStartTick;
-			for (remTicks = evtTicks; remTicks > 0; remTicks --, MTS->curDly ++)
-			{
-				INT32 noteFreq = 0;
-				INT32 tempPB;
-				UINT8 tempVol = chnVol;
-				UINT8 vibAllow = 1;
-				
-				// handle portamento
-				if ((chnFlags & 0x10) && portaPos < portaDurat)
-				{
-					INT32 portaOffset = portaRange * portaPos / (INT32)portaDurat;
-					noteFreq += portaOffset;
-					portaPos ++;
-					vibAllow = (chnFlags & 0x80);	// vibrato may be disabled during portamento
-				}
-				// handle software vibrato
-				if ((chnFlags & 0x20) && vibAllow)
-				{
-					if (vibCurDly > 0)
-					{
-						vibCurDly --;
-					}
-					else
-					{
-						INT16 tblIdx = (INT16)vibSpeed * vibPos / 0x1F;
-						INT16 vibVal = VibratoLUT(vibType, tblIdx - 1);	// start with value 0, like the actual driver
-						INT32 vibOffset;
-						if (! HIGH_PREC_PB)
-							vibOffset = (INT32)vibStrength * vibVal / 0x100;	// driver formula
-						else if (! HIGH_PREC_VIB)
-							vibOffset = ((INT32)vibStrength * vibVal / 0x100) * 0x1000;	// original vibrato precision with accurate PBs
-						else
-							vibOffset = (INT32)vibStrength * vibVal * 0x10;	// with increased precision
-						noteFreq += vibOffset;
-						vibPos ++;
-						if (! ED4_MODE)
-							vibPos &= 0x1FF;	// only done by Brandish VT's driver
-					}
-				}
-				// handle pitch slides
-				if (chnFlags & 0x40)
-				{
-					if (psldCurDly > 0)
-						psldCurDly --;
-					else
-						psldFreq += psldDelta;
-				}
-				tempPB = pbDetune + psldFreq + NoteFrac2PitchBend(pitchTransp, noteFreq);
-				if (tempPB != lastPB)
-				{
-					lastPB = tempPB;
-					WritePitchBend(fInf, MTS, lastPB);
-				}
-				
-				// handle early note off
-				// Note: The order of all this stuff is important. (else the Note Off in VT_06_MD.M_ is triggered too late)
-				if (chnFlags & 0x02)
-				{
-					if (remTicks == noteOffTick)
-					{
-						chnFlags &= ~0x02;
-						if ((chnFlags & 0x200) && vevPhase != 5)
-						{
-							vevPhase = 4;
-							vevTick = 0;
-						}
-						else if (lastNote != 0xFF)
-						{
-							WriteEvent(fInf, MTS, 0x90, (lastNote + noteTransp) & 0x7F, 0x00);
-							lastNote = 0xFF;
-						}
-					}
-				}
-				
-				// handle software tremolo
-				if (chnFlags & 0x200)
-				{
-					INT16 volDelta = 0;
-					INT16 phaseDurat = 0;
-					INT16 envVolume = 0;
-					UINT8 skip = 0;
-					switch(vevPhase)
-					{
-					case 0:	// attack
-						phaseDurat = vevAtkTime;
-						envVolume = vevAtkLvl;
-						volDelta = 0x7F - vevAtkLvl;
-						break;
-					case 1:	// decay
-						phaseDurat = vevDecTime;
-						envVolume = 0x7F;
-						volDelta = vevDecLvl - 0x7F;
-						break;
-					case 2:	// sustain
-						phaseDurat = SUSTAIN_RATES[vevSusRate & 0x7F];
-						envVolume = vevDecLvl;
-						volDelta = 0x00 - vevDecLvl;
-						break;
-					case 3:	// sustain silent
-						skip = 1;
-						tempVol = 0x00;
-						break;
-					case 4:	// release
-						phaseDurat = vevRelTime;
-						envVolume = vevVol;
-						volDelta = 0x00 - vevVol;
-						break;
-					case 5:	// key off
-						skip = 1;
-						tempVol = 0x00;
-						if (lastNote != 0xFF)
-						{
-							WriteEvent(fInf, MTS, 0x90, (lastNote + noteTransp) & 0x7F, 0x00);
-							lastNote = 0xFF;
-						}
-						break;
-					}
-					if (! skip)
-					{
-						if (phaseDurat != 0)
-						{
-							volDelta = volDelta * (INT16)vevTick / phaseDurat;
-							envVolume += volDelta;
-							if (vevTick == phaseDurat)
-							{
-								vevPhase ++;
-								vevTick = 0;
-							}
-						}
-						vevVol = (UINT8)envVolume;
-						tempVol = tempVol * envVolume / 0x7F;
-						vevTick ++;
-					}
-				}
-				if (chnFlags & 0x100)
-				{
-					if (trmCurDly > 0)
-					{
-						trmCurDly --;
-					}
-					else
-					{
-						UINT16 tblIdx = trmSpeed * trmPos / 0x20;
-						INT16 trmVal = TremoloLUT(tblIdx);
-						UINT16 trmVolume;
-						INT16 trmOffset;
-						tempVol = tempVol * trmVolScale / 0x7F;
-						trmVolume = tempVol * trmStrength / 0xFF;
-						trmOffset = (INT16)trmVolume * trmVal / 0x100;
-						tempVol += trmOffset;
-						trmPos ++;
-					}
-				}
-				if (DRIVER_BUGS && lastNote == 0xFF)
-					tempVol = lastVol;	// don't output when no note is playing
-				if (tempVol != lastVol && ! (chnVolScale & 0x80))
-				{
-					lastVol = tempVol;
-					WriteEvent(fInf, MTS, 0xB0, 0x0B, lastVol * chnVolScale);
-				}
-				if (lastNote == 0xFF)
-					break;	// a Note Off stops all effect processing (see VT_06_MD.M_)
-			}
-			chnFlags &= ~0x011;
-			MTS->curDly += remTicks;
-			noteStartTick = MTS->curDly;
-		}
+		if (MTS->curDly > trk->noteStartTick && trk->lastNote != 0xFF)
+			ProcessTsdTrkFX(trk, fInf, MTS);
+		
 		if (inPos == trkInf->loopOfs && mstLoopCnt == 0)
 			WriteEvent(fInf, MTS, 0xB0, 0x6F, (UINT8)mstLoopCnt);
 		
@@ -736,20 +749,20 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 				inPos += 0x02;
 			}
 			
-			if ((chnFlags & 0x200) && vevPhase != 5)
+			if ((trk->chnFlags & 0x200) && trk->vevPhase != 5)
 			{
-				vevPhase = 4;
-				vevTick = 0;
+				trk->vevPhase = 4;
+				trk->vevTick = 0;
 			}
 			else
 			{
-				if (lastNote != 0xFF)
-					WriteEvent(fInf, MTS, 0x90, (lastNote + noteTransp) & 0x7F, 0x00);
-				lastNote = 0xFF;
-				curNote = 0xFF;
+				if (trk->lastNote != 0xFF)
+					WriteEvent(fInf, MTS, 0x90, (trk->lastNote + trk->noteTransp) & 0x7F, 0x00);
+				trk->lastNote = 0xFF;
+				trk->curNote = 0xFF;
 			}
 			
-			noteStartTick = MTS->curDly;
+			trk->noteStartTick = MTS->curDly;
 			MTS->curDly += noteDelay;
 			trkTick += noteDelay;
 		}
@@ -767,56 +780,56 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 				inPos += 0x02;
 			}
 			
-			curNote = cmdType;
-			if (nVelSingle)
+			trk->curNote = cmdType;
+			if (trk->nVelSingle)
 			{
-				curNoteVel = nVelSingle;
-				nVelSingle = 0x00;
+				curNoteVel = trk->nVelSingle;
+				trk->nVelSingle = 0x00;
 			}
 			else
 			{
-				curNoteVel = noteVel;
+				curNoteVel = trk->noteVel;
 			}
-			if (chnVolScale & 0x80)
-				curNoteVel = chnVol * (chnVolScale & 0x7F);	// for OPNA Rhythm, use Channel Volume as note velocity
+			if (trk->chnVolScale & 0x80)
+				curNoteVel = trk->chnVol * (trk->chnVolScale & 0x7F);	// for OPNA Rhythm, use Channel Volume as note velocity
 			else if (chnMode != 0x10)
 				curNoteVel = 0x7F;	// note velocity affects only MIDI channels
 			
 			if (songData[inPos] == 0x89)
 			{
 				//printf("Track %u: Portamento at position 0x%04X\n", trkInf->id, inPos);
-				portaRange = (songData[inPos + 0x01] - curNote) * 0x30;
+				trk->portaRange = (songData[inPos + 0x01] - trk->curNote) * 0x30;
 				if (HIGH_PREC_PB)
-					portaRange *= 0x1000;	// Note: considering [pos+2] being 0..100, this overflows for a distance >= 0x6D
-				portaRange = portaRange * songData[inPos + 0x02] / 100;
-				portaDurat = noteDelay;
-				chnFlags |= 0x10;	// enable portamento
+					trk->portaRange *= 0x1000;	// Note: considering [pos+2] being 0..100, this overflows for a distance >= 0x6D
+				trk->portaRange = trk->portaRange * songData[inPos + 0x02] / 100;
+				trk->portaDurat = noteDelay;
+				trk->chnFlags |= 0x10;	// enable portamento
 				inPos += 0x03;
 			}
-			if (noteLenMod == 0 || LookAheadCommand(songLen, songData, inPos, 0x83, chnMode))	// yes, the driver looks ahead for command 83 here
+			if (trk->noteLenMod == 0 || LookAheadCommand(songLen, songData, inPos, 0x83, chnMode))	// yes, the driver looks ahead for command 83 here
 			{
-				if (noteLenMod > 0 && songData[inPos] != 0x83)
+				if (trk->noteLenMod > 0 && songData[inPos] != 0x83)
 					printf("Track %u: Lookahead found far Tie command at 0x%04X\n", trkInf->id, prevPos);
-				chnFlags &= ~0x02;
+				trk->chnFlags &= ~0x02;
 				noteLen = noteDelay;
-				noteOffTick = 0;
+				trk->noteOffTick = 0;
 			}
 			else
 			{
-				chnFlags |= 0x02;
-				if (noteLenMod & 0x8000)
-					noteOffTick = (noteLenMod & 0x3FFF);
-				else if (noteLenMod & 0x4000)
-					noteOffTick = noteDelay - (noteLenMod & 0x3FFF);
+				trk->chnFlags |= 0x02;
+				if (trk->noteLenMod & 0x8000)
+					trk->noteOffTick = (trk->noteLenMod & 0x3FFF);
+				else if (trk->noteLenMod & 0x4000)
+					trk->noteOffTick = noteDelay - (trk->noteLenMod & 0x3FFF);
 				else
 				{
 					// The driver uses this algorithm.
-					UINT16 stopTick = (100 - noteLenMod) * noteDelay / 100;
+					UINT16 stopTick = (100 - trk->noteLenMod) * noteDelay / 100;
 					{
 						// The original code does SUB (for [100-noteLenMod]), then MOV, MUL, DIV [/100], then JNZ.
 						// However only the SUB sets the flags, so the JNZ effectively checks the result of the SUB command.
 						// So this is how it really works.
-						if (noteLenMod == 100)
+						if (trk->noteLenMod == 100)
 							stopTick = 1;
 					}
 					{
@@ -827,9 +840,9 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 						//if (stopTick == 0)
 						//	stopTick = 1;
 					}
-					noteOffTick = stopTick;
+					trk->noteOffTick = stopTick;
 				}
-				noteLen = noteDelay - (UINT16)noteOffTick;
+				noteLen = noteDelay - (UINT16)trk->noteOffTick;
 			}
 			//if (noteLen > noteDelay)	// prevent warnings for chords
 			//	printf("Warning Track %u: Bad note length %d at position 0x%04X\n", trkInf->id, (INT16)noteLen, inPos);
@@ -837,30 +850,30 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			
 			
 			// do Note Off and re-initialize effect memory for new notes
-			if (! (chnFlags & 0x01) && lastNote != 0xFF)
-				WriteEvent(fInf, MTS, 0x90, (lastNote + noteTransp) & 0x7F, 0x00);
+			if (! (trk->chnFlags & 0x01) && trk->lastNote != 0xFF)
+				WriteEvent(fInf, MTS, 0x90, (trk->lastNote + trk->noteTransp) & 0x7F, 0x00);
 			
-			if (! (chnFlags & 0x01) || curNote != lastNote)
+			if (! (trk->chnFlags & 0x01) || trk->curNote != trk->lastNote)
 			{
 				// This is reached when:
 				//	- (chnFlags & 0x01) is not set
 				//	- current note != base note
 				// This has the effect, that sometimes the values are reset when doing pitch bends
 				// to other notes. (The driver does this and VT_04_MD.M_ requires this to work properly.)
-				vibCurDly = vibDelay;
-				vibPos = 0;
-				psldCurDly = psldDelay;
-				psldFreq = 0;
-				trmCurDly = trmDelay;
-				trmPos = 0;
+				trk->vibCurDly = trk->vibDelay;
+				trk->vibPos = 0;
+				trk->psldCurDly = trk->psldDelay;
+				trk->psldFreq = 0;
+				trk->trmCurDly = trk->trmDelay;
+				trk->trmPos = 0;
 			}
-			if (! (chnFlags & 0x01))
+			if (! (trk->chnFlags & 0x01))
 			{
-				vevPhase = 0;
-				vevTick = 0;
+				trk->vevPhase = 0;
+				trk->vevTick = 0;
 			}
 			
-			if (! (chnFlags & 0x01))
+			if (! (trk->chnFlags & 0x01))
 			{
 				// Write Channel Volume and Pitch Bend states, so that they get set *BEFORE* Note On.
 				// This improves sound especially on Yamaha devices.
@@ -868,39 +881,39 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 				INT32 tempPB;
 				UINT8 tempVol;
 				
-				tempVol = chnVol;
-				if (lastVol == 0x80 && chnVol == 0)	// when volume was set at "init" tick and unchanged, don't resend
-					lastVol &= 0x7F;	// required to fix start of ED442.M_ track 11, which was broken by the ED411.M_ fix
-				if (chnFlags & 0x200)
-					tempVol = tempVol * vevAtkLvl / 0x7F;
-				if (tempVol != lastVol && ! (chnVolScale & 0x80))
+				tempVol = trk->chnVol;
+				if (trk->lastVol == 0x80 && trk->chnVol == 0)	// when volume was set at "init" tick and unchanged, don't resend
+					trk->lastVol &= 0x7F;	// required to fix start of ED442.M_ track 11, which was broken by the ED411.M_ fix
+				if (trk->chnFlags & 0x200)
+					tempVol = tempVol * trk->vevAtkLvl / 0x7F;
+				if (tempVol != trk->lastVol && ! (trk->chnVolScale & 0x80))
 				{
-					lastVol = tempVol;
-					WriteEvent(fInf, MTS, 0xB0, 0x0B, lastVol * chnVolScale);
+					trk->lastVol = tempVol;
+					WriteEvent(fInf, MTS, 0xB0, 0x0B, trk->lastVol * trk->chnVolScale);
 				}
 				
-				tempPB = pbDetune + psldFreq;
-				//if (chnFlags & 0x01)
-				//	tempPB += NoteFrac2PitchBend((INT16)curNote - lastNote, 0);
-				if (tempPB != lastPB)	// omit the PB when same as before
+				tempPB = trk->pbDetune + trk->psldFreq;
+				//if (trk->chnFlags & 0x01)
+				//	tempPB += NoteFrac2PitchBend((INT16)trk->curNote - trk->lastNote, 0);
+				if (tempPB != trk->lastPB)	// omit the PB when same as before
 				{
-					lastPB = tempPB;
-					WritePitchBend(fInf, MTS, lastPB);
+					trk->lastPB = tempPB;
+					WritePitchBend(fInf, MTS, trk->lastPB);
 				}
 			}
 			
 			// do actual Note On
-			if (! (chnFlags & 0x01) && curNote != 0xFF)
+			if (! (trk->chnFlags & 0x01) && trk->curNote != 0xFF)
 			{
 				if (chnMode == 0x02)
-					curNote = Note_OPNARhy2MidiDrum(curNote);
-				WriteEvent(fInf, MTS, 0x90, (curNote + noteTransp) & 0x7F, curNoteVel);
-				lastNote = curNote;
+					trk->curNote = Note_OPNARhy2MidiDrum(trk->curNote);
+				WriteEvent(fInf, MTS, 0x90, (trk->curNote + trk->noteTransp) & 0x7F, curNoteVel);
+				trk->lastNote = trk->curNote;
 			}
-			chnFlags &= ~0x01;
+			trk->chnFlags &= ~0x01;
 			
 			// TODO: optional improvement - support chords when noteDelay == 0 (The actual driver does NOT support chords.)
-			noteStartTick = MTS->curDly;
+			trk->noteStartTick = MTS->curDly;
 			MTS->curDly += noteDelay;
 			trkTick += noteDelay;
 		}
@@ -908,17 +921,17 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 		{
 		case 0x80:	// Loop Start
 			{
-				if (loopIdx >= 8)
+				if (trk->loopIdx >= 8)
 				{
 					inPos += 0x03;
 					printf("Error Track %u: Trying to do more than 8 nested loops at 0x%04X!\n", trkInf->id, prevPos);
 					break;
 				}
 				
-				loopPos[loopIdx] = inPos;
-				loopMax[loopIdx] = songData[inPos + 0x01];
-				loopCnt[loopIdx] = songData[inPos + 0x02];
-				loopIdx ++;
+				trk->loopPos[trk->loopIdx] = inPos;
+				trk->loopMax[trk->loopIdx] = songData[inPos + 0x01];
+				trk->loopCnt[trk->loopIdx] = songData[inPos + 0x02];
+				trk->loopIdx ++;
 				inPos += 0x03;
 			}
 			break;
@@ -936,16 +949,16 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 					printf("Warning Track %u: Loop Exit at 0x%04X not pointing to Loop End!\n", trkInf->id, prevPos);
 					break;
 				}
-				if (loopIdx == 0)
+				if (trk->loopIdx == 0)
 				{
 					printf("Error Track %u: Loop Exit without Loop Start at 0x%04X!\n", trkInf->id, prevPos);
 					break;
 				}
 				
 				// required in order to allow exiting neseted loops (see ED407.N_, track 8)
-				for (exitLpIdx = loopIdx; exitLpIdx > 0; exitLpIdx --)
+				for (exitLpIdx = trk->loopIdx; exitLpIdx > 0; exitLpIdx --)
 				{
-					if (loopPos[exitLpIdx - 1] == lpStPos)
+					if (trk->loopPos[exitLpIdx - 1] == lpStPos)
 						break;
 				}
 				if (exitLpIdx == 0)
@@ -955,10 +968,10 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 				}
 				
 				exitLpIdx --;
-				if (loopCnt[exitLpIdx] == loopMax[exitLpIdx] - 1)
+				if (trk->loopCnt[exitLpIdx] == trk->loopMax[exitLpIdx] - 1)
 				{
 					inPos += exitOfs;
-					loopIdx = exitLpIdx;
+					trk->loopIdx = exitLpIdx;
 				}
 			}
 			break;
@@ -969,51 +982,51 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 				UINT16 lpStPos = inPos + loopOfs + 0x01;
 				inPos += 0x03;
 				
-				if (loopIdx == 0 && songData[lpStPos] == 0x80)	// check for Loop Start command
+				if (trk->loopIdx == 0 && songData[lpStPos] == 0x80)	// check for Loop Start command
 				{
 					// recover loops where the Loop Start command was missed
 					// happens in ED407.A/.N and ED408.A/.N
-					loopPos[loopIdx] = lpStPos;
-					loopMax[loopIdx] = songData[lpStPos + 0x01];
-					loopCnt[loopIdx] = songData[lpStPos + 0x02];
-					loopIdx ++;
+					trk->loopPos[trk->loopIdx] = lpStPos;
+					trk->loopMax[trk->loopIdx] = songData[lpStPos + 0x01];
+					trk->loopCnt[trk->loopIdx] = songData[lpStPos + 0x02];
+					trk->loopIdx ++;
 				}
-				if (loopIdx == 0)
+				if (trk->loopIdx == 0)
 				{
 					printf("Error Track %u: Loop End without Loop Start at 0x%04X!\n", trkInf->id, prevPos);
 					break;
 				}
-				loopIdx --;
-				if (lpStPos != loopPos[loopIdx])
+				trk->loopIdx --;
+				if (lpStPos != trk->loopPos[trk->loopIdx])
 				{
 					printf("Error Track %u: Loop End at 0x%04X points to Loop Start at 0x%04X, expected %04X!\n",
-						trkInf->id, prevPos, lpStPos, loopPos[loopIdx]);
+						trkInf->id, prevPos, lpStPos, trk->loopPos[trk->loopIdx]);
 					break;
 				}
 				
-				loopCnt[loopIdx] ++;
-				if (loopMax[loopIdx] == 0)
+				trk->loopCnt[trk->loopIdx] ++;
+				if (trk->loopMax[trk->loopIdx] == 0)
 				{
 					// infinite loop
-					if (loopMax[loopIdx] < 0x80)
-						WriteEvent(fInf, MTS, 0xB0, 0x6F, (UINT8)loopCnt[loopIdx]);
+					if (trk->loopMax[trk->loopIdx] < 0x80)
+						WriteEvent(fInf, MTS, 0xB0, 0x6F, (UINT8)trk->loopCnt[trk->loopIdx]);
 					
-					if (loopCnt[loopIdx] < trkInf->loopTimes)
+					if (trk->loopCnt[trk->loopIdx] < trkInf->loopTimes)
 						takeLoop = 1;
 				}
-				else if (loopCnt[loopIdx] < loopMax[loopIdx])
+				else if (trk->loopCnt[trk->loopIdx] < trk->loopMax[trk->loopIdx])
 				{
 					takeLoop = 1;
 				}
 				if (takeLoop)
 				{
 					inPos += loopOfs + 0x01;
-					loopIdx ++;
+					trk->loopIdx ++;
 				}
 			}
 			break;
 		case 0x83:	// Pitch Bend / no-attack mode
-			chnFlags |= 0x01;	// set Pitch Bend flag
+			trk->chnFlags |= 0x01;	// set Pitch Bend flag
 			inPos += 0x01;
 			break;
 		case 0x85:	// Song Tempo
@@ -1029,31 +1042,31 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			}
 			break;
 		case 0x86:	// Detune Set
-			lastPB -= pbDetune;
-			pbDetune = (INT16)ReadLE16(&songData[inPos + 0x01]);
-			lastPB += pbDetune;
-			WritePitchBend(fInf, MTS, lastPB);
+			trk->lastPB -= trk->pbDetune;
+			trk->pbDetune = (INT16)ReadLE16(&songData[inPos + 0x01]);
+			trk->lastPB += trk->pbDetune;
+			WritePitchBend(fInf, MTS, trk->lastPB);
 			inPos += 0x03;
 			break;
 		case 0x87:	// Note Duration Modifier
-			noteLenMod = ReadLE16(&songData[inPos + 0x01]);
+			trk->noteLenMod = ReadLE16(&songData[inPos + 0x01]);
 			inPos += 0x03;
 			break;
 		case 0x88:	// Software Vibrato
-			vibDelay = songData[inPos + 0x01];
-			vibSpeed = (INT8)songData[inPos + 0x02];
-			vibStrength = (INT8)songData[inPos + 0x03];
-			vibType = songData[inPos + 0x04];
-			chnFlags |= 0x20;	// enable vibrato
+			trk->vibDelay = songData[inPos + 0x01];
+			trk->vibSpeed = (INT8)songData[inPos + 0x02];
+			trk->vibStrength = (INT8)songData[inPos + 0x03];
+			trk->vibType = songData[inPos + 0x04];
+			trk->chnFlags |= 0x20;	// enable vibrato
 			inPos += 0x05;
 			break;
 		case 0x89:	// Portamento
-			portaRange = (songData[inPos + 0x01] - curNote) * 0x30;
+			trk->portaRange = (songData[inPos + 0x01] - trk->curNote) * 0x30;
 			if (HIGH_PREC_PB)
-				portaRange *= 0x1000;
-			portaRange = portaRange * songData[inPos + 0x02] / 100;
-			portaDurat = 0;	// this is what happens when the slide is at the wrong spot
-			chnFlags |= 0x10;	// enable portamento
+				trk->portaRange *= 0x1000;
+			trk->portaRange = trk->portaRange * songData[inPos + 0x02] / 100;
+			trk->portaDurat = 0;	// this is what happens when the slide is at the wrong spot
+			trk->chnFlags |= 0x10;	// enable portamento
 			inPos += 0x03;
 			break;
 		case 0x8A:	// Effect Disable
@@ -1066,31 +1079,31 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 				{
 				case 0x00:	// Vibrato
 					if (onOff & 0x80)
-						chnFlags &= ~0x20;
+						trk->chnFlags &= ~0x20;
 					else
-						chnFlags |= 0x20;	// vibrato enable
+						trk->chnFlags |= 0x20;	// vibrato enable
 					if (onOff & 0x01)
-						chnFlags &= ~0x80;	// prevent vibrato while portamento is active
+						trk->chnFlags &= ~0x80;	// prevent vibrato while portamento is active
 					else
-						chnFlags |= 0x80;	// allow vibrato while portamento is active
+						trk->chnFlags |= 0x80;	// allow vibrato while portamento is active
 					break;
 				case 0x01:	// Pitch Slide
 					if (onOff)
-						chnFlags &= ~0x40;
+						trk->chnFlags &= ~0x40;
 					else
-						chnFlags |= 0x40;
+						trk->chnFlags |= 0x40;
 					break;
 				case 0x02:	// Tremolo
 					if (onOff)
-						chnFlags &= ~0x100;
+						trk->chnFlags &= ~0x100;
 					else
-						chnFlags |= 0x100;
+						trk->chnFlags |= 0x100;
 					break;
 				case 0x03:	// Volume Envelope
 					if (onOff)
-						chnFlags &= ~0x200;
+						trk->chnFlags &= ~0x200;
 					else
-						chnFlags |= 0x200;
+						trk->chnFlags |= 0x200;
 					break;
 				}
 			}
@@ -1118,35 +1131,35 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			break;
 		case 0x8C:	// Pan
 			if ((chnMode & 0xF0) == 0x00)
-				chnPan = OPNA_PAN_LUT[songData[inPos + 0x01] & 0x03];
+				trk->chnPan = OPNA_PAN_LUT[songData[inPos + 0x01] & 0x03];
 			else
-				chnPan = songData[inPos + 0x01];
-			WriteEvent(fInf, MTS, 0xB0, 0x0A, chnPan);
+				trk->chnPan = songData[inPos + 0x01];
+			WriteEvent(fInf, MTS, 0xB0, 0x0A, trk->chnPan);
 			inPos += 0x02;
 			break;
 		case 0x8D:	// Channel Volume
-			chnVol = songData[inPos + 0x01];
+			trk->chnVol = songData[inPos + 0x01];
 			inPos += 0x02;
-			if (chnFlags & 0x200)
+			if (trk->chnFlags & 0x200)
 			{
 				// for software envelopes, ensure Expression is rewritten,
 				// but write it at Note On
-				lastVol = 0xFF;
+				trk->lastVol = 0xFF;
 			}
-			else if (! (chnVolScale & 0x80))
+			else if (! (trk->chnVolScale & 0x80))
 			{
-				if (DRIVER_BUGS && lastNote == 0xFF)
+				if (DRIVER_BUGS && trk->lastNote == 0xFF)
 					break;	// The driver applies the channel volume later - when playing notes or running the envelope generator.
 				// applying immediately is nicer for analyzing the original data though
-				if (lastVol == 0 && chnVol > 0)
+				if (trk->lastVol == 0 && trk->chnVol > 0)
 					break;	// however it causes stray notes in ED411.M_, bar 30, so delay the volume change in this case
-				WriteEvent(fInf, MTS, 0xB0, 0x0B, chnVol * chnVolScale);	// yes, this goes to MIDI Expression
-				lastVol = chnVol;
+				WriteEvent(fInf, MTS, 0xB0, 0x0B, trk->chnVol * trk->chnVolScale);	// yes, this goes to MIDI Expression
+				trk->lastVol = trk->chnVol;
 			}
 			break;
 		case 0x8E:	// Channel Volume Accumulation
 			{
-				INT16 vol16 = chnVol + (INT8)songData[inPos + 0x01];
+				INT16 vol16 = trk->chnVol + (INT8)songData[inPos + 0x01];
 				if (DRIVER_BUGS)
 				{
 					// The driver only checks the "sign" and resets the volume to 0 when negative.
@@ -1161,19 +1174,19 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 					else if (vol16 > 0x7F)
 						vol16 = 0x7F;
 				}
-				chnVol = (UINT8)vol16;
+				trk->chnVol = (UINT8)vol16;
 				inPos += 0x02;
 			}
 			if (songData[inPos] == cmdType)
 				break;	// don't write when there are consecutive events
-			if (! (chnVolScale & 0x80))
+			if (! (trk->chnVolScale & 0x80))
 			{
-				if (DRIVER_BUGS && lastNote == 0xFF)
+				if (DRIVER_BUGS && trk->lastNote == 0xFF)
 					break;
-				if (lastVol == 0 && chnVol > 0)
+				if (trk->lastVol == 0 && trk->chnVol > 0)
 					break;
-				WriteEvent(fInf, MTS, 0xB0, 0x0B, chnVol * chnVolScale);
-				lastVol = chnVol;
+				WriteEvent(fInf, MTS, 0xB0, 0x0B, trk->chnVol * trk->chnVolScale);
+				trk->lastVol = trk->chnVol;
 			}
 			break;
 		case 0x90:	// Instrument
@@ -1186,15 +1199,15 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			break;
 		case 0x92:	// set Volume Envelope
 			//printf("Track %u: Volume Envelope at position 0x%04X!\n", trkInf->id, prevPos);
-			vevAtkLvl = songData[inPos + 0x01];
-			vevAtkTime = songData[inPos + 0x02];
-			vevDecTime = songData[inPos + 0x03];
-			vevDecLvl = songData[inPos + 0x04];
-			vevSusRate = songData[inPos + 0x05];
-			vevRelTime = songData[inPos + 0x06];
-			vevPhase = 0;	// done by the driver and required by VT_12_MD.M_
-			vevTick = 0;
-			chnFlags |= 0x200;	// enable volume envelope
+			trk->vevAtkLvl = songData[inPos + 0x01];
+			trk->vevAtkTime = songData[inPos + 0x02];
+			trk->vevDecTime = songData[inPos + 0x03];
+			trk->vevDecLvl = songData[inPos + 0x04];
+			trk->vevSusRate = songData[inPos + 0x05];
+			trk->vevRelTime = songData[inPos + 0x06];
+			trk->vevPhase = 0;	// done by the driver and required by VT_12_MD.M_
+			trk->vevTick = 0;
+			trk->chnFlags |= 0x200;	// enable volume envelope
 			inPos += 0x07;
 			break;
 		case 0x93:	// set SSG noise mode
@@ -1209,17 +1222,17 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			inPos += 0x02;
 			break;
 		case 0x95:	// Pitch Slide
-			psldDelay = songData[inPos + 0x01];
-			psldCurDly = psldDelay;	// the driver does this explicitly here
-			psldDelta = (INT8)songData[inPos + 0x02];
-			chnFlags |= 0x40;	// enable pitch slide
+			trk->psldDelay = songData[inPos + 0x01];
+			trk->psldCurDly = trk->psldDelay;	// the driver does this explicitly here
+			trk->psldDelta = (INT8)songData[inPos + 0x02];
+			trk->chnFlags |= 0x40;	// enable pitch slide
 			inPos += 0x03;
 			break;
 		case 0x96:	// set Note Velocity
 			if (! (songData[inPos + 0x01] & 0x80))
-				noteVel = songData[inPos + 0x01];
+				trk->noteVel = songData[inPos + 0x01];
 			else
-				nVelSingle = songData[inPos + 0x01] & 0x7F;
+				trk->nVelSingle = songData[inPos + 0x01] & 0x7F;
 			inPos += 0x02;
 			break;
 		case 0x97:	// Control Change
@@ -1231,11 +1244,11 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			}
 			break;
 		case 0x98:	// Software Tremolo
-			trmDelay = songData[inPos + 0x01];
-			trmSpeed = songData[inPos + 0x02];
-			trmStrength = songData[inPos + 0x03];
-			trmVolScale = songData[inPos + 0x04];
-			chnFlags |= 0x100;	// enable tremolo
+			trk->trmDelay = songData[inPos + 0x01];
+			trk->trmSpeed = songData[inPos + 0x02];
+			trk->trmStrength = songData[inPos + 0x03];
+			trk->trmVolScale = songData[inPos + 0x04];
+			trk->chnFlags |= 0x100;	// enable tremolo
 			inPos += 0x05;
 			break;
 		case 0x99:	// FM channel register write
@@ -1307,8 +1320,8 @@ static UINT8 TsdTrk2MidTrk(UINT32 songLen, const UINT8* songData,
 			break;
 		}	// end if (cmdType >= 0x80) / switch(cmdType)
 	}	// end while(! trkEnd)
-	if (lastNote != 0xFF)
-		WriteEvent(fInf, MTS, 0x90, (lastNote + noteTransp) & 0x7F, 0x00);
+	if (trk->lastNote != 0xFF)
+		WriteEvent(fInf, MTS, 0x90, (trk->lastNote + trk->noteTransp) & 0x7F, 0x00);
 	
 	return 0x00;
 }
@@ -1428,6 +1441,7 @@ static UINT8 PreparseTsdTrack(UINT32 songLen, const UINT8* songData, TRK_INF* tr
 	chnFlags = 0x00;
 	ctrlUse = 0x00;
 	useFlags = 0x0000;
+	lastNote = 0xFF;
 	
 	while(inPos < songLen && ! trkEnd)
 	{
