@@ -48,6 +48,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData);
 static UINT8 CacheSysExData(UINT16 sxBufSize, UINT8* sxBuf, UINT8* sxBufPos, UINT8 data,
 							FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 curCmd, UINT8 curTrk, UINT16 cmdPos);
 static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INFO* trkInf, UINT8 Mode);
+static void WritePitchBend(FILE_INF* fInf, MID_TRK_STATE* MTS, INT16 bend);
 static UINT8 NeedPBRangeFix(UINT8* curPBRange, INT16 PBend);
 static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf);
 static void CheckRunningNotes(FILE_INF* fInf, UINT32* Delay);
@@ -179,6 +180,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 	UINT8 trkCnt;
 	UINT8 curTrk;
 	UINT32 inPos;
+	UINT32 trkTick;
 	FILE_INF midFileInf;
 	MID_TRK_STATE MTS;
 	// Bit 0 - raw MIDI mode (don't do any fixes)
@@ -204,14 +206,19 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 	UINT8 tempByt;
 	UINT8 retVal;
 	UINT8 tempArr[0x10];
+	char tempStr[0x20];
 	UINT16 syxPos;
 	
 	UINT8 curNote;
-	UINT32 curNoteLen;
-	UINT32 curNoteDly;
 	UINT8 curNoteVol;
 	INT8 curNoteMove;
 	UINT8 lastNote;
+	
+	INT16 curPBend;	// trkRAM+2F/30
+	INT16 pSldCur;	// trkRAM+31/32
+	INT16 pSldDelta;	// trkRAM+33/34
+	INT16 pSldTarget;	// trkRAM+35/36
+	UINT32 pSldNextTick;
 	
 	UINT8 sysExHdr[2];
 	UINT8 sysExData[4];
@@ -308,7 +315,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 		{
 			// many songs seem to point to a 00 byte for unused tracks
 			trkFlags |= 0x80;
-			printf("Track %u begins with a 00 byte - skipping.\n", curTrk);
+			printf("Track %u begins with a 00 byte - ignoring track.\n", curTrk);
 		}
 		MTS.midChn = curTrk;
 		curNoteVol = 0x7F;
@@ -316,7 +323,14 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 			curNoteMove = +24;	// SSG channel
 		else
 			curNoteMove = 0;	// MIDI/FM channel
+		
 		pbRange = 0;
+		curPBend = 0;
+		pSldCur = 0;
+		pSldDelta = 0;
+		pSldTarget = 0;
+		pSldNextTick = (UINT32)-1;
+		
 		sysExBPos = 0x00;
 		sysExChkSum = 0x00;
 		RunNoteCnt = 0x00;
@@ -326,8 +340,43 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 			trkFlags |= 0x02;	// default to 3-byte note mode
 		lastNote = 48;
 		
+		trkTick = MTS.curDly;
 		while(! (trkFlags & 0x80) && inPos < SongLen)
 		{
+			UINT8 evtDly = 0;
+			if (pSldDelta != 0)
+			{
+				// handle pitch slides
+				// used by stjan2_98/ZAKOH12.BM2 and ZAKOPLAY.BM2
+				while(trkTick > pSldNextTick && pSldCur != pSldTarget)
+				{
+					UINT32 tempDly = trkTick - pSldNextTick;
+					MTS.curDly -= tempDly;
+					pSldNextTick ++;
+					
+					if (pSldCur < pSldTarget)
+					{
+						pSldCur += pSldDelta;
+						if (pSldCur > pSldTarget)
+							pSldCur = pSldTarget;
+					}
+					else if (pSldCur > pSldTarget)
+					{
+						pSldCur -= pSldDelta;
+						if (pSldCur < pSldTarget)
+							pSldCur = pSldTarget;
+					}
+					
+					tempSSht = curPBend + pSldCur;
+					if (pbRange != 0xFF && tempSSht != 0)
+						tempSSht = tempSSht * 8192 / pbRange / 256;
+					WritePitchBend(&midFileInf, &MTS, tempSSht);
+					MTS.curDly += tempDly;
+				}
+				if (pSldCur == pSldTarget)
+					pSldNextTick = (UINT32)-1;
+			}
+			
 			if (subEndOfs && inPos >= subEndOfs)
 			{
 				subEndOfs = 0x00;
@@ -337,6 +386,9 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 			curCmd = SongData[inPos];
 			if (curCmd < 0x80)
 			{
+				UINT8 curNoteLen;
+				UINT8 curNoteDly;
+				
 				if (trkFlags & 0x02)
 				{
 					curCmd = SongData[inPos + 0x00];
@@ -363,7 +415,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					}
 					if (curNoteDly == 0 && curNoteLen == 0)
 					{
-						printf("Note Delay/Length 0 on track %u at %04X\n", curTrk, inPos - 0x03);
+						printf("Track %u: Note Delay/Length 0 on at %04X\n", curTrk, inPos - 0x03);
 						WriteEvent(&midFileInf, &MTS, 0xD0, 1, 0);
 						curNoteDly = curNoteLen = 48/*lastNote*/;
 					}
@@ -408,19 +460,19 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					}
 				}
 				
-				MTS.curDly += curNoteDly;
+				evtDly = curNoteDly;
 			}
 			else
 			{
 				switch(curCmd)
 				{
 				case 0x80:	// set Tick resolution
-					printf("Warning: Sequence tries to change tick resolution on track %u at %04X\n", curTrk, inPos);
+					printf("Warning Track %u: Sequence tries to change tick resolution at %04X\n", curTrk, inPos);
 					tempSht = ReadLE16(&SongData[inPos + 0x01]);
 					inPos += 0x03;
 					break;
 				case 0x81:	// OPL register write
-					printf("OPL write track %u at %04X: mode %02X reg %02X data %02X\n", curTrk, inPos,
+					printf("Track %u: OPL write at %04X: mode %02X reg %02X data %02X\n", curTrk, inPos,
 							SongData[inPos + 0x01], SongData[inPos + 0x02], SongData[inPos + 0x03]);
 					if (DebugCtrls)
 					{
@@ -437,7 +489,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 				case 0x83:	// Subroutine (repeat previous part)
 					if (fileVer == FILEVER_V2)
 					{
-						printf("Ignored unknown event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
+						printf("Track %u: Ignored unknown command %02X at %04X\n", curTrk, curCmd, inPos);
 						if (DebugCtrls)
 						{
 							WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
@@ -454,11 +506,11 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 						startPos = ReadLE32(&SongData[inPos]);	inPos += 0x04;
 						endPos = ReadLE32(&SongData[inPos]);	inPos += 0x04;
 						if (startPos > endPos)
-							printf("Subroutine warning: StartOfs %04X > EndOfs %04X (track %u at %04X)\n",
-									startPos, endPos, curCmd, curTrk, inPos);
+							printf("Warning Track %u: Subroutine StartOfs %04X > EndOfs %04X (at %04X)\n",
+									curTrk, startPos, endPos, curCmd, inPos);
 						if (subEndOfs)
 						{
-							printf("Error: Nested subroutines!\n");
+							printf("Error Track %u: Nested subroutines!\n", curTrk);
 							break;	// just ignore them
 						}
 						subRetOfs = inPos;
@@ -472,14 +524,14 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 						tempSSht = (INT16)ReadLE16(&SongData[inPos + 0x01]);
 						if (tempSSht < 0)
 						{
-							printf("Stopping on backwards jump on track %u at %04X\n", curTrk, inPos);
+							printf("Warning Track %u: Stopping on backwards jump at %04X\n", curTrk, inPos);
 							trkFlags |= 0x80;
 						}
 						inPos += tempSSht;
 					}
 					else	// Subroutine Return
 					{
-						printf("Invalid Subroutine Return command on track %u at %04X\n", curTrk, inPos);
+						printf("Error Track %u: Invalid Subroutine Return command at %04X\n", curTrk, inPos);
 						trkFlags |= 0x80;
 					}
 					break;
@@ -511,8 +563,8 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 						trkFlags |= 0x02;	// set 3-byte note format
 					else
 					{
-						printf("Event %02X: Unexpected parameter %02X on track %u at %04X\n",
-								curCmd, tempByt, curTrk, inPos);
+						printf("Error Track %u: Command %02X with unexpected parameter %02X at %04X\n",
+								curTrk, curCmd, tempByt, inPos);
 						getchar();
 					}
 					inPos += 0x02;
@@ -526,13 +578,13 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					inPos += 0x04 + SongData[inPos + 0x03];
 					break;
 				case 0x91:	// unknown
-					printf("Ignored unknown event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
+					printf("Warning Track %u: Ignored unknown evecommandnt %02X at %04X\n", curTrk, curCmd, inPos);
 					if (DebugCtrls)
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
 					inPos += 0x01;
 					break;
 				case 0x94:	// OPN register write
-					printf("OPN write track %u at %04X: reg %02X data %02X\n", curTrk, inPos,
+					printf("Track %u: OPN write at %04X: reg %02X data %02X\n", curTrk, inPos,
 							SongData[inPos + 0x01], SongData[inPos + 0x02]);
 					if (DebugCtrls)
 					{
@@ -544,9 +596,8 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 				case 0x96:	// ignored
 					if (SongData[inPos + 0x01] || SongData[inPos + 0x02])
 					{
-						printf("Ignored unknown event %02X %02X %02X on track %u at %04X\n",
-							SongData[inPos + 0x00], SongData[inPos + 0x01], SongData[inPos + 0x02],
-							curTrk, inPos);
+						printf("Warning Track %u: Ignored unknown command %02X %02X %02X at %04X\n", curTrk,
+							SongData[inPos + 0x00], SongData[inPos + 0x01], SongData[inPos + 0x02], inPos);
 						if (DebugCtrls)
 						{
 							WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
@@ -558,7 +609,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 				case 0x9B:	// Loop End
 					if (! loopIdx)
 					{
-						printf("Warning: Loop End without Loop Start!\n");
+						printf("Error Track %u: Loop End without Loop Start at 0x%04X!\n", curTrk, inPos);
 						trkFlags |= 0x80;
 						break;
 					}
@@ -579,13 +630,24 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					}
 					else
 					{
+						UINT32 nextTrkOfs = (curTrk + 1 < trkCnt) ? trkInf[curTrk+1].StartOfs : SongLen;
 						// finish loop
 						inPos += 0x02;
+						// A bunch of songs in irium_98 and urban_98 end track this way:
+						//  command 9B 00, byte 00, [next track data]
+						// We try to detect this here.
+						if (inPos + 0x00 <= nextTrkOfs && inPos + 0x02 >= nextTrkOfs && SongData[inPos] == 0x00)
+						{
+							trkFlags |= 0x80;
+							printf("Track %u: Terminating track after master loop end at %04X.\n", curTrk, inPos);
+							break;
+						}
 						// Note: some songs in urban_98 require a track termination after the 9B 00" command
 						if (fileVer == FILEVER_V2 && SongData[inPos - 0x01] == 0x00 && SongData[inPos] == 0x00)
 						{
 							trkFlags |= 0x80;
-							printf("Terminating track %u due to command %02X at %04X.\n", curTrk, SongData[inPos], inPos);
+							printf("Track %u: Terminating track due to command %02X at %04X.\n", curTrk, SongData[inPos], inPos);
+							// TODO: Can I check for the start offset of the next track and just terminate then?
 							break;
 						}
 					}
@@ -599,10 +661,9 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					loopIdx ++;
 					break;
 				case 0x9D:	// Detune
-					tempSht = (INT8)SongData[inPos + 0x01];
-					tempSht *= 8;
-					tempSht += 0x2000;
-					WriteEvent(&midFileInf, &MTS, 0xE0, tempSht & 0x7F, tempSht >> 7);
+					tempSSht = (INT8)SongData[inPos + 0x01];
+					tempSSht *= 8;
+					WritePitchBend(&midFileInf, &MTS, tempSSht);
 					inPos += 0x02;
 					break;
 				case 0x9E:	// ignored (used for padding)
@@ -618,7 +679,8 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					break;
 				case 0xA4:	// Pitch Bend
 					// Note: MSB = semitone, LSB = fraction
-					tempSSht = ReadLE16(&SongData[inPos + 0x01]);
+					curPBend = ReadLE16(&SongData[inPos + 0x01]);
+					tempSSht = curPBend + pSldCur;
 					if (pbRange != 0xFF && tempSSht != 0)
 					{
 						if (NeedPBRangeFix(&pbRange, tempSSht))
@@ -630,14 +692,13 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 						}
 						tempSSht = tempSSht * 8192 / pbRange / 256;
 					}
-					tempSSht += 0x2000;
-					WriteEvent(&midFileInf, &MTS, 0xE0, tempSSht & 0x7F, tempSSht >> 7);
+					WritePitchBend(&midFileInf, &MTS, tempSSht);
 					inPos += 0x03;
 					break;
 				case 0xA5:	// set OPN/OPNA mode
 					// Note: actually invalid in MsDrv v4
 					tempByt = SongData[inPos + 0x01];
-					printf("OPNA mode enable = %u on track %u at %04X\n", tempByt, curTrk, inPos);
+					printf("Track %u: OPNA mode enable = %u at %04X\n", curTrk, tempByt, inPos);
 					if (DebugCtrls)
 					{
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
@@ -663,7 +724,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					break;
 				case 0xA9:	// Special FM3 frequency mode enable
 					tempByt = SongData[inPos + 0x01];
-					printf("Special FM3 mode enable = %u on track %u at %04X\n", tempByt, curTrk, inPos);
+					printf("Track %u: Special FM3 mode enable = %u at %04X\n", curTrk, tempByt, inPos);
 					if (DebugCtrls)
 					{
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
@@ -673,7 +734,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					break;
 				case 0xAA:	// set Special FM3 key on operator mask
 					tempByt = SongData[inPos + 0x01];
-					printf("Special FM3 mode enable = %u on track %u at %04X\n", tempByt, curTrk, inPos);
+					printf("Track %u: Special FM3 mode enable = %u at %04X\n", curTrk, tempByt, inPos);
 					if (DebugCtrls)
 					{
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
@@ -688,34 +749,47 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					inPos += 0x03;
 					break;
 				case 0xAD:	// set Pitch Slide step
-					printf("Unimplemented: 'Pitch Slide step' command on track %u at %04X\n", curTrk, inPos);
-					tempSSht = (INT16)ReadLE16(&SongData[inPos + 0x01]);
-					if (DebugCtrls)
-					{
-						WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
-						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, tempSSht & 0x7F);
-					}
+					pSldDelta = (INT16)ReadLE16(&SongData[inPos + 0x01]);
+					printf("Track %u: Pitch Slide step = %d at %04X\n", curTrk, pSldDelta, inPos);
+					pSldNextTick = trkTick;
 					inPos += 0x03;
 					break;
 				case 0xAE:	// set Pitch Slide destination
-					printf("Unimplemented: 'Pitch Slide destination' command on track %u at %04X\n", curTrk, inPos);
-					tempSht = ReadLE16(&SongData[inPos + 0x01]);
-					if (DebugCtrls)
+					pSldTarget = ReadLE16(&SongData[inPos + 0x01]);
+					printf("Track %u: Pitch Slide target = %+d at %04X\n", curTrk, pSldTarget, inPos);
+					pSldNextTick = trkTick;
+					
+					if (pbRange != 0xFF && pSldTarget != 0)
 					{
-						WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
-						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, tempSSht & 0x7F);
+						if (NeedPBRangeFix(&pbRange, curPBend + pSldTarget))
+						{
+							// write Pitch Bend Range
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x65, 0x00);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x64, 0x00);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x06, pbRange);
+						}
 					}
 					inPos += 0x03;
 					break;
 				case 0xAF:	// set Pitch Slide state (current value)
-					tempSSht = (INT16)ReadLE16(&SongData[inPos + 0x01]);
-					if (tempSSht != 0)
-						printf("Unimplemented: Non-zero pitch slide state set on track %u at %04X\n", curTrk, inPos);
-					if (DebugCtrls)
+					pSldCur = (INT16)ReadLE16(&SongData[inPos + 0x01]);
+					pSldNextTick = trkTick;
+					
+					tempSSht = curPBend + pSldCur;
+					if (pbRange != 0xFF && tempSSht != 0)
 					{
-						WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
-						WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, tempSSht & 0x7F);
+						if (NeedPBRangeFix(&pbRange, tempSSht))
+						{
+							// write Pitch Bend Range
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x65, 0x00);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x64, 0x00);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x06, pbRange);
+						}
+						tempSSht = tempSSht * 8192 / pbRange / 256;
 					}
+					WritePitchBend(&midFileInf, &MTS, tempSSht);
+					if (pSldCur != 0)
+						printf("Track %u: Pitch slide state = +%d at %04X\n", curTrk, pSldCur, inPos);
 					inPos += 0x03;
 					break;
 				case 0xB0:	// set Pan Left
@@ -729,8 +803,10 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					break;
 				case 0xC1:	// set Communication value
 					tempSht = ReadLE16(&SongData[inPos + 0x01]);
-					printf("Set Communication value to %u on track %u at %04X\n", tempSht, curTrk, inPos);
-					WriteEvent(&midFileInf, &MTS, 0xB0, 0x77, tempSht & 0x7F);
+					printf("Track %u: Set Marker = %u at position 0x%04X\n", curTrk, tempSht, inPos);
+					sprintf(tempStr, "Marker = %u", tempSht);
+					WriteMetaEvent(&midFileInf, &MTS, 0x06, strlen(tempStr), tempStr);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, tempSht & 0x7F);
 					inPos += 0x03;
 					break;
 				case 0xC2:	// reset GS checksum state
@@ -747,8 +823,8 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 				case 0xC4:	// send Roland SysEx checksum
 					if (sysExBPos >= 0x80)
 					{
-						printf("Event %02X Warning: buffer overflow! (track %u at %04X)\n",
-								curCmd, curTrk, inPos);
+						printf("Warning Track %u: Event %02X buffer overflow at %04X!\n",
+								curTrk, curCmd, inPos);
 						sysExBPos --;
 					}
 					else
@@ -770,7 +846,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					inPos += 0x03 + tempSht;
 					break;
 				case 0xD0:	// set OPNA Rhythm Mask
-					MTS.curDly += SongData[inPos + 0x01];
+					evtDly = SongData[inPos + 0x01];
 					// I don't print a warning here, as it may spam the console.
 					if (DebugCtrls)
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x3F, SongData[inPos + 0x02]);
@@ -783,7 +859,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 				case 0xD5:	// set OPNA Rhythm channel 5 volume
 				case 0xD6:	// set OPNA Rhythm channel 6 volume
 					tempByt = curCmd - 0xD1;	// rhythm channel ID
-					//printf("Unimplemented: Setting OPNA rhythm ch %u volume track %u at %04X\n", tempByt, curTrk, inPos);
+					//printf("Warning Track %u: Unimplemented: Setting OPNA rhythm ch %u volume at %04X\n", curTrk, tempByt, inPos);
 					if (DebugCtrls)
 					{
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, curCmd & 0x7F);
@@ -795,7 +871,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					sysExData[0] = SongData[inPos + 0x02];
 					sysExData[1] = SongData[inPos + 0x03];
 					if (fileVer != FILEVER_V2)	// skip for correct timing in urban_98
-						MTS.curDly += SongData[inPos + 0x01];
+						evtDly = SongData[inPos + 0x01];
 					inPos += 0x04;
 					break;
 				case 0xDE:	// set SysEx Offset low + Data, send SysEx
@@ -813,14 +889,14 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					
 					WriteLongEvent(&midFileInf, &MTS, 0xF0, tempByt, tempArr);
 					if (fileVer != FILEVER_V2)	// skip for correct timing in urban_98
-						MTS.curDly += SongData[inPos + 0x01];
+						evtDly = SongData[inPos + 0x01];
 					inPos += 0x04;
 					break;
 				case 0xDF:	// set SysEx Device ID + Model ID
 					sysExHdr[0] = SongData[inPos + 0x02];	// Device ID
 					sysExHdr[1] = SongData[inPos + 0x03];	// Model ID
 					if (fileVer != FILEVER_V2)	// skip for correct timing in urban_98
-						MTS.curDly += SongData[inPos + 0x01];
+						evtDly = SongData[inPos + 0x01];
 					inPos += 0x04;
 					break;
 				case 0xE2:	// set MIDI instrument with Bank MSB/LSB
@@ -828,7 +904,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x00, SongData[inPos + 0x03]);	// Bank MSB
 					WriteEvent(&midFileInf, &MTS, 0xB0, 0x20, 0x00);	// Bank LSB (fixed to 0)
 					WriteEvent(&midFileInf, &MTS, 0xC0, tempByt, 0x00);
-					MTS.curDly += SongData[inPos + 0x01];
+					evtDly = SongData[inPos + 0x01];
 					inPos += 0x04;
 					break;
 				case 0xE6:	// set MIDI Channel
@@ -870,23 +946,23 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 							curNoteMove = 0;	// FM/OPL channel
 						}
 					}
-					MTS.curDly += SongData[inPos + 0x01];
+					evtDly = SongData[inPos + 0x01];
 					inPos += 0x03;
 					break;
 				case 0xE7:	// Tempo Modifier
 					if (tempoChgTrk > curTrk || tempoChgPos > inPos)
-						printf("Warning: Tempo Modifier on track %u at %04X\n", curTrk, inPos);
-					tempoMod = ReadLE16(&SongData[inPos + 0x02]);
+						printf("Warning Track %u: Tempo Modifier at %04X\n", curTrk, inPos);
+					tempoMod = SongData[inPos + 0x02];
 					// I've only seen the second parameter byte to be 00 and the driver ignores it.
-					if (tempoMod & 0xFF00)
+					// The RCP format has it as tempo slide speed.
+					if (SongData[inPos + 0x03] != 0x00)
 					{
-						printf("Event %02X: Unexpected parameter %04X on track %u at %04X\n",
-								curCmd, tempoMod, curTrk, inPos);
+						printf("Warning Track %u: Unsupported tempo slide speed 0x%02X at %04X\n",
+								curTrk, curCmd, SongData[inPos + 0x03], inPos);
 						getchar();
-						tempoMod &= 0x00FF;
 					}
 					if (! tempoMod)
-						tempoMod = 0x0040;	// just for safety
+						tempoMod = 0x40;	// just for safety
 					if (fileVer == FILEVER_V2)
 					{
 						// The old driver simply ignores the command.
@@ -900,32 +976,33 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 						WriteBE32(tempArr, tempLng);
 						WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
 					}
-					MTS.curDly += SongData[inPos + 0x01];
+					evtDly = SongData[inPos + 0x01];
 					inPos += 0x04;
 					break;
 				case 0xEA:	// MIDI Channel Aftertouch
 					WriteEvent(&midFileInf, &MTS, 0xD0, SongData[inPos + 0x02], 0x00);
-					MTS.curDly += SongData[inPos + 0x01];
+					evtDly = SongData[inPos + 0x01];
 					inPos += 0x03;
 					break;
 				case 0xEB:	// MIDI Controller
 					WriteEvent(&midFileInf, &MTS, 0xB0, SongData[inPos + 0x02], SongData[inPos + 0x03]);
-					MTS.curDly += SongData[inPos + 0x01];
+					evtDly = SongData[inPos + 0x01];
 					inPos += 0x04;
 					break;
 				case 0xEC:	// MIDI Instrument
 					tempByt = SongData[inPos + 0x02];
 					WriteEvent(&midFileInf, &MTS, 0xC0, tempByt, 0x00);
-					MTS.curDly += SongData[inPos + 0x01];
+					evtDly = SongData[inPos + 0x01];
 					inPos += 0x03;
 					break;
 				case 0xED:	// MIDI Note Aftertouch
 					WriteEvent(&midFileInf, &MTS, 0xA0, SongData[inPos + 0x02], SongData[inPos + 0x03]);
-					MTS.curDly += SongData[inPos + 0x01];
+					evtDly = SongData[inPos + 0x01];
 					inPos += 0x04;
 					break;
 				case 0xEE:	// Pitch Bend with Delay
-					tempSSht = ReadLE16(&SongData[inPos + 0x02]);
+					curPBend = ReadLE16(&SongData[inPos + 0x02]);
+					tempSSht = curPBend + pSldCur;
 					if (pbRange != 0xFF && tempSSht != 0)
 					{
 						if (NeedPBRangeFix(&pbRange, tempSSht))
@@ -937,9 +1014,8 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 						}
 						tempSSht = tempSSht * 8192 / pbRange / 256;
 					}
-					tempSSht += 0x2000;
-					WriteEvent(&midFileInf, &MTS, 0xE0, tempSSht & 0x7F, tempSSht >> 7);
-					MTS.curDly += SongData[inPos + 0x01];
+					WritePitchBend(&midFileInf, &MTS, tempSSht);
+					evtDly = SongData[inPos + 0x01];
 					inPos += 0x04;
 					break;
 				case 0xFE:	// Track End
@@ -948,7 +1024,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					inPos += 0x01;
 					break;
 				default:
-					printf("Unknown event %02X on track %u at %04X\n", curCmd, curTrk, inPos);
+					printf("Error Track %u: Unknown command 0x%02X at position 0x%04X!\n", curTrk, curCmd, inPos);
 					if (DebugCtrls)
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
 					inPos += 0x01;
@@ -956,6 +1032,8 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					break;
 				}
 			}
+			MTS.curDly += evtDly;
+			trkTick += evtDly;
 			if (fileVer == FILEVER_V4)
 				inPos = (inPos + 0x03) & ~0x03;	// 4-byte padding
 		}
@@ -1245,6 +1323,21 @@ static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INFO* 
 		if (fileVer == FILEVER_V4)
 			inPos = (inPos + 0x03) & ~0x03;	// 4-byte padding
 	}
+	
+	return;
+}
+
+static void WritePitchBend(FILE_INF* fInf, MID_TRK_STATE* MTS, INT16 bend)
+{
+	UINT16 bendVal;
+	
+	// The sound driver does no boundary checks here.
+	//if (bend < -0x2000)
+	//	bend = -0x2000;
+	//else if (bend > +0x1FFF)
+	//	bend = +0x1FFF;
+	bendVal = 0x2000 + bend;
+	WriteEvent(fInf, MTS, 0xE0, (bendVal >> 0) & 0x7F, (bendVal >> 7) & 0x7F);
 	
 	return;
 }
