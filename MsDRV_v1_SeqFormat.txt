@@ -1,0 +1,121 @@
+MsDRV Sequence Format (for MsDRV)
+=====================
+(.MS files)
+
+Header - MsDRV v1
+------
+09h*2 bytes - track pointers (absolute)
+	OPN/OPNA Mode:
+		PSG 1/2/3
+		FM 1/2/3
+		FM 4/5/6
+	MIDI Mode:
+		8 or 9 MIDI tracks (channel ID is initialized to 2..10)
+		Only the first 8 tracks are processed.
+		Many (but not all) songs contain 9 pointers, but then the last track often contains garbage data.
+
+There is a total of 3 variants of MsDRV v1.
+v1a - runs with 24 ticks/beat, MIDI channels are fixed to 2..10 (used in Present/Sweet Emotion)
+v1b - runs with 48 ticks/beat, otherwise same as v1a
+v1c - runs with 48 ticks/beat, has additional commands and allows changing MIDI channels
+
+Sequence Commands
+-----------------
+00 - ignored
+	Note: For some reason, a number of songs uses byte 00 as a "track terminator".
+01..0C - play note 0..11 in the current octave
+	final note = (octave + 1) * 12 + note
+0D - play rest
+0E..80 - ignored
+81 vv - set current octave to vv
+82 ii - set FM/SSG/MIDI Instrument
+83 cc - set MIDI channel to cc [MsDrv v1c+]
+84 ll mm - GoTo position (absolute offset)
+85 vv - set Volume (00..7F) / Note Velocity
+86 xx - ignored
+87 xx - ignored
+88 - octave up (clamped to 7)
+89 - octave down (clamped to 0)
+8A tt - set Tempo to tt BPM
+8B - ignored
+8C xx - ignored
+8D xx - ignored
+8E xx - ignored
+8F - ignored
+90 - ignored
+91 - ignored
+92 - ignored
+93 - ignored
+94 ll mm - Pitch Bend [MsDrv v1c+]
+	ll/mm are raw MIDI pitch bend parameters
+95 - note tie (takes effect *after* the next note)
+96 xx - ignored
+	Some songs seem to use this to count the current measure.
+97 aa mm vv - store aa, set volume (mm == 00) or set instrument (mm == 01)
+98 tt - set note length to tt ticks
+99 mm - set note length modifier to mm
+	All following notes will be shortened to floor(tt * mm / 8) ticks. mm == 0 results in no notes at all.
+	(Overall timing is unaffected. mm=06 means the note is tt*0.75 ticks long, followed by a delay of tt*0.25 ticks.)
+9A - "Note Length Modifier" Subroutine Return (for driver-internal use only)
+9B tt - Loop End, loop tt times (tt = 0 -> infinite)
+9C - Loop Start
+9D xx - ignored
+9E - ignored
+9F pp - set MIDI Panning [MsDrv v1c+]
+A0..BF - ignored
+C0..CF - add to delay ticks from table
+D0..DF - ignored
+E0..EF - set delay ticks from table
+	MsDrv v1a: 96/48/24/16/12/8/6/4/3/72/36/18/9/2/1/32 (driver runs with 24 ticks/beat)
+	MsDrv v1b+: 192/96/48/32/24/16/12/8/6/144/72/36/18/4/2/1 (driver runs with 48 ticks/beat)
+	SWEET6.MUD/SWEETA.MUD/SWEETB.MUD rely on the "32 tick" delay from v1a's table.
+F0..FD - ignored
+FE - Track End
+FF - Song End (acts as Track End in the MIDI driver)
+
+
+v1b MIDI track RAM layout
+-------------------------
+Note: The track RAM pointer is stored in SI.
+
+addr	len	data
+00	01	track enable/disable (disable == 01h, enable != 01h)
+01/02	02	Data Pointer (register DI)
+03	01	octave [default: 4]
+04	01	note [default: 1]
+05	01	current delay [default: 24], applied after "rest" and "key on"
+06	01	final note (== (octave+1) * 12 + note)
+07	01	last final note (for note tie check)
+08	01	command mode (0 = rest, 1 = key on, 2 = set instrument, 3 = set tempo)
+09	01	processing mode (0 == process next sequence data, 1 == do note/delay, this always applies the delay)
+0A	01	tie flag 1 (set by command 95)
+0B	01	tie flag 2 (copied from "tie flag 1" after a note/rest)
+0C	01	volume [default: 106]
+0D	01	volume backup (original value for when track is muted) [default: 106]
+0E	01	current instrument
+0F	01	enforce note sending
+10	01	note length modifier "NLM" [default: 8]
+11	10	NLM subroutine state (0 = no)
+12	02	NLM subroutine return address
+14	01	NLM subroutine backup of "current delay"
+15	02	Loop Stack Pointer
+17..46		Loop Memory (10h slots)
+ +00	02	Loop Start Pointer
+ +02	01	Loop Counter
+-> 47h bytes per track
+
+v1c MIDI track RAM layout
+-------------------------
+addr	len	data
+00	01	track enable/disable
+01/02	02	Data Pointer (register DI)
+03	01	MIDI command for current channel (90h..9Fh)
+04	01	octave [default: 4]
+05	01	note [default: 1]
+06	01	current delay [default: 24]
+07	01	final note
+08	01	last final note
+09	01	command mode
+0A	01	processing mode
+0B	01	tie flag 1
+0C	01	tie flag 2
