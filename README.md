@@ -63,7 +63,7 @@ See fmp2mid.c for a list of games that use TGL FMP.
 ## fuga2rcp
 This tool converts FUGA Systems MIDI songs to RCP format.
 
-You may wonder Why I'm converting to RCP here. The answer is simple: The original is just an RCP file with a simplified header.
+You may wonder why I'm converting to RCP here. The answer is simple: The original format is just an RCP file with a simplified header.
 
 The tool was written for/tested with Amaranth II (NEC PC-98).
 
@@ -206,6 +206,14 @@ Early versions of MsDRV have the code embedded in the main executable. Later ver
 
 Common file extensions for MsDRV music files are MF1, MF2, and MUS.
 Bunretsu Shugo Shin Twinkle Star has one .MF2 archive per song. Each .MF2 archive contains all variants (OPN, OPNA, MT-32, SC-55) of a song and you need to unpack/decompress it to get the actual music file.
+
+The tool supports all known variants of MsDRV.
+However only the conversion of MIDI music is fully supported. Conversion of FM music is very basic and may not work.
+
+Version-specific notes:
+- In order to convert MsDRV v1a songs correctly (games "Present" and "Sweet Emotion"), you have to pass the parameter `-ForceVer v1a`.
+  The autodetection defaults to v1c, which causes some songs to get out of sync.
+- For MsDRV v1 FM songs, you need to pass the `-FM` parameter to select the correct channel modes.
 
 ## mucom2mid
 This converts songs in PC-8801 Mucom format to MIDI.

@@ -43,6 +43,7 @@
 // Note:
 //  Games using MsDrv v1 contain fully separate FM and MIDI sound drivers.
 //  In later versions, the FM and MIDI sound drivers were combined and share some code.
+//  Games running on the X68000 keep the Little Endian byte order for pointers in music data.
 //
 // An easy way to distinguish between MsDrv v1 versions (MIDI driver only):
 //  - Search for 80 44 ## 60 E9 ## ## - these 7 bytes form the block that sets the delay.
@@ -71,46 +72,48 @@
 #endif
 #endif	// INLINE
 
+#ifdef _MSC_VER
+#define stricmp	_stricmp
+#else
+#define stricmp	strcasecmp
+#endif
+
 
 #include "midi_funcs.h"
 
 
-typedef struct running_note
-{
-	UINT8 midChn;
-	UINT8 note;
-	UINT32 remLen;
-} RUN_NOTE;
-
 typedef struct _track_info
 {
-	UINT32 StartOfs;
-	UINT32 LoopOfs;
-	UINT32 TickCnt;
-	UINT32 LoopTick;
-	UINT16 LoopTimes;
-	UINT8 TrkID;
-} TRK_INFO;
+	UINT32 startOfs;
+	UINT32 loopOfs;
+	UINT32 tickCnt;
+	UINT32 loopTick;
+	UINT16 loopTimes;
+	UINT8 trkID;
+} TRK_INF;
+
+
+#define RUNNING_NOTES
+#define BALANCE_TRACK_TIMES
+#include "midi_utils.h"
 
 
 UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData);
 UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData);
 static UINT8 CacheSysExData(UINT16 sxBufSize, UINT8* sxBuf, UINT8* sxBufPos, UINT8 data,
 							FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 curCmd, UINT8 curTrk, UINT16 cmdPos);
-static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INFO* trkInf, UINT8 Mode);
-static void PreparseMsDrvTrack_v1(UINT32 SongLen, const UINT8* SongData, TRK_INFO* trkInf, UINT8 fileVer, UINT8 Mode);
+static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INF* trkInf, UINT8 Mode);
+static void PreparseMsDrvTrack_v1(UINT32 SongLen, const UINT8* SongData, TRK_INF* trkInf, UINT8 fileVer, UINT8 Mode);
 static void WritePitchBend(FILE_INF* fInf, MID_TRK_STATE* MTS, INT16 bend);
 static UINT8 NeedPBRangeFix(UINT8* curPBRange, INT16 PBend);
-static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf);
-static void CheckRunningNotes(FILE_INF* fInf, UINT32* Delay);
 static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay);
-static void FlushRunningNotes(FILE_INF* fInf, MID_TRK_STATE* MTS);
 
 static UINT8 WriteFileData(UINT32 DataLen, const UINT8* Data, const char* FileName);
 static double OPN2DB(UINT8 TL);
 static UINT8 DB2Mid(double DB);
 static UINT8 PanBits2MidiPan(UINT8 Pan);
 static UINT8 CalcGSChecksum(UINT16 DataSize, const UINT8* Data);
+INLINE UINT32 Tempo2Mid(UINT16 bpm, UINT8 scale);
 
 INLINE UINT16 ReadLE16(const UINT8* Data);
 INLINE UINT32 ReadLE32(const UINT8* Data);
@@ -122,6 +125,8 @@ INLINE UINT32 ReadLE32(const UINT8* Data);
 #define FILEVER_V2		0x20	// v2: 10 tracks (Bunretsu Shugo Shin Twinkle Star)
 #define FILEVER_V4		0x40	// v4: 24 tracks, 4-byte padding (MsDRV 4.4)
 #define FILEVER_V4L		0x41	// v4 light: 24 tracks, no padding (MsDRV 4.5 light)
+
+#define IS_MAJOR_VER(a, b)	((a & 0xF0) == (b & 0xF0))
 
 // MsDrv v1 delay table
 static const UINT8 DELAY_LUT[2][0x10] = {
@@ -136,15 +141,17 @@ static UINT32 MidLen;
 static UINT8* MidData;
 
 #define MAX_RUN_NOTES	0x20	// should be more than enough even for the MIDI sequences
-static UINT8 RunNoteCnt;
+static UINT16 RunNoteCnt;
 static RUN_NOTE RunNotes[MAX_RUN_NOTES];
-static UINT8 FixVolume;
-static UINT8 DebugCtrls;
 static UINT8 fileVer;
 
 static UINT16 MIDI_RES = 48;
 static UINT16 NUM_LOOPS = 2;
 static UINT8 NO_LOOP_EXT = 0;
+static UINT8 FixVolume = 0;
+static UINT8 DebugCtrls = 0;
+static UINT8 forcedFileVer = 0xFF;
+static UINT8 DEFAULT_FM_MODE = 0;
 
 static UINT8 tempoChgTrk = 0xFF;
 static UINT32 tempoChgTick = 0;
@@ -154,51 +161,86 @@ int main(int argc, char* argv[])
 {
 	int argbase;
 	FILE* hFile;
-	char* StrPtr;
 	UINT8 retVal;
 	
 	printf("MsDRV -> Midi Converter\n-----------------------\n");
 	if (argc < 3)
 	{
-		printf("Usage: msdrv2mid.exe Options input.bin output.mid\n");
-		printf("Options: (options can be combined, default setting is 'r')\n");
-		printf("    r   Raw conversion (other options are ignored)\n");
-		printf("    v   fix Volume (convert db levels to logarithmic MIDI, OPN(A) only)\n");
-		printf("    d   write debug MIDI controllers\n");
+		printf("Usage: msdrv2mid.exe [options] input.bin output.mid\n");
+		printf("Options:\n");
+		printf("    -Loops n    Loop each track at least n times. (default: %u)\n", NUM_LOOPS);
+		printf("    -NoLpExt    No Loop Extension\n");
+		printf("                Do not fill short tracks to the length of longer ones.\n");
+		printf("    -Debug      write debug MIDI controllers\n");
+		printf("    -VolFix     OPN/OPL: convert db levels to logarithmic MIDI\n");
+		printf("    -ForceVer x enforce a file format version x (can be: v1a, v1c, v2, v4, v4l)\n");
+		printf("    -FM         MsDRV v1: assume FM/SSG channels (defaults to MIDI)\n");
+		printf("\n");
 		printf("Supported/verified games: \n");
 		printf("    MsDRV v1: Sweet Emotion, Mirage, Kagami - Mirror\n");
 		printf("    MsDRV v2: Bunretsu Shugo Shin Twinkle Star\n");
-		printf("    MsDRV 4.4: Miwaku no Chousho, Kara no Naka no Kotori\n");
-		printf("    MsDRV 4.5 light: Ekudorado: Kingdom Inside of a Mirror\n");
+		printf("    MsDRV v4.4: Miwaku no Chousho, Kara no Naka no Kotori\n");
+		printf("    MsDRV v4.5 light: Ekudorado: Kingdom Inside of a Mirror\n");
 		return 0;
 	}
 	
 	MidiDelayCallback = MidiDelayHandler;
 	
-	FixVolume = 0;
-	DebugCtrls = 0;
-	StrPtr = argv[1];
-	while(*StrPtr != '\0')
+	argbase = 1;
+	while(argbase < argc && argv[argbase][0] == '-')
 	{
-		switch(toupper(*StrPtr))
+		if (! stricmp(argv[argbase] + 1, "Loops"))
 		{
-		case 'R':
-			FixVolume = 0;
-			break;
-		case 'V':
-			FixVolume = 1;
-			break;
-		case 'D':
-			DebugCtrls = 1;
-			break;
+			argbase ++;
+			if (argbase < argc)
+			{
+				NUM_LOOPS = (UINT16)strtoul(argv[argbase], NULL, 0);
+				if (! NUM_LOOPS)
+					NUM_LOOPS = 2;
+			}
 		}
-		StrPtr ++;
+		else if (! stricmp(argv[argbase] + 1, "NoLpExt"))
+			NO_LOOP_EXT = 1;
+		else if (! stricmp(argv[argbase] + 1, "Debug"))
+			DebugCtrls = 1;
+		else if (! stricmp(argv[argbase] + 1, "VolFix"))
+			FixVolume = 1;
+		else if (! stricmp(argv[argbase] + 1, "ForceVer"))
+		{
+			UINT8 ver = 0xFF;
+			argbase ++;
+			if (argbase < argc)
+			{
+				if (! stricmp(argv[argbase], "v1a"))
+					ver = FILEVER_V1A;
+				else if (! stricmp(argv[argbase], "v1b"))
+					ver = FILEVER_V1B;	// It's not like this is any different from v1c, but let's just have it.
+				else if (! stricmp(argv[argbase], "v1c"))
+					ver = FILEVER_V1C;
+				else if (! stricmp(argv[argbase], "v2"))
+					ver = FILEVER_V2;
+				else if (! stricmp(argv[argbase], "v4"))
+					ver = FILEVER_V4;
+				else if (! stricmp(argv[argbase], "v4l"))
+					ver = FILEVER_V4L;
+			}
+			if (ver == 0xFF)
+			{
+				printf("Invalid version specifier!\n");
+				return 2;
+			}
+			forcedFileVer = ver;
+		}
+		else if (! stricmp(argv[argbase] + 1, "FM"))
+			DEFAULT_FM_MODE = 1;
+		else
+			break;
+		argbase ++;
 	}
-	argbase = 2;
 	if (argc < argbase + 2)
 	{
 		printf("Not enough arguments.\n");
-		return 0;
+		return 2;
 	}
 	
 	hFile = fopen(argv[argbase + 0], "rb");
@@ -210,8 +252,8 @@ int main(int argc, char* argv[])
 	
 	fseek(hFile, 0x00, SEEK_END);
 	ROMLen = ftell(hFile);
-	if (ROMLen > 0xFFFF)	// 64 KB
-		ROMLen = 0xFFFF;
+	if (ROMLen > 0x10000)	// 64 KB
+		ROMLen = 0x10000;
 	
 	fseek(hFile, 0x00, SEEK_SET);
 	ROMData = (UINT8*)malloc(ROMLen);
@@ -237,8 +279,8 @@ int main(int argc, char* argv[])
 
 UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 {
-	TRK_INFO trkInf[0x20];
-	TRK_INFO* tempTInf;
+	TRK_INF trkInf[0x20];
+	TRK_INF* tempTInf;
 	UINT8 trkCnt;
 	UINT8 curTrk;
 	UINT32 inPos;
@@ -289,7 +331,22 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 	UINT8 sysExChkSum;
 	
 	tempSht = ReadLE16(&SongData[0x00]);
-	if (tempSht == 0x0010 || tempSht == 0x0012)
+	if (forcedFileVer != 0xFF)
+	{
+		if (IS_MAJOR_VER(forcedFileVer, FILEVER_V1A))
+			return MsDrv2Mid_v1(SongLen, SongData);
+		else if (IS_MAJOR_VER(forcedFileVer, FILEVER_V2))
+			trkCnt = (UINT8)tempSht / 2;
+		else
+			trkCnt = 24;
+		fileVer = forcedFileVer;
+		if (fileVer == FILEVER_V2)
+			printf("Format: %s, %u tracks\n", "v2", trkCnt);
+		else
+			printf("Format: %s, %u tracks (padding: %s)\n", "v4", trkCnt,
+					(fileVer & 0x01) ? "no" : "yes");
+	}
+	else if (tempSht == 0x0010 || tempSht == 0x0012)
 	{
 		return MsDrv2Mid_v1(SongLen, SongData);
 	}
@@ -316,43 +373,45 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 		printf("Unable to detect format version!\n");
 		return 0x80;	// unknown version
 	}
+	if (trkCnt > sizeof(trkInf) / sizeof(trkInf[0]))
+		trkCnt = (UINT8)(sizeof(trkInf) / sizeof(trkInf[0]));
 	
 	midFileInf.alloc = 0x20000;	// 128 KB should be enough
 	midFileInf.data = (UINT8*)malloc(midFileInf.alloc);
 	midFileInf.pos = 0x00;
 	
-	if (fileVer <= FILEVER_V2)
+	if (IS_MAJOR_VER(fileVer, FILEVER_V2))
 	{
 		inPos = 0x00;
 		for (curTrk = 0; curTrk < trkCnt; curTrk ++, inPos += 0x02)
-			trkInf[curTrk].StartOfs = ReadLE16(&SongData[inPos]);
+			trkInf[curTrk].startOfs = ReadLE16(&SongData[inPos]);
 	}
-	else //if ((fileVer & 0xF0) == FILEVER_V4)
+	else //if (IS_MAJOR_VER(fileVer, FILEVER_V4))
 	{
 		inPos = 0x00;
 		for (curTrk = 0; curTrk < trkCnt; curTrk ++, inPos += 0x04)
-			trkInf[curTrk].StartOfs = ReadLE32(&SongData[inPos]);
+			trkInf[curTrk].startOfs = ReadLE32(&SongData[inPos]);
 	}
 	for (curTrk = 0; curTrk < trkCnt; curTrk ++)
 	{
 		// set the "length" to the next track's offset - makes handling command 00 easier
-		UINT32 nextTrkOfs = (curTrk + 1 < trkCnt) ? trkInf[curTrk+1].StartOfs : SongLen;
-		nextTrkOfs = (nextTrkOfs >= trkInf[curTrk].StartOfs && nextTrkOfs <= SongLen) ? nextTrkOfs : SongLen;
+		UINT32 nextTrkOfs = (curTrk + 1 < trkCnt) ? trkInf[curTrk+1].startOfs : SongLen;
+		nextTrkOfs = (nextTrkOfs >= trkInf[curTrk].startOfs && nextTrkOfs <= SongLen) ? nextTrkOfs : SongLen;
 		
 		tempTInf = &trkInf[curTrk];
-		tempTInf->LoopOfs = 0x00;
-		tempTInf->TickCnt = 0;
-		tempTInf->LoopTimes = NUM_LOOPS;
-		tempTInf->LoopTick = 0;
-		tempTInf->TrkID = curTrk;
+		tempTInf->loopOfs = 0x00;
+		tempTInf->tickCnt = 0;
+		tempTInf->loopTick = 0;
+		tempTInf->trkID = curTrk;
 		
 		PreparseMsDrvTrack(nextTrkOfs, SongData, tempTInf, 0);
-		if (tempTInf->LoopOfs)
-			PreparseMsDrvTrack(nextTrkOfs, SongData, tempTInf, 1);
+		if (tempTInf->loopOfs)
+			PreparseMsDrvTrack(nextTrkOfs, SongData, tempTInf, 1);	// pass #2 to count the actual loop length
+		tempTInf->loopTimes = tempTInf->loopOfs ? NUM_LOOPS : 0;
 	}
 	
 	if (! NO_LOOP_EXT)
-		GuessLoopTimes(trkCnt, trkInf);
+		BalanceTrackTimes(trkCnt, trkInf, MIDI_RES / 4, 0xFF);
 	
 	WriteMidiHeader(&midFileInf, 0x0001, trkCnt, MIDI_RES);
 	
@@ -361,7 +420,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 	for (curTrk = 0; curTrk < trkCnt; curTrk ++)
 	{
 		tempTInf = &trkInf[curTrk];
-		inPos = tempTInf->StartOfs;
+		inPos = tempTInf->startOfs;
 		
 		WriteMidiTrackStart(&midFileInf, &MTS);
 		
@@ -397,7 +456,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 		
 		sysExBPos = 0x00;
 		sysExChkSum = 0x00;
-		RunNoteCnt = 0x00;
+		RunNoteCnt = 0;
 		subEndOfs = 0x00;
 		subRetOfs = 0x00;
 		if (fileVer == FILEVER_V2)
@@ -482,7 +541,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 				if (! curNoteLen)	// length == 0 -> rest (confirmed with MIDI log of sound driver)
 					curNote = 0x00;
 				
-				CheckRunningNotes(&midFileInf, &MTS.curDly);
+				CheckRunningNotes(&midFileInf, &MTS.curDly, &RunNoteCnt, RunNotes);
 				for (tempByt = 0x00; tempByt < RunNoteCnt; tempByt ++)
 				{
 					if (RunNotes[tempByt].note == curNote)
@@ -494,13 +553,8 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 				if (tempByt >= RunNoteCnt && curNote > 0x00)
 				{
 					WriteEvent(&midFileInf, &MTS, 0x90, curNote, curNoteVol);
-					if (RunNoteCnt < MAX_RUN_NOTES)
-					{
-						RunNotes[RunNoteCnt].midChn = MTS.midChn;
-						RunNotes[RunNoteCnt].note = curNote;
-						RunNotes[RunNoteCnt].remLen = curNoteLen;
-						RunNoteCnt ++;
-					}
+					AddRunningNote(MAX_RUN_NOTES, &RunNoteCnt, RunNotes,
+									MTS.midChn, curNote, 0x80, curNoteLen);	// The sound driver sends 9# note 00.
 				}
 				
 				evtDly = curNoteDly;
@@ -557,8 +611,8 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 							break;	// just ignore them
 						}
 						subRetOfs = inPos;
-						inPos = tempTInf->StartOfs + startPos;
-						subEndOfs = tempTInf->StartOfs + endPos;
+						inPos = tempTInf->startOfs + startPos;
+						subEndOfs = tempTInf->startOfs + endPos;
 						// In MsDRV v4, it works like this:
 						//  - enable "subroutine mode" + save old offset
 						//  - jump to subroutine offset
@@ -599,7 +653,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					break;
 				case 0x8A:	// Tempo in BPM
 					curBPM = SongData[inPos + 0x01];
-					tempLng = (UINT32)(60000000.0 / (curBPM * tempoMod / 64.0));
+					tempLng = Tempo2Mid(curBPM, tempoMod);
 					WriteBE32(tempArr, tempLng);
 					WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
 					inPos += 0x02;
@@ -678,7 +732,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					{
 						if (loopCount[loopIdx] <= 0x7F)
 							WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)loopCount[loopIdx]);
-						tempSht = tempTInf->LoopTimes;
+						tempSht = tempTInf->loopTimes;
 					}
 					if (loopCount[loopIdx] < tempSht)
 					{
@@ -693,7 +747,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					}
 					break;
 				case 0x9C:	// Loop Start
-					if (inPos == tempTInf->LoopOfs)
+					if (inPos == tempTInf->loopOfs)
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, 0);
 					inPos += 0x01;
 					loopPos[loopIdx] = inPos;
@@ -790,13 +844,13 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					break;
 				case 0xAD:	// set Pitch Slide step
 					pSldDelta = (INT16)ReadLE16(&SongData[inPos + 0x01]);
-					printf("Track %u: Pitch Slide step = %d at %04X\n", curTrk, pSldDelta, inPos);
+					//printf("Track %u: Pitch Slide step = %d at %04X\n", curTrk, pSldDelta, inPos);
 					pSldNextTick = trkTick;
 					inPos += 0x03;
 					break;
 				case 0xAE:	// set Pitch Slide destination
 					pSldTarget = ReadLE16(&SongData[inPos + 0x01]);
-					printf("Track %u: Pitch Slide target = %+d at %04X\n", curTrk, pSldTarget, inPos);
+					//printf("Track %u: Pitch Slide target = %+d at %04X\n", curTrk, pSldTarget, inPos);
 					pSldNextTick = trkTick;
 					
 					if (pbRange != 0xFF && pSldTarget != 0)
@@ -828,8 +882,8 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 						tempSSht = tempSSht * 8192 / pbRange / 256;
 					}
 					WritePitchBend(&midFileInf, &MTS, tempSSht);
-					if (pSldCur != 0)
-						printf("Track %u: Pitch slide state = +%d at %04X\n", curTrk, pSldCur, inPos);
+					//if (pSldCur != 0)
+					//	printf("Track %u: Pitch slide state = +%d at %04X\n", curTrk, pSldCur, inPos);
 					inPos += 0x03;
 					break;
 				case 0xB0:	// set Pan Left
@@ -1013,7 +1067,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 					{
 						// TODO: This goes horribly wrong when a song should split 8A and E7 commands over multiple tracks.
 						// I haven't seen this in any song though.
-						tempLng = (UINT32)(60000000.0 / (curBPM * tempoMod / 64.0));
+						tempLng = Tempo2Mid(curBPM, tempoMod);
 						WriteBE32(tempArr, tempLng);
 						WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
 					}
@@ -1080,7 +1134,7 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 		}
 		if (inPos >= SongLen && ! (trkFlags & 0x80))
 			printf("Warning: Reached EOF early on track %u!\n", curTrk);
-		FlushRunningNotes(&midFileInf, &MTS);
+		FlushRunningNotes(&midFileInf, &MTS.curDly, &RunNoteCnt, RunNotes, 0);
 		
 		WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
 		
@@ -1094,10 +1148,9 @@ UINT8 MsDrv2Mid(UINT32 SongLen, const UINT8* SongData)
 
 UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData)
 {
-	TRK_INFO trkInf[0x20];
-	TRK_INFO* tempTInf;
+	TRK_INF trkInf[0x10];
+	TRK_INF* tempTInf;
 	UINT8 DELAY_MODE;
-	UINT8 chnBase;
 	UINT8 trkCnt;
 	UINT8 curTrk;
 	UINT32 inPos;
@@ -1129,17 +1182,39 @@ UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData)
 	UINT8 lastNote;
 	
 	tempSht = ReadLE16(&SongData[0x00]);
+	if (forcedFileVer != 0xFF)
 	{
-		fileVer = FILEVER_V1B;
+		const char* fmtStr;
+		fileVer = forcedFileVer;
+		fmtStr = (fileVer == FILEVER_V1A) ? "v1a" : "v1c";
 		trkCnt = (UINT8)tempSht / 2;
-		printf("Detected format: %s, %u tracks\n", "v1", trkCnt);
+		tempByt = trkCnt;
+		if (!DebugCtrls)
+		{
+			if (trkCnt > 8)
+				trkCnt = 8;	// Only the first 8 tracks are processed and others often contains garbage.
+		}
+		printf("Format: %s, %u tracks\n", fmtStr, trkCnt);
 	}
-	chnBase = 0x02;
-	if (!DebugCtrls)
+	else
 	{
-		if (trkCnt > 8)
-			trkCnt = 8;	// Only the first 8 tracks are processed and others often contains garbage.
+		const char* fmtStr;
+		fileVer = FILEVER_V1C;	// we default to v1c
+		fmtStr = (fileVer == FILEVER_V1A) ? "v1a" : "v1c";
+		trkCnt = (UINT8)tempSht / 2;
+		tempByt = trkCnt;
+		if (!DebugCtrls)
+		{
+			if (trkCnt > 8)
+				trkCnt = 8;	// Only the first 8 tracks are processed and others often contains garbage.
+		}
+		if (trkCnt == tempByt)
+			printf("Detected format: %s, %u tracks\n", fmtStr, trkCnt);
+		else
+			printf("Detected format: %s, %u pointers/%u tracks\n", fmtStr, tempByt, trkCnt);
 	}
+	if (trkCnt > sizeof(trkInf) / sizeof(trkInf[0]))
+		trkCnt = (UINT8)(sizeof(trkInf) / sizeof(trkInf[0]));
 	
 	midFileInf.alloc = 0x20000;	// 128 KB should be enough
 	midFileInf.data = (UINT8*)malloc(midFileInf.alloc);
@@ -1148,49 +1223,51 @@ UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData)
 	{
 		inPos = 0x00;
 		for (curTrk = 0; curTrk < trkCnt; curTrk ++, inPos += 0x02)
-			trkInf[curTrk].StartOfs = ReadLE16(&SongData[inPos]);
+			trkInf[curTrk].startOfs = ReadLE16(&SongData[inPos]);
 	}
-	for (curTrk = 0; curTrk < trkCnt; curTrk ++)
-	{
-		// set the "length" to the next track's offset - makes handling command 00 easier
-		UINT32 nextTrkOfs = (curTrk + 1 < trkCnt) ? trkInf[curTrk+1].StartOfs : SongLen;
-		nextTrkOfs = (nextTrkOfs >= trkInf[curTrk].StartOfs && nextTrkOfs <= SongLen) ? nextTrkOfs : SongLen;
-		
-		tempTInf = &trkInf[curTrk];
-		tempTInf->LoopOfs = 0x00;
-		tempTInf->TickCnt = 0;
-		tempTInf->LoopTimes = NUM_LOOPS;
-		tempTInf->LoopTick = 0;
-		tempTInf->TrkID = curTrk;
-		
-		PreparseMsDrvTrack_v1(nextTrkOfs, SongData, tempTInf, fileVer, 0);
-		if (tempTInf->LoopOfs)
-			PreparseMsDrvTrack_v1(nextTrkOfs, SongData, tempTInf, fileVer, 1);
-	}
-	
-	if (! NO_LOOP_EXT)
-		GuessLoopTimes(trkCnt, trkInf);
-	
 	if (fileVer == FILEVER_V1A)
 	{
 		DELAY_MODE = 1;
-		WriteMidiHeader(&midFileInf, 0x0001, trkCnt, 24);	// This driver runs with half the rate.
+		MIDI_RES = 24;	// This driver runs with half the rate.
 	}
 	else
 	{
 		DELAY_MODE = 0;
-		WriteMidiHeader(&midFileInf, 0x0001, trkCnt, 48);
+		MIDI_RES = 48;
 	}
+	
+	for (curTrk = 0; curTrk < trkCnt; curTrk ++)
+	{
+		// set the "length" to the next track's offset - makes handling command 00 easier
+		UINT32 nextTrkOfs = (curTrk + 1 < trkCnt) ? trkInf[curTrk+1].startOfs : SongLen;
+		nextTrkOfs = (nextTrkOfs >= trkInf[curTrk].startOfs && nextTrkOfs <= SongLen) ? nextTrkOfs : SongLen;
+		
+		tempTInf = &trkInf[curTrk];
+		tempTInf->loopOfs = 0x00;
+		tempTInf->tickCnt = 0;
+		tempTInf->loopTick = 0;
+		tempTInf->trkID = curTrk;
+		
+		PreparseMsDrvTrack_v1(nextTrkOfs, SongData, tempTInf, fileVer, 0);
+		if (tempTInf->loopOfs)
+			PreparseMsDrvTrack_v1(nextTrkOfs, SongData, tempTInf, fileVer, 1);	// pass #2 to count the actual loop length
+		tempTInf->loopTimes = tempTInf->loopOfs ? NUM_LOOPS : 0;
+	}
+	
+	if (! NO_LOOP_EXT)
+		BalanceTrackTimes(trkCnt, trkInf, MIDI_RES / 4, 0xFF);
+	
+	WriteMidiHeader(&midFileInf, 0x0001, trkCnt, MIDI_RES);
 	
 	curBPM = 120;
 	for (curTrk = 0; curTrk < trkCnt; curTrk ++)
 	{
 		tempTInf = &trkInf[curTrk];
-		inPos = tempTInf->StartOfs;
+		inPos = tempTInf->startOfs;
 		
 		WriteMidiTrackStart(&midFileInf, &MTS);
 		
-		if (fileVer == FILEVER_V2)
+		if (DEFAULT_FM_MODE)
 		{
 			if (curTrk < 3)
 				chnMode = 0x40 + curTrk;
@@ -1207,7 +1284,7 @@ UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData)
 		if (! inPos)
 			trkFlags |= 0x80;
 		if ((chnMode & 0xF0) == 0x00)
-			MTS.midChn = chnBase + curTrk;
+			MTS.midChn = 0x02 + curTrk;
 		else
 			MTS.midChn = curTrk;
 		curNoteVol = 0x7F;
@@ -1218,7 +1295,6 @@ UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData)
 		
 		pbRange = 0;
 		
-		RunNoteCnt = 0x00;
 		curOct = 4;
 		lastNote = 0xFF;
 		curNoteLen = 48;
@@ -1355,7 +1431,7 @@ UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData)
 					break;
 				case 0x8A:	// Tempo in BPM
 					curBPM = SongData[inPos + 0x01];
-					tempLng = (UINT32)(60000000.0 / (curBPM * 0x40 / 64.0));
+					tempLng = Tempo2Mid(curBPM, 0x40);
 					WriteBE32(tempArr, tempLng);
 					WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
 					inPos += 0x02;
@@ -1368,8 +1444,6 @@ UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData)
 					inPos += 0x02;
 					break;
 				case 0x94:	// Pitch Bend
-					printf("Track %u: Pitch Bend at %04X\n", curTrk, inPos);
-					getchar();
 					WriteEvent(&midFileInf, &MTS, 0xE0, SongData[inPos + 0x01], SongData[inPos + 0x02]);
 					inPos += 0x03;
 					break;
@@ -1439,7 +1513,7 @@ UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData)
 					{
 						if (loopCount[loopIdx] <= 0x7F)
 							WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)loopCount[loopIdx]);
-						tempSht = tempTInf->LoopTimes;
+						tempSht = tempTInf->loopTimes;
 					}
 					if (loopCount[loopIdx] < tempSht)
 					{
@@ -1454,7 +1528,7 @@ UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData)
 					}
 					break;
 				case 0x9C:	// Loop Start
-					if (inPos == tempTInf->LoopOfs)
+					if (inPos == tempTInf->loopOfs)
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, 0);
 					inPos += 0x01;
 					loopPos[loopIdx] = inPos;
@@ -1466,6 +1540,10 @@ UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData)
 						curTrk, curCmd, SongData[inPos + 0x01], inPos);
 					inPos += 0x02;
 					break;
+				case 0x9F:	// Set Pan
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, SongData[inPos + 0x01]);
+					inPos += 0x02;
+					break;
 				case 0xFE:	// Track End
 				case 0xFF:	// Song End
 					trkFlags |= 0x80;
@@ -1473,7 +1551,6 @@ UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData)
 					break;
 				default:
 					printf("Error Track %u: Unknown command 0x%02X at position 0x%04X!\n", curTrk, curCmd, inPos);
-					getchar();
 					if (DebugCtrls)
 						WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
 					inPos += 0x01;
@@ -1488,7 +1565,6 @@ UINT8 MsDrv2Mid_v1(UINT32 SongLen, const UINT8* SongData)
 			WriteEvent(&midFileInf, &MTS, 0x90, lastNote, 0x00);
 		if (inPos >= SongLen && ! (trkFlags & 0x80))
 			printf("Warning: Reached EOF early on track %u!\n", curTrk);
-		FlushRunningNotes(&midFileInf, &MTS);
 		
 		WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
 		
@@ -1544,7 +1620,7 @@ static UINT8 CacheSysExData(UINT16 sxBufSize, UINT8* sxBuffer, UINT8* sxBufPos, 
 	return resVal;
 }
 
-static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INFO* trkInf, UINT8 Mode)
+static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INF* trkInf, UINT8 Mode)
 {
 	// This function detects the offset of the master loop and counts the total + loop length.
 	UINT32 inPos;
@@ -1558,9 +1634,9 @@ static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INFO* 
 	UINT8 loopCount[8];
 	UINT32 loopPos[8];
 	
-	inPos = trkInf->StartOfs;
+	inPos = trkInf->startOfs;
 	if (! Mode)
-		trkInf->LoopOfs = 0x0000;
+		trkInf->loopOfs = 0x0000;
 	
 	loopIdx = 0;
 	trkFlags = 0x00;
@@ -1576,7 +1652,7 @@ static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INFO* 
 			inPos = subRetOfs;
 		}
 		
-		if (Mode && inPos == trkInf->LoopOfs)
+		if (Mode && inPos == trkInf->loopOfs)
 			return;
 		
 		curCmd = SongData[inPos];
@@ -1593,18 +1669,18 @@ static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INFO* 
 			else
 				inPos += 0x04;
 			if (! Mode)
-				trkInf->TickCnt += curNoteDly;
+				trkInf->tickCnt += curNoteDly;
 			else
-				trkInf->LoopTick += curNoteDly;
+				trkInf->loopTick += curNoteDly;
 		}
 		else
 		{
 			if (curCmd >= 0xDD && curCmd <= 0xEE)
 			{
 				if (! Mode)
-					trkInf->TickCnt += SongData[inPos + 0x01];
+					trkInf->tickCnt += SongData[inPos + 0x01];
 				else
-					trkInf->LoopTick += SongData[inPos + 0x01];
+					trkInf->loopTick += SongData[inPos + 0x01];
 			}
 			switch(curCmd)
 			{
@@ -1618,7 +1694,7 @@ static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INFO* 
 				loopCount[loopIdx] ++;
 				if (! SongData[inPos + 0x01] || SongData[inPos + 0x01] >= 0xF0)	// infinite loop
 				{
-					trkInf->LoopOfs = loopPos[loopIdx] - 0x01;
+					trkInf->loopOfs = loopPos[loopIdx] - 0x01;
 					return;
 				}
 				if (loopCount[loopIdx] < SongData[inPos + 0x01])
@@ -1655,16 +1731,14 @@ static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INFO* 
 					if (subEndOfs)
 						break;	// ignore nested subroutines
 					subRetOfs = inPos;
-					inPos = trkInf->StartOfs + startPos;
-					subEndOfs = trkInf->StartOfs + endPos;
+					inPos = trkInf->startOfs + startPos;
+					subEndOfs = trkInf->startOfs + endPos;
 				}
 				break;
 			case 0x84:	// Return / GoTo
 				if (fileVer == FILEVER_V2)	// GoTo
 				{
-					INT16 jumpPos;
-					
-					jumpPos = (INT16)ReadLE16(&SongData[inPos + 0x01]);
+					INT16 jumpPos = (INT16)ReadLE16(&SongData[inPos + 0x01]);
 					if (jumpPos < 0)
 						return;
 					inPos += jumpPos;
@@ -1687,11 +1761,11 @@ static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INFO* 
 				inPos += 0x02;
 				break;
 			case 0x8A:	// Tempo in BPM
-				if (tempoChgTick <= trkInf->TickCnt)
+				if (tempoChgTick <= trkInf->tickCnt)
 				{
-					tempoChgTrk = trkInf->TrkID;
+					tempoChgTrk = trkInf->trkID;
 					tempoChgPos = inPos;
-					tempoChgTick = trkInf->TickCnt;
+					tempoChgTick = trkInf->tickCnt;
 				}
 				inPos += 0x02;
 				break;
@@ -1758,9 +1832,9 @@ static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INFO* 
 				break;
 			case 0xD0:	// set OPNA Rhythm Mask
 				if (! Mode)
-					trkInf->TickCnt += SongData[inPos + 0x01];
+					trkInf->tickCnt += SongData[inPos + 0x01];
 				else
-					trkInf->LoopTick += SongData[inPos + 0x01];
+					trkInf->loopTick += SongData[inPos + 0x01];
 				inPos += 0x03;
 				break;
 			case 0xFE:	// Track End
@@ -1777,7 +1851,7 @@ static void PreparseMsDrvTrack(UINT32 SongLen, const UINT8* SongData, TRK_INFO* 
 	return;
 }
 
-static void PreparseMsDrvTrack_v1(UINT32 SongLen, const UINT8* SongData, TRK_INFO* trkInf, UINT8 fileVer, UINT8 Mode)
+static void PreparseMsDrvTrack_v1(UINT32 SongLen, const UINT8* SongData, TRK_INF* trkInf, UINT8 fileVer, UINT8 Mode)
 {
 	// This function detects the offset of the master loop and counts the total + loop length.
 	UINT8 DELAY_MODE = (fileVer == FILEVER_V1A) ? 1 : 0;
@@ -1791,15 +1865,15 @@ static void PreparseMsDrvTrack_v1(UINT32 SongLen, const UINT8* SongData, TRK_INF
 	UINT8 loopCount[8];
 	UINT32 loopPos[8];
 	
-	inPos = trkInf->StartOfs;
+	inPos = trkInf->startOfs;
 	if (! Mode)
-		trkInf->LoopOfs = 0x0000;
+		trkInf->loopOfs = 0x0000;
 	
 	curNoteLen = 48;
 	loopIdx = 0;
 	while(inPos < SongLen)
 	{
-		if (Mode && inPos == trkInf->LoopOfs)
+		if (Mode && inPos == trkInf->loopOfs)
 			return;
 		
 		curCmd = SongData[inPos];
@@ -1807,9 +1881,9 @@ static void PreparseMsDrvTrack_v1(UINT32 SongLen, const UINT8* SongData, TRK_INF
 		{
 			inPos ++;
 			if (! Mode)
-				trkInf->TickCnt += curNoteLen;
+				trkInf->tickCnt += curNoteLen;
 			else
-				trkInf->LoopTick += curNoteLen;
+				trkInf->loopTick += curNoteLen;
 		}
 		else if ((curCmd & 0xF0) == 0xC0 || (curCmd & 0xF0) == 0xE0)
 		{
@@ -1832,11 +1906,11 @@ static void PreparseMsDrvTrack_v1(UINT32 SongLen, const UINT8* SongData, TRK_INF
 				}
 				break;
 			case 0x8A:	// Tempo in BPM
-				if (tempoChgTick <= trkInf->TickCnt)
+				if (tempoChgTick <= trkInf->tickCnt)
 				{
-					tempoChgTrk = trkInf->TrkID;
+					tempoChgTrk = trkInf->trkID;
 					tempoChgPos = inPos;
-					tempoChgTick = trkInf->TickCnt;
+					tempoChgTick = trkInf->tickCnt;
 				}
 				inPos += 0x02;
 				break;
@@ -1856,7 +1930,7 @@ static void PreparseMsDrvTrack_v1(UINT32 SongLen, const UINT8* SongData, TRK_INF
 				loopCount[loopIdx] ++;
 				if (! SongData[inPos + 0x01] || SongData[inPos + 0x01] >= 0xF0)	// infinite loop
 				{
-					trkInf->LoopOfs = loopPos[loopIdx] - 0x01;
+					trkInf->loopOfs = loopPos[loopIdx] - 0x01;
 					return;
 				}
 				if (loopCount[loopIdx] < SongData[inPos + 0x01])
@@ -1947,105 +2021,9 @@ static UINT8 NeedPBRangeFix(UINT8* curPBRange, INT16 PBend)
 	return 1;
 }
 
-static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf)
-{
-	UINT8 CurTrk;
-	TRK_INFO* TempTInf;
-	UINT32 TrkLen;
-	UINT32 TrkLoopLen;
-	UINT32 MaxTrkLen;
-	
-	MaxTrkLen = 0x00;
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
-	{
-		TempTInf = &TrkInf[CurTrk];
-		if (TempTInf->LoopOfs)
-			TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
-		else
-			TrkLoopLen = 0x00;
-		
-		TrkLen = TempTInf->TickCnt + TrkLoopLen * (TempTInf->LoopTimes - 1);
-		if (MaxTrkLen < TrkLen)
-			MaxTrkLen = TrkLen;
-	}
-	
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
-	{
-		TempTInf = &TrkInf[CurTrk];
-		if (TempTInf->LoopOfs)
-			TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
-		else
-			TrkLoopLen = 0x00;
-		if (TrkLoopLen < 0x20)
-			continue;
-		
-		TrkLen = TempTInf->TickCnt + TrkLoopLen * (TempTInf->LoopTimes - 1);
-		if (TrkLen * 5 / 4 < MaxTrkLen)
-		{
-			// TrkLen = desired length of the loop
-			TrkLen = MaxTrkLen - TempTInf->LoopTick;
-			
-			TempTInf->LoopTimes = (UINT16)((TrkLen + TrkLoopLen / 3) / TrkLoopLen);
-			printf("Trk %u: Extended loop to %u times\n", CurTrk, TempTInf->LoopTimes);
-		}
-	}
-	
-	return;
-}
-
-static void CheckRunningNotes(FILE_INF* fInf, UINT32* delay)
-{
-	UINT8 curNote;
-	UINT32 tempDly;
-	RUN_NOTE* tempNote;
-	
-	while(RunNoteCnt)
-	{
-		// 1. Check if we're going beyond a note's timeout.
-		tempDly = *delay + 1;
-		for (curNote = 0x00; curNote < RunNoteCnt; curNote ++)
-		{
-			tempNote = &RunNotes[curNote];
-			if (tempNote->remLen < tempDly)
-				tempDly = tempNote->remLen;
-		}
-		if (tempDly > *delay)
-			break;	// not beyond the timeout - do the event
-		
-		// 2. advance all notes by X ticks
-		for (curNote = 0x00; curNote < RunNoteCnt; curNote ++)
-			RunNotes[curNote].remLen -= tempDly;
-		(*delay) -= tempDly;
-		
-		// 3. send NoteOff for expired notes
-		for (curNote = 0x00; curNote < RunNoteCnt; curNote ++)
-		{
-			tempNote = &RunNotes[curNote];
-			if (! tempNote->remLen)	// turn note off, it going beyond the Timeout
-			{
-				WriteMidiValue(fInf, tempDly);
-				tempDly = 0;
-				
-				File_CheckRealloc(fInf, 0x03);
-				fInf->data[fInf->pos + 0x00] = 0x90 | tempNote->midChn;
-				fInf->data[fInf->pos + 0x01] = tempNote->note;
-				fInf->data[fInf->pos + 0x02] = 0x00;
-				fInf->pos += 0x03;
-				
-				RunNoteCnt --;
-				if (RunNoteCnt)
-					*tempNote = RunNotes[RunNoteCnt];
-				curNote --;
-			}
-		}
-	}
-	
-	return;
-}
-
 static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay)
 {
-	CheckRunningNotes(fInf, delay);
+	CheckRunningNotes(fInf, delay, &RunNoteCnt, RunNotes);
 	if (*delay)
 	{
 		UINT8 curNote;
@@ -2055,20 +2033,6 @@ static UINT8 MidiDelayHandler(FILE_INF* fInf, UINT32* delay)
 	}
 	
 	return 0x00;
-}
-
-static void FlushRunningNotes(FILE_INF* fInf, MID_TRK_STATE* MTS)
-{
-	UINT8 curNote;
-	
-	for (curNote = 0; curNote < RunNoteCnt; curNote ++)
-	{
-		if (RunNotes[curNote].remLen > MTS->curDly)
-			MTS->curDly = RunNotes[curNote].remLen;
-	}
-	CheckRunningNotes(fInf, &MTS->curDly);
-	
-	return;
 }
 
 static UINT8 WriteFileData(UINT32 DataLen, const UINT8* Data, const char* FileName)
@@ -2123,6 +2087,13 @@ static UINT8 CalcGSChecksum(UINT16 DataSize, const UINT8* Data)
 	for (CurPos = 0x00; CurPos < DataSize; CurPos ++)
 		ChkSum += Data[CurPos];
 	return -ChkSum & 0x7F;
+}
+
+INLINE UINT32 Tempo2Mid(UINT16 bpm, UINT8 scale)
+{
+	// formula: 60 000 000 / (bpm * (scale / 64.0))
+	UINT32 div = bpm * scale;
+	return 60000000U * 64U / div;
 }
 
 

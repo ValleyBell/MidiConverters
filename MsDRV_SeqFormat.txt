@@ -2,7 +2,7 @@ MsDRV Sequence Format (for MsDRV)
 =====================
 (.MS files)
 
-Header - MsDRV v1
+Header - MsDRV v2
 ------
 0Ah*2 bytes - track pointers (absolute)
 	OPN/OPNA Mode:
@@ -22,11 +22,11 @@ Header - MsDRV v4
 Sequence Commands
 -----------------
 Notes:
-- MsDRV v1 defaults to 3-byte note format.
+- MsDRV v2 defaults to 3-byte note format.
 - MsDRV v4 defaults to 4-byte note format.
 - MsDRV v4 (non-light): All commands are padded up to 4 bytes. The padding byte is 9E.
 
-[1]	00-7F dd ll - play note with length ll, delay dd
+[2]	00-7F dd ll - play note with length ll, delay dd
 [4]	00-7F dd ll [vv] - play note with length ll, delay dd, volume vv
 		vv might or might not be present, depending on whether 3-byte note format is enabled or disabled
 [4A]	80 ll mm - set song tick resolution to mmll (default: 48)
@@ -35,12 +35,12 @@ Notes:
 		mode 80 -> write directly to port 0
 		mode 81 -> write directly to port 1
 		other modes: ignored
-[1A]	82 ii - set FM/SSG Instrument
+[2A]	82 ii - set FM/SSG Instrument
 [4A]	83 ... - repeat previous section
 		Parameters are 2 file offsets, start and end offset, of the section to be repeated.
 		The offsets are 4 bytes wide in MsDRV v4.
 		Both offsets are relative to the beginning of the track.
-[1A]	84 ll mm - GoTo position (relative to beginning of the command)
+[2A]	84 ll mm - GoTo position (relative to beginning of the command)
 [4A]	84 - Subroutine Return (temporarily written into the sequence data by command 83)
 		Note: Can not be used in sequences regularly!
 [0A]	85 vv - set Volume (00..7F)
@@ -60,13 +60,13 @@ Notes:
 [0A]	9C - Loop Start
 [0NSL]	9D dd - set raw FM frequency detune (dd is 8-bit signed)
 [4A]	9E - ignored (apparently used for padding/alignment in some songs)
-[1A]	9F pp - set Speaker (01 = right, 02 = left, 03 = centre)
+[2A]	9F pp - set Speaker (01 = right, 02 = left, 03 = centre)
 		MIDI: 01 -> Pan 7F, 02 -> Pan 00, else Pan 40
 [4MNL]	9F pp - set Panning
 		FM OPNA: 80..FF - left (80), 00 - centre (C0), 01..7F - right (40)
 		MIDI: Pan = (pp + 80h) / 2 (scales 80..FF,00..7F -> 00..3F,40..7F)
 [0A]	A4 ll mm - Pitch Bend (mm = semitones, ll = fraction)
-[1N]	A5 mm - set OPN/OPNA mode (mm = 00 - OPN, mm = 01..FF - OPNA)
+[2N]	A5 mm - set OPN/OPNA mode (mm = 00 - OPN, mm = 01..FF - OPNA)
 [4A]	A5 - invalid
 [0N]	A6 ss - set LFO speed (OPNA register 22, 00 = off [data 00], 01..08 = on [data 08..0F])
 [0A]	A7 xx xx - ??? (writes to some bytes)
@@ -79,10 +79,10 @@ Notes:
 [4A]	AD ll mm - set Pitch Slide step (mm = semitones, ll = fraction)
 [4A]	AE ll mm - set Pitch Slide destination (--''--)
 [4A]	AF ll mm - set current Pitch Slide state (--''--)
-[1A]	B0 xx - set Panning left
+[2A]	B0 xx - set Panning left
 		MIDI: Pan = 0x40 - (xx / 2)
 		FM: 00 = centre, 01-FF = hard left
-[1A]	B1 xx - set Panning right
+[2A]	B1 xx - set Panning right
 		MIDI: Pan = 0x40 + (xx / 2)
 		FM: 00 = centre, 01-FF = hard right
 [0A]	C1 xx xx - set Game Communication value (the value is unused by the sound driver itself)
@@ -105,8 +105,9 @@ Notes:
 [0M]	DF dd di mi - set SysEx command header (di = device ID, mi = model ID)
 [0M]	E2 dd ii mm - Bank MSB mm, Bank LSB 00, MIDI Instrument ii, delay dd
 [0M]	E6 dd cc - set MIDI Channel to cc, delay dd
-[0A]	E7 dd mm ll - Tempo Modifier, delay dd
-			mmll = tempo modification factor, 100% = 0x4000
+[0A]	E7 dd mm xx - Tempo Modifier, delay dd
+			mm = tempo modification factor, 100% = 0x40
+			xx = ignored, usually 0 (in RCP files, this is the "tempo interpolation" value)
 [0M]	EA dd vv - MIDI Channel Aftertouch vv, delay dd
 [0M]	EB dd cc vv - MIDI Controller cc, value vv, delay dd
 [0A]	EC dd ii - MIDI Instrument ii, delay dd
@@ -118,7 +119,7 @@ Notes:
 
 Description for [] letters:
 0 - available in all versions
-1 - available in v1 only
+2 - available in v2 only
 4 - available in v4 only
 A - supported by all modes
 M - supported in MIDI mode
