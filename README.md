@@ -35,6 +35,15 @@ Despite its name, this tool converts songs from Sonic Spinball on the Sega Maste
 
 I did a quick hack of de2mid to support Sonic Spinball's sound format, which is the cause of the name. I kept the tool for historical purposes. You should use smps2mid if you want to convert songs from Sonic Spinball (8-bit) to MIDI.
 
+## dynamix_mus2mid
+This tool converts music from early Dynamix games to MIDI.
+
+I wrote this tool for "Spikey" from the *Sierra Music and Memories* Discord channel, for converting music from "David Wolf: Seceta Agent".
+
+It should be noted that "David Wolf" has songs inside `MUS` files. Each `MUS` file contains the same song in multiple variants (beeper, Tandy, AdLib, ...).
+The format is just Dynamix' typical `RES` archive format, which [is documented here](https://moddingwiki.shikadi.net/wiki/RES_Format_(Stellar_7)).
+The tool requires pre-extracted songs. All sound variants use the same format and are supported by the tool.
+
 ## eash2mid
 This tool converts songs from MegaDrive ROMs that uses the EA/Steve Hayes sound driver to MIDI.
 
