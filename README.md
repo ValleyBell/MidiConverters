@@ -179,6 +179,11 @@ The tool needs "RO" files ripped from ScummVM's RAM as I couldn't figure out the
 The "RO" signature must be at byte 0x0C. (I apparently ripped some bytes from the memory block header.)  
 MI1-Midi_Data.7z contains the files that I used with the converter.
 
+## mid2syx
+This tool extracts SysEx messages from standard MID files and saves them as a separate SYX file.
+
+Note: The tool goes through the MID file by-track. Thus when SysEx messages are spread across multiple tracks, they will NOT be sorted by time.
+
 ## mmd2mid
 This tool converts M.M.D. songs to standard MIDIs.
 
