@@ -1150,7 +1150,7 @@ static UINT8 RcpTrk2MidTrk(UINT32 rcpLen, const UINT8* rcpData, const RCP_INFO* 
 				UINT32 tempoVal;
 				
 				if (cmdP2 != 0)
-					printf("Warning Track %u: Gradual Tempo Change (speed 0x40) at 0x%04X!\n", trkID, cmdP2, prevPos);
+					printf("Warning Track %u: Gradual Tempo Change (speed 0x40, cmdP2 %u) at 0x%04X!\n", trkID, cmdP2, prevPos);
 				tempoVal = Tempo2Mid(rcpInf->tempoBPM, cmdP1);
 				WriteBE32(tempArr, tempoVal);
 				WriteMetaEvent(fInf, MTS, 0x51, 0x03, &tempArr[0x01]);
