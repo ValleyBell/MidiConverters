@@ -44,7 +44,7 @@
 #include <string.h>
 #include <stdio.h>
 
-#include <stdtype.h>
+#include "stdtype.h"
 
 #ifdef RUNNING_NOTES
 

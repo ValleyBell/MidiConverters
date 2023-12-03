@@ -1,6 +1,6 @@
 // Yamaha TG/MU Demo Song Dumper
 // -----------------------------
-#include <stdtype.h>
+#include "stdtype.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

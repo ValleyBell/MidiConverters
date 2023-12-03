@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
-#include <stdtype.h>
+#include "stdtype.h"
 
 #define INLINE	static __inline
 

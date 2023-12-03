@@ -43,7 +43,7 @@
 #include <ctype.h>
 #include <math.h>
 
-#include <stdtype.h>
+#include "stdtype.h"
 
 #ifndef INLINE
 #if defined(_MSC_VER)

@@ -9,7 +9,7 @@
 #include <ctype.h>
 #include <math.h>
 
-#include <stdtype.h>
+#include "stdtype.h"
 #include <stdbool.h>
 
 void ConvertAllSongs(UINT16 MusBankList);
