@@ -370,6 +370,7 @@ For Wolfteam MegaDrive games with PCM drums, it can autodetect the song list and
 
 ## wtmf2mid
 This tool converts Wolfteam MF/MU music files to standard MIDIs.
+The same format was also used by games developed by Melody (MFD.COM sound driver), as well as Studio Twinkle's "Twilight".
 
 I initially made this tool to get MIDIs of songs from Arcus Odyssey (because its MT-32 soundtrack is awesome).
 I disassembled a few sound drivers during the development of this tool: Arcus Odyssey, D: European Mirage, Span of Dream.

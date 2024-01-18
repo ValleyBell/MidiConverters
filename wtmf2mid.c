@@ -527,7 +527,7 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 					if ((curCmd & 0x0F) == 0x0F)
 						earlyNoteOff = curDelay;	// use parameter byte directly
 					else
-						earlyNoteOff = curDelay - 1;	// underflow from 0x00 to 0xFF intended and in original driver
+						earlyNoteOff = (UINT8)(curDelay - 1);	// underflow from 0x00 to 0xFF intended and present in original driver
 					curDelay = 0;
 					break;
 				case 0xE0:	// Tempo
@@ -545,6 +545,8 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 					//
 					// P.S.: It is implemented properly in MFD.COM
 					// P.S.2: in MFD.COM, the formula is: songTempo = baseSongTempo + tempByt - 0x40;
+					// P.S.3: In the sound driver of "Twilight", the formula is matchs the RCP algorithm:
+					//        songTempo = baseSongTempo * tempByt / 0x40;
 					if (! DRV_BUGS)
 					{
 						tempLng = Tempo2Mid(songTempo, tempByt);
@@ -619,7 +621,51 @@ UINT8 WtM2Mid(UINT16 songLen, const UINT8* songData)
 					curNoteVol = songData[inPos];
 					inPos ++;
 					break;
-				case 0xFC:	// raw RCP command
+				case 0xF8:	// GS instrument (RCP command 0xE2) [Twilight driver only]
+					// only present in the sound driver of Studio Twinkle's "Twilight"
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x00, songData[inPos + 0x02]);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x20, 0x00);
+					WriteEvent(&midFileInf, &MTS, 0xC0, songData[inPos + 0x01], 0x00);
+					curDelay = songData[inPos + 0x00];
+					inPos += 0x03;
+					break;
+				case 0xF9:	// Roland Base Address (RCP command 0xDD) [Twilight driver only]
+					gsParams[2] = songData[inPos + 0x01];
+					gsParams[3] = songData[inPos + 0x02];
+					curDelay = songData[inPos + 0x00];
+					inPos += 0x03;
+					break;
+				case 0xFA:	// Roland Parameter (RCP command 0xDE) [Twilight driver only]
+					gsParams[4] = songData[inPos + 0x01];
+					gsParams[5] = songData[inPos + 0x02];
+					{
+						UINT8 chkSum;
+						UINT8 curParam;
+						
+						tempArr[0] = 0x41;	// Manufacturer ID: Roland
+						tempArr[1] = gsParams[0];	// Device ID
+						tempArr[2] = gsParams[1];	// Model ID
+						tempArr[3] = 0x12;	// Command: DT1
+						chkSum = 0x00;	// initialize checksum
+						for (curParam = 0; curParam < 4; curParam ++)
+						{
+							tempArr[4 + curParam] = gsParams[2 + curParam];
+							chkSum += gsParams[2 + curParam];	// add to checksum
+						}
+						tempArr[8] = (0x100 - chkSum) & 0x7F;
+						tempArr[9] = 0xF7;
+						WriteLongEvent(&midFileInf, &MTS, 0xF0, 10, tempArr);
+					}
+					curDelay = songData[inPos + 0x00];
+					inPos += 0x03;
+					break;
+				case 0xFB:	// Roland Device (RCP command 0xDF) [Twilight driver only]
+					gsParams[0] = songData[inPos + 0x01];
+					gsParams[1] = songData[inPos + 0x02];
+					curDelay = songData[inPos + 0x00];
+					inPos += 0x03;
+					break;
+				case 0xFC:	// raw RCP command [MFD.COM only]
 					// The Wolfteam sound driver ignores all parameters but the delay.
 					// However, MFD.COM actually implements this (with RCP commands DD/DE/DF only)
 					// and e.g. night_s_98 uses it for SysEx commands.
@@ -893,7 +939,14 @@ static void PreparseWtMTrk(UINT32 songLen, const UINT8* songData, TRK_INF* trkIn
 				cmdDelay = songData[inPos];
 				inPos ++;
 				break;
-			case 0xFC:	// delay + more?
+			case 0xF8:	// GS instrument [Twilight driver only]
+			case 0xF9:	// Roland Base Address [Twilight driver only]
+			case 0xFA:	// Roland Parameter [Twilight driver only]
+			case 0xFB:	// Roland Device [Twilight driver only]
+				cmdDelay = songData[inPos + 0x00];
+				inPos += 0x03;
+				break;
+			case 0xFC:	// raw RCP command
 				cmdDelay = songData[inPos + 0x01];
 				inPos += 0x04;
 				break;
