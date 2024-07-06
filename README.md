@@ -131,11 +131,12 @@ This tool converts IT modules to MIDI.
 
 I wasn't satisfied with OpenMPT's MIDI exporting function, because it didn't preserve volume and panning information, so I wrote this. (There was also something I didn't like about LifeAmp's conversion.)
 
-## konami2mid
-This tool converts songs from TMNT: Hyperstone Heist to MIDI. It probably works with other MegaDrive Konami games as well.
+## konamimd2mid
+This tool converts songs from MegaDrive Konami games to MIDI.
 
 The tool can export MIDIs and dump instruments to GYB files.  
 It was written based on a sound driver disassembly of TMNT: Hyperstone Heist.
+It was verified to work with Rocket Knight Adventures as well.
 
 ## Lem3DMid
 This converts songs from Lemmings 3D to MIDI.

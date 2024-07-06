@@ -1,6 +1,8 @@
-// Konami -> Midi Converter
-// ------------------------
-// Written by Valley Bell, 
+// Konami MD -> Midi Converter
+// ---------------------------
+// Written by Valley Bell, 14 June 2016
+// Improved on 23 June 2024 and 07 July 2024
+// based on GRC -> Midi Converter
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -9,7 +11,7 @@
 #include <math.h>
 
 #include "stdtype.h"
-#include <stdbool.h>
+#include "stdbool.h"
 
 
 typedef struct _track_info
@@ -18,7 +20,6 @@ typedef struct _track_info
 	UINT16 LoopPos;
 	UINT32 TickCnt;
 	UINT32 LoopTick;
-	//UINT8 Flags;
 	UINT16 LoopTimes;
 } TRK_INFO;
 
@@ -56,6 +57,7 @@ static const UINT8 CHN_MASK[0x0A] =
 
 UINT32 MidLen;
 UINT8* MidData;
+bool HighTickRate;
 UINT16 TickpQrtr;
 UINT16 DefLoopCount;
 bool OptVolWrites;
@@ -84,25 +86,27 @@ int main(int argc, char* argv[])
 	UINT32 BankBase;
 	UINT32 BankLen;
 	
-	printf("Konami -> Midi Converter\n------------------------\n");
+	printf("Konami MD -> Midi Converter\n---------------------------\n");
 	if (argc < 2)
 	{
-		printf("Usage: Konami2Mid.exe [-Mode] [-Options] ROM.bin MusicListAddr(hex) MusicBankList(hex) [Song Count]\n");
+		printf("Usage: KonamiMD2Mid.exe [-Mode] [-Options] ROM.bin MusicListAddr(hex) MusicBankList(hex) [Song Count]\n");
 		printf("Modes:\n");
 		printf("    -mus        Music Mode (convert sequences to MID)\n");
 		printf("    -ins        Instrument Mode (dump instruments to GYB)\n");
 		//printf("    -dac        DAC Mode (dump DAC sounds to RAW)\n");
 		printf("Options:\n");
 		printf("    -OptVol     Optimize Volume writes (omits redundant ones)\n");
+		printf("    -HTR        high tick rate (120 Hz base rate, needed by Rocket Knight Adv.)\n");
 		printf("    -TpQ n      Sets the number of Ticks per Quarter to n. (default: 24)\n");
 		printf("                Use values like 18 or 32 on songs with broken tempo.\n");
 		printf("    -Loops n    Loop each track at least n times. (default: 2)\n");
-		printf("    -NoLpExt    No Loop Extention\n");
+		printf("    -NoLpExt    No Loop Extension\n");
 		printf("                Do not fill short tracks to the length of longer ones.\n");
 		return 0;
 	}
 	
 	OptVolWrites = true;
+	HighTickRate = false;
 	TickpQrtr = 24;
 	DefLoopCount = 2;
 	NoLoopExt = false;
@@ -119,6 +123,8 @@ int main(int argc, char* argv[])
 			Mode = MODE_INS;
 		else if (! _stricmp(argv[argbase] + 1, "OptVol"))
 			OptVolWrites = true;
+		else if (! _stricmp(argv[argbase] + 1, "HTR"))
+			HighTickRate = true;
 		else if (! _stricmp(argv[argbase] + 1, "TpQ"))
 		{
 			argbase ++;
@@ -251,15 +257,17 @@ static UINT16 DetectSongCount(UINT32 DataLen, const UINT8* Data, UINT32 MusBankL
 	UINT32 CurPos;
 	UINT32 BankBase;
 	UINT32 SongPos;
+	UINT32 BankBit;
 	
-	MusPtrOfs &= 0x7FFF;
+	SongPos = (Data[MusBankList] << 15) | (MusPtrOfs & 0x7FFF);
+	BankBit = ReadLE16(&Data[SongPos]) & 0x8000;
 	for (CurPos = MusBankList; CurPos < DataLen; CurPos ++, MusPtrOfs += 0x12)
 	{
-		if ((Data[CurPos] << 15) >= DataLen)
-			break;
 		BankBase = (Data[CurPos] << 15);
 		SongPos = BankBase | (MusPtrOfs & 0x7FFF);
-		if (ReadLE16(&Data[SongPos]) & 0x8000)
+		if (SongPos >= DataLen)
+			break;
+		if ((ReadLE16(&Data[SongPos]) & 0x8000) != BankBit)
 			break;
 	}
 	CurPos -= MusBankList;
@@ -290,7 +298,10 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 	UINT8 ChnFlags;
 	UINT32 CurDly;
 	UINT8 DelayAdd;
+	UINT8 GraceLen;
+	UINT8 NoteLenFrac;
 	UINT8 VolMult;
+	UINT8 NoteChn;
 	UINT8 ChnVol;
 	UINT8 MidChnVol;
 	UINT8 NoteVol;
@@ -303,7 +314,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 	UINT8 LastNote;
 	UINT8 CurNote;
 	UINT8 PanMode;
-	UINT8 HoldNote;
+	UINT8 PortaActive;
 	UINT8 LpStkIdx;
 	UINT16 LoopAddr[2];
 	UINT8 LoopCnt[2];
@@ -312,6 +323,10 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 	UINT8 Loop3State;
 	UINT16 StackAddr[2];
 	UINT16 MstLoopCnt;
+	UINT8 cmdEE_Cntr;
+	UINT16 cmdEE_Ptr;
+	INT8 cmdEE_VolMod;
+	INT8 cmdEE_NoteMod;
 	
 	TrkCnt = 0x09;
 	MidLen = 0x20000;	// 128 KB should be enough
@@ -348,7 +363,6 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++, InPos += 0x02)
 	{
 		TempTInf = &TrkInf[CurTrk];
-		//TempTInf->Flags = 0x00;
 		TempTInf->StartPos = ReadLE16(&KnmData[InPos]);
 		TempTInf->TickCnt = 0x00;
 		TempTInf->LoopTimes = DefLoopCount;
@@ -378,24 +392,24 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 		TrkBase = DstPos;
 		CurDly = 0;
 		
-		//if (TempTInf->Flags & 0x80)
-			TrkEnd = false;
-		//else
-		//	TrkEnd = true;
-		InPos = TempTInf->StartPos;
+		TrkEnd = false;
+		InPos = TempTInf->StartPos & 0x7FFF;
 		
 		ChnMode = CHN_MASK[CurTrk];
 		if (ChnMode & 0x80)
 			MidChn = 0x0A + (CurTrk - 0x06);
 		else
 			MidChn = CurTrk;
+		NoteChn = MidChn;
 		VolMult = 1;
 		ChnVol = 0x00;
 		NoteVol = 0x00;
 		ChnIns = 0x00;
 		PanReg = 0x00;
 		DelayAdd = 0;
-		HoldNote = 0x00;
+		GraceLen = 0;
+		NoteLenFrac = 0;
+		PortaActive = 0x00;
 		
 		ChnTransp = 0;
 		CurOctave = 0;
@@ -408,6 +422,9 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 		LoopAddr[0] = LoopAddr[1] = 0x0000;
 		LoopCnt[0] = LoopCnt[1] = 0x00;
 		Loop3State = 0x00;
+		cmdEE_Cntr = 0;
+		cmdEE_VolMod = 0;
+		cmdEE_NoteMod = 0;
 		StackAddr[0] = StackAddr[1] = 0x0000;
 		MstLoopCnt = 0xFFFF;
 		
@@ -423,8 +440,11 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 			
 			CurCmd = KnmData[InPos];
 			InPos ++;
-			if (CurCmd < 0xD0 || (ChnFlags & 0x80))
+			if (CurCmd < 0xD0 || (ChnFlags & 0x90))
 			{
+				UINT8 NoteDelay;
+				UINT8 NoteLen;
+				
 				ChnFlags &= ~0x80;
 				CurNote = (CurCmd & 0xF0) >> 4;
 				if (CurNote == 0x00)
@@ -433,77 +453,129 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 				}
 				else
 				{
-					CurNote = CurOctave * 12 + ChnTransp + (CurNote - 1);
+					CurNote = CurOctave * 12 + ChnTransp + cmdEE_NoteMod + (CurNote - 1);
 					if (CurNote >= 0x6C)	// the sound driver has only 108 notes defined
 					{
-						printf("Warning: Out-of-range note at 0x%04X!\n", InPos - 0x01);
+						printf("\nWarning at 0x%04X: Out-of-range note %u!", InPos - 0x01, CurNote);
 						CurNote = 0x6B;
 					}
 					if (MidChn == 0x09)
 						CurNote += 36;
+					else
+						CurNote += 12;
 				}
 				
-				if (HoldNote && LastNote != CurNote)
+				if (CurNote == 0xFF || MidChn >= 0x09)
 				{
-					if (CurNote == 0xFF)
+					// rest: always turn off
+					// drum channels: always retrigger
+					if (PortaActive)
 					{
-						printf("Warning: Ignoring command 0xFE!\n");
-						HoldNote = 0x00;
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x41, 0x00);	// Portamento Off
+						PortaActive = 0x00;
 					}
+					if (LastNote != 0xFF)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0x90 | NoteChn, LastNote, 0x00);
+					}
+					if (CurNote != 0xFF)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0x90 | MidChn, CurNote, MidNoteVol);
+						NoteChn = MidChn;
+					}
+				}
+				else
+				{
+					if (LastNote == 0xFF)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0x90 | MidChn, CurNote, MidNoteVol);
+						NoteChn = MidChn;
+					}
+					else if (LastNote != CurNote)
+					{
+						if (! PortaActive)
+						{
+							WriteEvent(MidData, &DstPos, &CurDly,
+										0xB0 | MidChn, 0x41, 0x7F);	// Portamento On
+							PortaActive = 0x01;
+						}
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0x90 | NoteChn, LastNote, 0x00);
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0x90 | MidChn, CurNote, MidNoteVol);
+						NoteChn = MidChn;
+					}
+					// else (CurNote != 0xFF && LastNote == CurNote) -> just continue the existing note
 					else
 					{
-						//printf("Warning: Note Portamento!\n");
-						HoldNote = 0x02;
+						// write informational Portamento Controller (but in a way that doesn't have an audible effect)
+						if (PortaActive)
+							WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x41, 0x41);
+						else
+							WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x41, 0x01);
 					}
-				}
-				if (LastNote != 0xFF && ! HoldNote)
-				{
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0x90 | MidChn, LastNote, 0x00);
-				}
-				
-				if (CurNote != 0xFF)
-				{
-					if (HoldNote == 0x00)
-					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | MidChn, CurNote, MidNoteVol);
-					}
-					else if (HoldNote == 0x02)
-					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x41, 0x7F);	// Portamento On
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | MidChn, LastNote, 0x00);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | MidChn, CurNote, MidNoteVol);
-					}
-				}
-				
-				TempByt = (CurCmd & 0x0F) >> 0;
-				if (! TempByt)
-					TempByt = 0x10;
-				TempByt += DelayAdd;
-				DelayAdd = 0;
-				
-				if (! (ChnFlags & 0x04))
-					TempByt *= 3;
-				if (! (ChnFlags & 0x02))
-					TempByt *= 2;
-				if (ChnFlags & 0x08)
-				{
-					ChnFlags &= ~0x08;
-					//TempByt -= TrkRAM3D;
-				}
-				CurDly += TempByt;
-				
-				if (HoldNote == 0x02)
-				{
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x41, 0x00);	// Portamento Off
 				}
 				LastNote = CurNote;
-				HoldNote = false;
+				
+				NoteDelay = (CurCmd & 0x0F) >> 0;
+				if (ChnFlags & 0x10)
+				{
+					// handle grace note
+					ChnFlags &= ~0x10;
+					ChnFlags |= 0x08;
+					GraceLen = NoteDelay;
+				}
+				else
+				{
+					if (! NoteDelay)
+						NoteDelay = 0x10;
+					NoteDelay += DelayAdd;
+					DelayAdd = 0;
+					
+					if (! (ChnFlags & 0x04))
+						NoteDelay *= 3;
+					if (! (ChnFlags & 0x02))
+						NoteDelay *= 2;
+					if (ChnFlags & 0x08)
+					{
+						ChnFlags &= ~0x08;
+						NoteDelay -= GraceLen;	// subtract grace note delay
+					}
+				}
+				if (NoteLenFrac == 0)
+				{
+					NoteLen = NoteDelay;
+				}
+				else
+				{
+					UINT8 RemTicksEnd = ((UINT16)NoteDelay * NoteLenFrac) >> 8;
+					if (RemTicksEnd == 0)
+						RemTicksEnd = 1;
+					NoteLen = NoteDelay - RemTicksEnd;
+					if (MidChn >= 0x09)
+						NoteLen = 0;	// don't stop early for drum/PSG
+				}
+				if (NoteLen > 0 && NoteLen < NoteDelay)
+				{
+					// Note: on PSG channels, the "note length" seems to trigger the "release" phase,
+					// but this is often very long, so let's just ignore it in this case.
+					CurDly += NoteLen;
+					NoteDelay -= NoteLen;
+					if (PortaActive)
+					{
+						WriteEvent(MidData, &DstPos, &CurDly,
+									0xB0 | MidChn, 0x41, 0x00);	// Portamento Off
+						PortaActive = 0x00;
+					}
+					WriteEvent(MidData, &DstPos, &CurDly,
+								0x90 | NoteChn, LastNote, 0x00);
+					LastNote = 0xFF;
+				}
+				CurDly += NoteDelay;
 			}
 			else
 			{
@@ -531,7 +603,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					VolMult = KnmData[InPos];
 					InPos ++;
 					break;
-				case 0xD9:	// delay extention
+				case 0xD9:	// delay extension
 					DelayAdd += 0x10;
 					while(KnmData[InPos] == CurCmd)
 					{
@@ -578,15 +650,13 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					}
 					else
 					{
-						printf("Warning: Special Pan used!\n");
+						printf("\nWarning at 0x%04X: Pan Envelope used!", InPos - 0x01);
 						WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0A, 0x3F);
 					}
 					break;
-				case 0xDB:	// set TrkRAM+38h
-					TempByt = -KnmData[InPos];
+				case 0xDB:	// set Note Length fraction
+					NoteLenFrac = -KnmData[InPos];
 					InPos ++;
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt & 0x7F);
 					break;
 				case 0xDC:	// set SSG-EG
 					InPos += 0x02;
@@ -595,9 +665,8 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 				case 0xDD:	// toggle Delay Multiply 3
 					ChnFlags ^= 0x04;
 					break;
-				case 0xDE:	// ??
-					ChnFlags |= 0x08;
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
+				case 0xDE:	// enable "grace note" mode
+					ChnFlags |= 0x18;
 					break;
 				case 0xDF:	// toggle Delay Multiply 2
 					ChnFlags ^= 0x02;
@@ -637,9 +706,9 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 									0xB0 | MidChn, 0x07, MidChnVol);
 					}
 					
-					TempByt = KnmData[InPos];	InPos ++;
+					NoteLenFrac = -KnmData[InPos];	InPos ++;
 					break;
-				case 0xE1:	// DAC Channel Setup
+				case 0xE1:	// Rhythm Channel Setup
 					ChnMode |= 0x10;
 					MidChn = 0x09;
 					
@@ -684,7 +753,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 									0xB0 | MidChn, 0x07, MidChnVol);
 					}
 					break;
-				case 0xE5:	// Modulation?
+				case 0xE5:	// Frequency Envelope
 					TempByt = KnmData[InPos];
 					if (! TempByt)
 						InPos ++;
@@ -693,14 +762,14 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
 					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt & 0x7F);
 					break;
-				case 0xE6:	// 
+				case 0xE6:	// ?? Envelope
 					TempByt = KnmData[InPos];
 					InPos ++;
 					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
 					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt & 0x7F);
 					break;
 				case 0xE7:	// 
-					TempByt = KnmData[InPos];
+					TempByt = -KnmData[InPos];
 					InPos ++;
 					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
 					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt & 0x7F);
@@ -751,15 +820,56 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					WriteEvent(MidData, &DstPos, &CurDly,
 								0xE0 | MidChn, TempSht & 0x7F, (TempSht >> 7) & 0x7F);
 					break;
-				case 0xEE:	// 
+				case 0xEE:	// volume/transpose loop
+					if (cmdEE_Cntr == 0)
+					{
+						cmdEE_Cntr = 1;
+						cmdEE_Ptr = InPos;
+						cmdEE_VolMod = 0;
+						cmdEE_NoteMod = 0;
+						InPos += 0x03;
+					}
+					else if (cmdEE_Cntr < KnmData[cmdEE_Ptr])
+					{
+						INT8 pitchInc = GetSignMagByte(KnmData[cmdEE_Ptr + 0x01]);
+						INT8 volDec = GetSignMagByte(KnmData[cmdEE_Ptr + 0x02]);
+						cmdEE_Cntr ++;
+						cmdEE_NoteMod += pitchInc;
+						cmdEE_VolMod -= volDec;
+						InPos = cmdEE_Ptr + 0x03;
+						
+						if (volDec != 0)
+						{
+							if (! (ChnMode & 0x80))
+								TempByt = DB2Mid(OPN2DB(cmdEE_VolMod, 0x00));
+							else
+								TempByt = DB2Mid(PSG2DB(cmdEE_VolMod));
+							WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0B, TempByt);
+						}
+					}
+					else
+					{
+						if (cmdEE_VolMod != 0)
+						{
+							if (! (ChnMode & 0x80))
+								TempByt = DB2Mid(OPN2DB(cmdEE_VolMod, 0x00));
+							else
+								TempByt = DB2Mid(PSG2DB(cmdEE_VolMod));
+							WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0B, TempByt);
+						}
+						
+						// no parameters
+						cmdEE_Cntr = 0;
+						cmdEE_VolMod = 0;
+						cmdEE_NoteMod = 0;
+					}
+					break;
+				case 0xEF:	// set global FM/PSG volume
+					// just ignore for now
 					InPos += 0x02;
 					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
 					break;
-				case 0xEF:	// some volume stuff
-					InPos += 0x02;
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
-					break;
-				case 0xF0:	// set Octave??
+				case 0xF0:	// set Octave
 				case 0xF1:
 				case 0xF2:
 				case 0xF3:
@@ -782,11 +892,15 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt & 0x7F);
 					break;
 				case 0xF9:	// GoTo
-					TempSht = ReadLE16(&KnmData[InPos]);
-					
+					TempSht = ReadLE16(&KnmData[InPos]) ^ (TempTInf->StartPos & 0x8000);
+					if (TempSht >= KnmLen)
+					{
+						printf("\nError at 0x%04X, track %u: Event %02X jumps to invalid offset 0x%04X!",
+							InPos - 0x01, CurTrk, CurCmd, TempSht);
+						TrkEnd = true;
+						break;
+					}
 					InPos = TempSht;
-					if (InPos >= KnmLen)
-						*((char*)NULL) = 'x';
 					
 					if (InPos == TempTInf->LoopPos)
 					{
@@ -829,7 +943,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					if (! StackAddr[LpStkIdx])
 					{
 						// GoSub
-						TempSht = ReadLE16(&KnmData[InPos]);
+						TempSht = ReadLE16(&KnmData[InPos]) ^ (TempTInf->StartPos & 0x8000);
 						InPos += 0x02;
 						
 						StackAddr[LpStkIdx] = InPos;
@@ -887,17 +1001,9 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					TrkEnd = true;
 					break;
 				default:
-					printf("Unknown event %02X on track %X\n", CurCmd, CurTrk);
+					printf("\nUnknown event %02X on track %u", CurCmd, CurTrk);
 					TrkEnd = true;
 					break;
-				/*case 0xF5:	// set YM2612 Timer B
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x70, 0x75);
-					InPos ++;
-					break;*/
-				/*case 0xFE:	// Hold Note ("no attack" mode)
-					HoldNote = true;
-					break;*/
 				}
 			}
 		}
@@ -940,15 +1046,15 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 	UINT8 Mask;
 	UINT16 MaskMinPos[0x04];
 	UINT16 MaskMaxPos[0x04];
+	UINT8 cmdEE_Cntr;
+	UINT16 cmdEE_Ptr;
 	
 	if (! Mode)
 		TrkInf->LoopPos = 0x0000;
-	//if (! (TrkInf->Flags & 0x80))
-	//	return;	// Track inactive - return
 	
 	if (! (Mode & 0x01))
 		memset(KnmBuf, 0x00, KnmLen);
-	InPos = TrkInf->StartPos;
+	InPos = TrkInf->StartPos & 0x7FFF;
 	ChnFlags = 0x00;
 	DelayAdd = 0;
 	StackPos = 0x00;
@@ -956,6 +1062,7 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 	LoopAddr[0] = LoopAddr[1] = 0x0000;
 	LoopCnt[0] = LoopCnt[1] = 0x00;
 	Loop3State = 0x00;
+	cmdEE_Cntr = 0;
 	StackAddr[0] = StackAddr[1] = 0x0000;
 	MaskMinPos[StackPos] = InPos;
 	MaskMaxPos[StackPos] = InPos;
@@ -1009,7 +1116,7 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 			case 0xD8:	// set Volume Multiplier
 				CmdLen = 0x01;
 				break;
-			case 0xD9:	// delay extention
+			case 0xD9:	// delay extension
 				DelayAdd += 0x10;
 				while(KnmData[InPos] == CurCmd)
 				{
@@ -1022,7 +1129,7 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 			case 0xDA:	// set Pan
 				CmdLen = 0x01;
 				break;
-			case 0xDB:	// set TrkRAM+38h
+			case 0xDB:	// set Note Length fraction
 				CmdLen = 0x01;
 				break;
 			case 0xDC:	// set SSG-EG
@@ -1031,8 +1138,9 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 			case 0xDD:	// toggle Delay Multiply 3
 				ChnFlags ^= 0x04;
 				break;
-			case 0xDE:	// ??
+			case 0xDE:	// enable "grace note" mode
 				ChnFlags |= 0x08;
+				CmdLen = 0x01;	// just skip the note/delay, as we don't need grace note processing here
 				break;
 			case 0xDF:	// toggle Delay Multiply 2
 				ChnFlags ^= 0x02;
@@ -1041,7 +1149,7 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 				Mode &= ~0x10;
 				CmdLen = 0x04;
 				break;
-			case 0xE1:	// DAC Channel Setup
+			case 0xE1:	// Rhythm Channel Setup
 				Mode |= 0x10;
 				CmdLen = 0x02;
 				break;
@@ -1054,16 +1162,16 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 				else
 					CmdLen = 0x01;
 				break;
-			case 0xE4:	// set Instrument ??
+			case 0xE4:	// set Instrument Volume
 				CmdLen = 0x01;
 				break;
-			case 0xE5:	// Modulation?
+			case 0xE5:	// Frequency Envelope
 				if (! KnmData[InPos])
 					CmdLen = 0x01;
 				else
 					CmdLen = 0x02;
 				break;
-			case 0xE6:	// 
+			case 0xE6:	// ?? Envelope
 				CmdLen = 0x01;
 				break;
 			case 0xE7:	// 
@@ -1090,13 +1198,29 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 			case 0xED:	// set Detune
 				CmdLen = 0x01;
 				break;
-			case 0xEE:	// 
-				CmdLen = 0x02;
+			case 0xEE:	// volume/transpose loop
+				if (cmdEE_Cntr == 0)
+				{
+					cmdEE_Cntr = 1;
+					cmdEE_Ptr = InPos;
+					CmdLen = 0x03;
+				}
+				else if (cmdEE_Cntr < KnmData[cmdEE_Ptr])
+				{
+					cmdEE_Cntr ++;
+					InPos = cmdEE_Ptr;
+					CmdLen = 0x03;
+				}
+				else
+				{
+					cmdEE_Cntr = 0;
+					// no parameters
+				}
 				break;
 			case 0xEF:	// some volume stuff
 				CmdLen = 0x02;
 				break;
-			case 0xF0:	// set Octave??
+			case 0xF0:	// set Octave
 			case 0xF1:
 			case 0xF2:
 			case 0xF3:
@@ -1114,11 +1238,11 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 			case 0xF9:	// GoTo
 				if (MaskMaxPos[StackPos] < InPos)
 					MaskMaxPos[StackPos] = InPos;
-				TempSht = ReadLE16(&KnmData[InPos]);
-				
-				InPos = TempSht;
-				if (InPos >= KnmLen)
+				TempSht = ReadLE16(&KnmData[InPos]) ^ (TrkInf->StartPos & 0x8000);
+				if (TempSht >= KnmLen)
 					return;
+				InPos = TempSht;
+				
 				if (MaskMinPos[StackPos] > InPos)
 					MaskMinPos[StackPos] = InPos;
 				
@@ -1154,7 +1278,7 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 				if (! StackAddr[LpStkIdx])
 				{
 					// GoSub
-					TempSht = ReadLE16(&KnmData[InPos]);
+					TempSht = ReadLE16(&KnmData[InPos]) ^ (TrkInf->StartPos & 0x8000);
 					InPos += 0x02;
 					
 					StackAddr[LpStkIdx] = InPos;
@@ -1447,6 +1571,8 @@ static UINT32 TickInc2MidiTempo(UINT8 tickInc)
 	// 3600 / 24 = 150 BPM
 	// 150 BPM == MIDI Tempo 400 000
 	baseTempo = 50000 * TickpQrtr / 3;	// 1 000 000 * Tick/Qrtr / 60
+	if (HighTickRate)
+		baseTempo /= 2;
 	if (! tickInc)	// actually this would cause the song to hang
 		return baseTempo;
 	return baseTempo * 0x100 / tickInc;
@@ -1465,15 +1591,14 @@ static float OPN2DB(UINT8 TL, UINT8 PanMode)
 		else
 			TL = 0;
 	}
-	return -(TL * 3 / 4.0f);	// 8 steps per 6 db
+	return TL * 3 / -4.0f;	// 8 steps per 6 db
 }
 
 static float PSG2DB(UINT8 Vol)
 {
-	if (Vol >= 0x0F)	// 0x78-0x7F -> PSG volume 0x0F == silence
+	if (Vol >= 0x0F)	// PSG volume 0x0F == silence
 		return -999.9f;
-	//return -(Vol / 8 * 2.0f);
-	return -(Vol / 4.0f);	// 3 PSG steps per 6 db, makes 24 internal steps per 6 db
+	return Vol * -2.0f;	// 3 PSG steps per 6 db
 }
 
 static UINT8 DB2Mid(float DB)

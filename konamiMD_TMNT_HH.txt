@@ -2,8 +2,8 @@
 Volume Table:	8100
 FM Freqs:	8198 (6Ch frequencies, 2 bytes each)
 PSG Freqs:	8270 (6Ch frequencies, 2 bytes each)
-Instruments:	8348 (19h bytes per instrument)
-???		A07B (2 byte per entry)
+FM Instruments:	8348 (19h bytes per instrument)
+Envelope Ptrs:	A07B (24h pointers, 2 bytes each)
 FM SFX Table:	A274 (6 bytes per entry/SFX header)
 DAC SFX Table:	B5EA (JE) / B648 (U) (6 bytes per entry)
 DAC Drum Table:	B6AA (JE) / B708 (U) (6 bytes per entry)
@@ -88,34 +88,45 @@ Track RAM
 18	Tick Increment [command E0 param 1]
 19	Tick Counter
 1A	remaining Note Ticks until next note (decremented when Tick Counter overflows)
+24..25	Frequency Envelope Pointer
+2B	Frequency Envelope related
+2C	Frequency Envelope related
 2F	FM Stereo Mask (Reg B4 data)
-30..31	Pan Animation Pointer
+30..31	Pan Envelope Pointer
+35	[FM] Pan Envelope tick timeout
+36	[FM] Pan Envelope related
+36..37	[PSG?] ?? Envelope Pointer
 39	Channel Volume
 3A	Octave [set by command F0..F7]
-3B	[command E0 param 4]
+3B	Note Length Fraction [command DB]
+3C	Note Off tick (triggers Note Off when value at 1A equals this value)
+3D	Grace Note length
 3E	FM: LFO Amplitude Vibrato (Reg B4, mask 30h)
 	PSG Instrument ID??
 3F	FM: LFO Frequency Vibrato (Reg B4, mask 07h)
 44..45	3-part-Loop: Start Offset
 46..47	3-part-Loop: End Offset
+48..49	volume/transpose loop: Start Offset
 4A..4B	FM Instrument Data Pointer
 50	Flags
 	    Bit 0 (01) - at Rest
 	    Bit 1 (02) - NoteLen Multiply *2 (enabled if bit clear) [toggled by command DF]
 	    Bit 2 (04) - NoteLen Multiply *3 (enabled if bit clear) [toggled by command DD]
-	    Bit 3 (08) - subtract TrkRAM+3Dh from length
+	    Bit 3 (08) - "after grace note" (causes "Grace Note Length" to be subtracted from the next note delay, then clears the bit) [set by command DE]
+	    Bit 4 (10) - Frequency Envelope enable
 51	Channel Mode?? (00 = FM, 01 = DAC)
 52	Note Volume [command D0..D7]
 53	Note Volume Index Base [command D8]
-55	[some other Transpose]
+54	?? [command E7]
+55	Channel Transposition [command EC]
 56	FM Instrument ID
 57	FM Stereo Mask (data is 01/02/03, Reg B4 uses 40/80/C0)
 5A..5B	Frequency Detune [command ED]
 5B	[set by command ED]
 5C	3-part-Loop: Flags
-5E	[some other Volume]
-5F	[some other Transpose]
-
+5D	volume/transpose loop: loop counter
+5E	volume/transpose loop: volume state
+5F	volume/transpose loop: transposition state
 
 
 
@@ -129,19 +140,24 @@ D0..D7 - set Note Volume (scaled)
 D8 mm - set Note Volume Multiplier to mm (mm can be 00..12, 00 equals 01)
 D9 [D9 D9 ...] xx - Note, add n*10h to note length (n = number of consecutive D9 commands)
 DA pp - set Stereo/Pan mask to pp (01 = right, 02 = left, 03 = center)
-DB xx - set TrkRAM+38h = -xx
+	pp = 80..FF -> Pan Envelope, index (pp & 7F)
+DB xx - Note Length Fraction (set TrkRAM+3Bh = -xx)
+	When set to non-zero, the following notes are stopped "length * xx / 0x100" ticks earlier than the note's specified length. (but at least 1 tick earlier)
+	On PSG channels, this triggers the Release phase. (Rests instantly stop the notes.)
 DC ab cd - set SSG-EG registers 90 98 94 9C to 0a 0b 0c 0d
-DD - toggle TrkRAM+50h Bit 2
-DE xx - set TrkRAM+50h Bit 3, then play note xx (modified, jumps into main code)
-DF - toggle TrkRAM+50h Bit 1
+DD - toggle TrkRAM+50h Bit 2 (note tick length multiply *3)
+DE nl - set TrkRAM+50h Bit 3, then play note nl (jumps into main code)
+	Enables "grace note" mode.
+	The note "nl" will be exactly "l" ticks long. This number of ticks will be subtracted from the next note's length.
+DF - toggle TrkRAM+50h Bit 1 (note tick length multiply *2)
 E0 aa bb cc dd - set TrkRAM+51h = 00, Tick Increment = aa, set Instrument bb, Channel Volume = cc, set TrkRAM+3Bh = -dd
 E1 aa bb - set TrkRAM+51h = 01, Tick Increment = aa, set TrkRAM+39h = bb, set TrkRAM+3Bh = 0
 E2 aa - Tick Increment = aa
 E3 ii - [FM channel] set FM instrument ii
 E3 aa ii - [PSG channel] set TrkRAM+3Bh = -aa, set FM instrument ii
 E4 aa - Channel Volume = aa
-E5 00 - clear TrkRAM+50h Bit 4
-E5 aa bc - set TrkRAM+50h Bit 4, set TrkRAM+24h/25h = PtrTblA07B[aa], set TrkRAM+2Bh = 0b*4, set TrkRAM+2Ch = 0c
+E5 00 - frequency envelope disable (clear TrkRAM+50h Bit 4)
+E5 aa bc - frequency envelope enable (set TrkRAM+50h Bit 4, set TrkRAM+24h/25h = PtrTblA07B[aa], set TrkRAM+2Bh = 0b*4, set TrkRAM+2Ch = 0c)
 E6 aa - set TrkRAM+58h = aa, set TrkRAM+36h/37h = PtrTblA07B[aa]
 E7 aa - set TrkRAM+54h = -aa
 E8 nn - cancel command processing and play Note as usual
@@ -151,8 +167,13 @@ EA ss - set LFO Frequency register to 00 (ss = 00) or 08..0F (ss = 01..08)
 EB tt - set global transpose (see also EC)
 EC tt - set channel transpose (bits 0-3 = note, bits 4-6 = octave, bit 7 = sign)
 ED dd - set Detune (00..7F -> +00..+7F = higher, 80..FF -> -00..-7F = lower)
-EE aa bb cc - ??
-EF aa bb - set global Music Volume to aa, other global Volume to bb (both values are signed)
+EE tt nn vv - volume/transpose Loop Start
+	loop for tt times
+	add nn to temporary pitch transposition on loop end
+	subtract vv from temporary volume on loop end
+EE - volume/transpose Loop End
+	When reaching this the "tt"-th time, the volume/transposition state is reset and execution continues.
+EF aa bb - set global FM base volume to aa, global PSG base volume to bb (both values are signed)
 F0..F7 - set TrkRAM+3Ah = (command AND 07h) * 24 (12 semitones = offset of 24 bytes in Frequency LUT)
 F8 aa bb - [FM channel]
 F8 aa - [PSG channel]

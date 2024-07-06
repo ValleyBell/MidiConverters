@@ -1,0 +1,18 @@
+Volume Table:	8100 (48h bytes, for factors 0..8)
+FM Freqs:	8148 (6Ch frequencies, 2 bytes each)
+PSG Freqs:	8220 (6Ch frequencies, 2 bytes each)
+Music Pointers:	82F8 (1Fh songs, 12h bytes per entry/Music header)
+SFX Pointers 1:	8458 (68h pointers, 2 bytes each)
+SFX Pointers 2:	8528 (33h pointers, 2 bytes each)
+Envelope Ptrs:	A05A (2Ah pointers, 2 bytes each)
+FM Instruments:	A448 (19h bytes per instrument)
+SFX ID List:	18B6 (Z80 RAM)
+Music Banks:	1951 (Z80 RAM)
+Z80 Driver:	0F8100
+
+All tables exist in these sound banks:
+	1A - 0D0000
+	1B - 0D8000
+	1C - 0E0000
+	1D - 0E8000
+	1E - 0F0000
