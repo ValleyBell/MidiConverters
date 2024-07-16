@@ -14,32 +14,37 @@
 #include <math.h>
 
 #include "stdtype.h"
-#include <stdbool.h>
+#include "stdbool.h"
 
+#ifdef _MSC_VER
+#define stricmp	_stricmp
+#else
+#define stricmp	strcasecmp
+#endif
+
+
+#include "midi_funcs.h"
 
 typedef struct _track_info
 {
-	UINT16 StartPos;
-	UINT16 LoopPos;
-	UINT32 TickCnt;
-	UINT32 LoopTick;
-	UINT8 Flags;
-	UINT8 MaxVol;
-	bool VolBoost;
-	UINT16 LoopTimes;
-} TRK_INFO;
+	UINT16 startOfs;
+	UINT16 loopOfs;
+	UINT32 tickCnt;
+	UINT32 loopTick;
+	UINT16 loopTimes;
+	UINT8 flags;
+	UINT8 maxVol;
+	bool volBoost;
+} TRK_INF;
+
+#define BALANCE_TRACK_TIMES
+#include "midi_utils.h"
 
 
 static UINT16 DetectSongCount(UINT32 MusLibLen, const UINT8* MusLibData, UINT32 BasePos);
 UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, UINT8** OutData*/);
-static void PreparseGrc(UINT32 GrcLen, const UINT8* GrcData, UINT8* GrcBuf, TRK_INFO* TrkInf, UINT8 Mode);
-static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf);
+static void PreparseGrc(UINT32 GrcLen, const UINT8* GrcData, UINT8* GrcBuf, TRK_INF* TrkInf, UINT8 Mode);
 static UINT16 ReadLE16(const UINT8* Buffer);
-static void WriteBE32(UINT8* Buffer, UINT32 Value);
-static void WriteBE16(UINT8* Buffer, UINT16 Value);
-static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UINT8 Val1, UINT8 Val2);
-static void WriteMetaEvent_Data(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 MetaType, UINT32 DataLen, const UINT8* Data);
-static void WriteMidiValue(UINT8* Buffer, UINT32* Pos, UINT32 Value);
 static float OPN2DB(UINT8 TL, UINT8 PanMode, bool VolBoost);
 static float PSG2DB(UINT8 Vol);
 static UINT8 DB2Mid(float DB);
@@ -107,13 +112,13 @@ static const UINT8 MOD_DATA[0x22][4] =
 
 
 
-UINT32 MidLen;
-UINT8* MidData;
-UINT16 TickpQrtr;
-UINT16 DefLoopCount;
-bool OptVolWrites;
-bool NoLoopExt;
-bool EnableSMPSMod;
+static UINT32 MidLen;
+static UINT8* MidData;
+static UINT16 TickpQrtr;
+static UINT16 DefLoopCount;
+static bool OptVolWrites;
+static bool NoLoopExt;
+static bool EnableSMPSMod;
 
 int main(int argc, char* argv[])
 {
@@ -167,15 +172,15 @@ int main(int argc, char* argv[])
 	argbase = 1;
 	while(argbase < argc && argv[argbase][0] == '-')
 	{
-		if (! _stricmp(argv[argbase] + 1, "Mus"))
+		if (! stricmp(argv[argbase] + 1, "Mus"))
 			Mode = MODE_MUS;
-		else if (! _stricmp(argv[argbase] + 1, "DAC"))
+		else if (! stricmp(argv[argbase] + 1, "DAC"))
 			Mode = MODE_DAC;
-		else if (! _stricmp(argv[argbase] + 1, "Ins"))
+		else if (! stricmp(argv[argbase] + 1, "Ins"))
 			Mode = MODE_INS;
-		else if (! _stricmp(argv[argbase] + 1, "OptVol"))
+		else if (! stricmp(argv[argbase] + 1, "OptVol"))
 			OptVolWrites = true;
-		else if (! _stricmp(argv[argbase] + 1, "TpQ"))
+		else if (! stricmp(argv[argbase] + 1, "TpQ"))
 		{
 			argbase ++;
 			if (argbase < argc)
@@ -185,7 +190,7 @@ int main(int argc, char* argv[])
 					TickpQrtr = 24;
 			}
 		}
-		else if (! _stricmp(argv[argbase] + 1, "Loops"))
+		else if (! stricmp(argv[argbase] + 1, "Loops"))
 		{
 			argbase ++;
 			if (argbase < argc)
@@ -195,9 +200,9 @@ int main(int argc, char* argv[])
 					DefLoopCount = 2;
 			}
 		}
-		else if (! _stricmp(argv[argbase] + 1, "NoLpExt"))
+		else if (! stricmp(argv[argbase] + 1, "NoLpExt"))
 			NoLoopExt = true;
-		else if (! _stricmp(argv[argbase] + 1, "SMPSMod"))
+		else if (! stricmp(argv[argbase] + 1, "SMPSMod"))
 			EnableSMPSMod = true;
 		else
 			break;
@@ -325,15 +330,14 @@ static UINT16 DetectSongCount(UINT32 MusLibLen, const UINT8* MusLibData, UINT32 
 UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, UINT8** OutData*/)
 {
 	UINT8* TempBuf;
-	TRK_INFO TrkInf[0x0A];
-	TRK_INFO* TempTInf;
+	TRK_INF TrkInf[0x0A];
+	TRK_INF* TempTInf;
 	UINT8 TrkCnt;
 	UINT8 CurTrk;
 	UINT16 InPos;
-	UINT32 DstPos;
-	UINT32 TrkBase;
-	UINT8 MidChn;
 	UINT8 ChnMode;
+	FILE_INF midFileInf;
+	MID_TRK_STATE MTS;
 	bool TrkEnd;
 	UINT8 CurCmd;
 	
@@ -343,7 +347,6 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 	UINT32 TempLng;
 	UINT16 TempSht;
 	UINT8 TempByt;
-	UINT32 CurDly;
 	UINT8 ChnVol;
 	UINT8 ChnIns;
 	UINT8 MidChnVol;
@@ -361,25 +364,15 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 	UINT8 ModDataMem[5];
 	
 	TrkCnt = 0x0A;
-	MidLen = 0x20000;	// 128 KB should be enough
-	MidData = (UINT8*)malloc(MidLen);
+	midFileInf.alloc = 0x20000;	// 128 KB should be enough
+	midFileInf.data = (UINT8*)malloc(midFileInf.alloc);
+	midFileInf.pos = 0x00;
 	
-	DstPos = 0x00;
-	WriteBE32(&MidData[DstPos + 0x00], 0x4D546864);	// write 'MThd'
-	WriteBE32(&MidData[DstPos + 0x04], 0x00000006);
-	DstPos += 0x08;
-	
-	WriteBE16(&MidData[DstPos + 0x00], 0x0001);		// Format 1
-	WriteBE16(&MidData[DstPos + 0x02], 1 + TrkCnt);	// Tracks: MasterTrk + TrkCnt
-	WriteBE16(&MidData[DstPos + 0x04], TickpQrtr);	// Ticks per Quarter: 24
-	DstPos += 0x06;
+	WriteMidiHeader(&midFileInf, 0x0001, 1 + TrkCnt, TickpQrtr);	// number of tracks: MasterTrk + TrkCnt
 	
 	// write Master Track
-	WriteBE32(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
-	DstPos += 0x08;
-	
-	TrkBase = DstPos;
-	CurDly = 0;
+	WriteMidiTrackStart(&midFileInf, &MTS);
+	MTS.midChn = 0x00;
 	
 	// Note: Timing is 1 tick = 1 frame (60 Hz)
 	// BPM = 3600 Ticks/min / 24 Ticks/Quarter
@@ -388,66 +381,59 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 	//TempLng = 400000;
 	TempLng = 50000 * TickpQrtr / 3;	// 1 000 000 * Tick/Qrtr / 60
 	WriteBE32(TempArr, TempLng);
-	WriteMetaEvent_Data(MidData, &DstPos, &CurDly, 0x51, 0x03, &TempArr[0x01]);
+	WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &TempArr[0x01]);
 	
-	WriteEvent(MidData, &DstPos, &CurDly, 0xFF, 0x2F, 0x00);
-	
-	WriteBE32(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
+	WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
+	WriteMidiTrackEnd(&midFileInf, &MTS);
 	
 	// Read Header
 	TempBuf = (UINT8*)malloc(GrcLen);
 	InPos = GrcAddr;
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
+	for (CurTrk = 0; CurTrk < TrkCnt; CurTrk ++, InPos += 0x03)
 	{
 		TempTInf = &TrkInf[CurTrk];
-		TempTInf->Flags = GrcData[InPos + 0x00];
-		TempTInf->StartPos = ReadLE16(&GrcData[InPos + 0x01]);
-		TempTInf->TickCnt = 0x00;
-		TempTInf->LoopTimes = DefLoopCount;
-		TempTInf->LoopPos = 0x0000;
-		TempTInf->LoopTick = 0x00;
-		TempTInf->MaxVol = 0x7F;
-		TempTInf->VolBoost = false;
+		TempTInf->flags = GrcData[InPos + 0x00];
+		TempTInf->startOfs = ReadLE16(&GrcData[InPos + 0x01]);
+		TempTInf->loopOfs = 0x0000;
+		TempTInf->tickCnt = 0;
+		TempTInf->loopTick = 0;
+		TempTInf->maxVol = 0x7F;
+		TempTInf->volBoost = false;
 		ChnMode = CHN_MASK[CurTrk] & 0x80;
 		
 		PreparseGrc(GrcLen, GrcData, TempBuf, TempTInf, ChnMode | 0x00);
-		if (TempTInf->MaxVol < 0x08)
-			TempTInf->VolBoost = true;
+		if (TempTInf->maxVol < 0x08)
+			TempTInf->volBoost = true;
 		
 		// If there is a loop, parse a second time to get the Loop Tick.
-		if (TempTInf->LoopPos)
+		if (TempTInf->loopOfs)
 			PreparseGrc(GrcLen, GrcData, TempBuf, TempTInf, ChnMode | 0x01);
-		
-		InPos += 0x03;
+		TempTInf->loopTimes = TempTInf->loopOfs ? DefLoopCount : 0;
 	}
 	free(TempBuf);	TempBuf = NULL;
 	
 	if (! NoLoopExt)
-		GuessLoopTimes(TrkCnt, TrkInf);
+		BalanceTrackTimes(TrkCnt, TrkInf, 24 / 4, 0xFF);
 	
 	// --- Main Conversion ---
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
+	for (CurTrk = 0; CurTrk < TrkCnt; CurTrk ++)
 	{
 		TempTInf = &TrkInf[CurTrk];
 		
-		WriteBE32(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
-		DstPos += 0x08;
+		WriteMidiTrackStart(&midFileInf, &MTS);
 		
-		TrkBase = DstPos;
-		CurDly = 0;
-		
-		if (TempTInf->Flags & 0x80)
+		if (TempTInf->flags & 0x80)
 			TrkEnd = false;
 		else
 			TrkEnd = true;
-		InPos = TempTInf->StartPos;
+		InPos = TempTInf->startOfs;
 		
 		ChnMode = CHN_MASK[CurTrk];
 		if (ChnMode & 0x80)
-			MidChn = 0x0A + (CurTrk - 0x06);
+			MTS.midChn = 0x0A + (CurTrk - 0x06);
 		else
-			MidChn = CurTrk;
-		//MidChn = (CurTrk == 0x05) ? 0x09 : CurTrk;
+			MTS.midChn = CurTrk;
+		//MTS.midChn = (CurTrk == 0x05) ? 0x09 : CurTrk;
 		ChnVol = 0x00;
 		ChnIns = 0x00;
 		PanReg = 0x00;
@@ -467,19 +453,18 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 		CopySMPSModData(MOD_DATA[0], ModDataMem);
 		
 		//TempArr[0x00] = 0x04;
-		//WriteMetaEvent_Data(MidData, &DstPos, &CurDly, 0x21, 0x01, &TempArr[0x00]);
-		if (TempTInf->VolBoost)
-			WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | CurTrk, 93, 0x08);
+		//WriteMetaEvent(&midFileInf, &MTS, 0x21, 0x01, &TempArr[0x00]);
+		if (TempTInf->volBoost)
+			WriteEvent(&midFileInf, &MTS, 0xB0, 93, 0x08);
 		if (ChnMode == 0xE0)
 			CurOctave = 5;
 		
 		while(! TrkEnd && InPos < GrcLen)
 		{
-			if (LoopCnt == 0xFFFF && InPos == TempTInf->LoopPos)
+			if (LoopCnt == 0xFFFF && InPos == TempTInf->loopOfs)
 			{
 				LoopCnt ++;
-				WriteEvent(MidData, &DstPos, &CurDly,
-							0xB0 | MidChn, 0x6F, (UINT8)LoopCnt);
+				WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)LoopCnt);
 				MidChnVol |= 0x80;		// set Bit 7 for to force writing it the Volume again
 				LastModType = 0xFF;
 			}
@@ -494,8 +479,8 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 				//	Decap Attack: Note 0 is a B. (YM2612 FNum 0x26A)
 				//	Socket: Note 0 is a C. (YM2612 FNum 0x28E)
 				TempByt = NOTE_SCALE[CurCmd & 0x0F];
-				if (MidChn == 0x09)
-					CurNote = ChnIns;
+				if (MTS.midChn == 0x09)
+					CurNote = 36 + ChnIns;
 				else
 				{
 					if (TempByt == 0xFF)
@@ -523,14 +508,12 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 				}
 				if (LastNote != 0xFF && ! HoldNote)
 				{
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0x90 | MidChn, LastNote, 0x00);
+					WriteEvent(&midFileInf, &MTS, 0x90, LastNote, 0x00);
 				}
 				
-				TempByt = NOTE_SCALE[CurCmd & 0x0F];
 				if (CurNote != 0xFF)
 				{
-					// Pan has only an effect if a Note is played.
+					// Pan has only an effect when a Note is played.
 					TempByt = (CurCmd & 0x60) << 1;
 					if (TempByt != PanReg)
 					{
@@ -549,20 +532,18 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 							TempByt = 0x40;
 							break;
 						}
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x0A, TempByt);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, TempByt);
 						
 						TempByt = (TempByt == 0x40) ? 0x00 : 0x01;
 						TempByt |= (PanMode & ~0x01);
 						if (TempByt != PanMode)
 						{
 							PanMode = TempByt;
-							TempByt = DB2Mid(OPN2DB(ChnVol, PanMode, TempTInf->VolBoost));
+							TempByt = DB2Mid(OPN2DB(ChnVol, PanMode, TempTInf->volBoost));
 							if (! OptVolWrites || TempByt != MidChnVol)
 							{
 								MidChnVol = TempByt;
-								WriteEvent(MidData, &DstPos, &CurDly,
-											0xB0 | MidChn, 0x07, MidChnVol);
+								WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, MidChnVol);
 							}
 						}
 					}
@@ -572,37 +553,30 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 				{
 					if (HoldNote == 0x00)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | MidChn, CurNote, 0x7F);
+						WriteEvent(&midFileInf, &MTS, 0x90, CurNote, 0x7F);
 					}
 					else if (HoldNote == 0x02)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x41, 0x7F);	// Portamento On
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | MidChn, LastNote, 0x00);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | MidChn, CurNote, 0x7F);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x41, 0x7F);	// Portamento On
+						WriteEvent(&midFileInf, &MTS, 0x90, LastNote, 0x00);
+						WriteEvent(&midFileInf, &MTS, 0x90, CurNote, 0x7F);
 					}
 				}
 				
 				if (! (CurCmd & 0x10))
 				{
-					CurDly += DefNoteLen;
+					MTS.curDly += DefNoteLen;
 				}
 				else
 				{
 					InPos ++;
-					CurDly += GrcData[InPos];
+					MTS.curDly += GrcData[InPos];
 				}
 				InPos ++;
 				// TODO: add code to handle Note Stop here
 				
 				if (HoldNote == 0x02)
-				{
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x41, 0x00);	// Portamento Off
-				}
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x41, 0x00);	// Portamento Off
 				LastNote = CurNote;
 				HoldNote = false;
 			}
@@ -614,7 +588,7 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 					if (! (ChnMode & 0x80))
 					{
 						ChnVol = VOL_TABLE_FM[CurCmd & 0x0F];
-						TempByt = DB2Mid(OPN2DB(ChnVol, PanMode, TempTInf->VolBoost));
+						TempByt = DB2Mid(OPN2DB(ChnVol, PanMode, TempTInf->volBoost));
 					}
 					else
 					{
@@ -624,8 +598,7 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 					if (! OptVolWrites || TempByt != MidChnVol)
 					{
 						MidChnVol = TempByt;
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x07, MidChnVol);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, MidChnVol);
 					}
 				}
 				else //if ((CurCmd & 0xF0) == 0x90)
@@ -645,8 +618,7 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 				{
 				case 0xEC:	// Note Stop (x frames before it expires)
 					NoteStop = GrcData[InPos];
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x29, NoteStop);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x29, NoteStop);
 					InPos ++;
 					
 					printf("NoteStop = %u on track %X\n", NoteStop, CurTrk);
@@ -655,8 +627,7 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 					break;
 				case 0xED:	// Set PSG Noise Mode
 					TempByt = GrcData[InPos];
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x03, TempByt & 0x0F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x03, TempByt & 0x0F);
 					InPos ++;
 					break;
 				case 0xEE:	// Loop
@@ -683,33 +654,30 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 					TempSht = 0x2000 + (INT8)GrcData[InPos] * 128;
 					InPos ++;
 					
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xE0 | MidChn, TempSht & 0x7F, (TempSht >> 7) & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xE0, TempSht & 0x7F, (TempSht >> 7) & 0x7F);
 					break;
 				case 0xF0:	// reset SFX ID
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x70, 0x70);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, 0x70);
 					break;
 				case 0xF1:	// set Volume
 					ChnVol = GrcData[InPos] & 0x7F;
 					if (ChnMode & 0x80)
 						TempByt = DB2Mid(PSG2DB(ChnVol));
 					else
-						TempByt = DB2Mid(OPN2DB(ChnVol, PanMode, TempTInf->VolBoost));
+						TempByt = DB2Mid(OPN2DB(ChnVol, PanMode, TempTInf->volBoost));
 					InPos ++;
 					
 					if (! OptVolWrites || TempByt != MidChnVol)
 					{
 						MidChnVol = TempByt;
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x07, MidChnVol);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, MidChnVol);
 					}
 					break;
 				case 0xF2:	// Enable/Disable DAC
 					if (LastNote != 0xFF)
 					{
 						// turn note off before we change the channel
-						WriteEvent(MidData, &DstPos, &CurDly, 0x90 | MidChn, LastNote, 0x00);
+						WriteEvent(&midFileInf, &MTS, 0x90, LastNote, 0x00);
 						LastNote = 0xFF;
 					}
 					
@@ -719,39 +687,34 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 					{
 						// enable DAC
 						PanMode |= 0x80;
-						if (MidChn != 0x09)
-							MidChn = 0x09;
+						if (MTS.midChn != 0x09)
+							MTS.midChn = 0x09;
 					}
 					else
 					{
 						// disable DAC
 						PanMode &= ~0x80;
-						if (MidChn == 0x09)
-							MidChn = CurTrk;
+						if (MTS.midChn == 0x09)
+							MTS.midChn = CurTrk;
 					}
 					break;
 				case 0xF3:	// set Fade Speed
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x70, 0x73);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, 0x73);
 					InPos ++;
 					break;
 				case 0xF4:	// synchronize all tracks
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x70, 0x74);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, 0x74);
 					break;
 				case 0xF5:	// set YM2612 Timer B
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x70, 0x75);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, 0x75);
 					InPos ++;
 					break;
 				case 0xF6:	// set AMS/FMS
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x70, 0x76);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, 0x76);
 					InPos ++;
 					break;
 				case 0xF7:	// set LFO rate
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xB0 | MidChn, 0x70, 0x77);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, 0x77);
 					InPos ++;
 					break;
 				case 0xF8:	// Return from GoSub
@@ -782,16 +745,15 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 					if (InPos >= GrcLen)
 						*((char*)NULL) = 'x';
 					
-					if (InPos == TempTInf->LoopPos)
+					if (InPos == TempTInf->loopOfs)
 					{
 						if (LoopCnt == 0xFFFF)
 							LoopCnt = 0;
 						LoopCnt ++;
 						if (LoopCnt < 0x80)
-							WriteEvent(MidData, &DstPos, &CurDly,
-										0xB0 | MidChn, 0x6F, (UINT8)LoopCnt);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)LoopCnt);
 						
-						if (LoopCnt >= TempTInf->LoopTimes)
+						if (LoopCnt >= TempTInf->loopTimes)
 							TrkEnd = true;
 						
 						MidChnVol |= 0x80;		// set Bit 7 for to force writing it the Volume again
@@ -815,32 +777,26 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 								CopySMPSModData(MOD_DATA[LastModType], ModDataMem);
 								
 								for (TempByt = 0x00; TempByt < 0x04; TempByt ++)
-									WriteEvent(MidData, &DstPos, &CurDly,
-												0xB0 | MidChn, 0x10 | TempByt, ModDataMem[TempByt]);
-								WriteEvent(MidData, &DstPos, &CurDly,
-											0xB0 | MidChn, 0x01, ModDataMem[0x04]);
+									WriteEvent(&midFileInf, &MTS, 0xB0, 0x10 | TempByt, ModDataMem[TempByt]);
+								WriteEvent(&midFileInf, &MTS, 0xB0, 0x01, ModDataMem[0x04]);
 							}
 						}
 						
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x21, LastModType);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x21, LastModType);
 						if (! EnableSMPSMod)
-							WriteEvent(MidData, &DstPos, &CurDly,
-										0xB0 | MidChn, 0x01, 0x40);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x01, 0x40);
 					}
 					else
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x01, TempByt);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x01, TempByt);
 					}
 					break;
 				case 0xFC:	// set Instrument
 					ChnIns = GrcData[InPos];
 					InPos ++;
 					
-					if (MidChn != 0x09)	// not on DAC channel
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xC0 | MidChn, ChnIns, 0x00);
+					if (MTS.midChn != 0x09)	// not on DAC channel
+						WriteEvent(&midFileInf, &MTS, 0xC0, ChnIns, 0x00);
 					break;
 				case 0xFD:	// set Default Note Length
 					DefNoteLen = GrcData[InPos];
@@ -860,18 +816,19 @@ UINT8 GRC2Mid(UINT32 GrcLen, UINT8* GrcData, UINT16 GrcAddr/*, UINT32* OutLen, U
 			}
 		}
 		if (LastNote != 0xFF)
-			WriteEvent(MidData, &DstPos, &CurDly, 0x90 | MidChn, LastNote, 0x00);
+			WriteEvent(&midFileInf, &MTS, 0x90, LastNote, 0x00);
 		
-		WriteEvent(MidData, &DstPos, &CurDly, 0xFF, 0x2F, 0x00);
+		WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
 		
-		WriteBE32(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
+		WriteMidiTrackEnd(&midFileInf, &MTS);
 	}
-	MidLen = DstPos;
+	MidData = midFileInf.data;
+	MidLen = midFileInf.pos;
 	
 	return 0x00;
 }
 
-static void PreparseGrc(UINT32 GrcLen, const UINT8* GrcData, UINT8* GrcBuf, TRK_INFO* TrkInf, UINT8 Mode)
+static void PreparseGrc(UINT32 GrcLen, const UINT8* GrcData, UINT8* GrcBuf, TRK_INF* TrkInf, UINT8 Mode)
 {
 	// Note: GrcBuf is a temporary buffer with a size of GrcLen bytes.
 	//       It is used to find loops by marking processed bytes.
@@ -894,15 +851,15 @@ static void PreparseGrc(UINT32 GrcLen, const UINT8* GrcData, UINT8* GrcBuf, TRK_
 	
 	if (! Mode)
 	{
-		TrkInf->LoopPos = 0x0000;
-		TrkInf->MaxVol = 0x7F;
+		TrkInf->loopOfs = 0x0000;
+		TrkInf->maxVol = 0x7F;
 	}
-	if (! (TrkInf->Flags & 0x80))
+	if (! (TrkInf->flags & 0x80))
 		return;	// Track inactive - return
 	
 	if (! (Mode & 0x01))
 		memset(GrcBuf, 0x00, GrcLen);
-	InPos = TrkInf->StartPos;
+	InPos = TrkInf->startOfs;
 	StackPos = 0x00;
 	DefNoteLen = 0x00;
 	LocLoopCount = 0x80;
@@ -910,7 +867,7 @@ static void PreparseGrc(UINT32 GrcLen, const UINT8* GrcData, UINT8* GrcBuf, TRK_
 	
 	while(InPos < GrcLen)
 	{
-		if ((Mode & 0x01) && InPos == TrkInf->LoopPos)
+		if ((Mode & 0x01) && InPos == TrkInf->loopOfs)
 			return;
 		
 		CurCmd = GrcData[InPos];
@@ -929,9 +886,9 @@ static void PreparseGrc(UINT32 GrcLen, const UINT8* GrcData, UINT8* GrcBuf, TRK_
 				InPos ++;
 			}
 			if (! (Mode & 0x01))
-				TrkInf->TickCnt += TempByt;
+				TrkInf->tickCnt += TempByt;
 			else
-				TrkInf->LoopTick += TempByt;
+				TrkInf->loopTick += TempByt;
 		}
 		else if ((CurCmd & 0xE0) == 0x80)
 		{
@@ -941,8 +898,8 @@ static void PreparseGrc(UINT32 GrcLen, const UINT8* GrcData, UINT8* GrcBuf, TRK_
 					TempByt = VOL_TABLE_PSG[CurCmd & 0x0F];
 				else
 					TempByt = VOL_TABLE_FM[CurCmd & 0x0F];
-				if (TrkInf->MaxVol > TempByt)
-					TrkInf->MaxVol = TempByt;
+				if (TrkInf->maxVol > TempByt)
+					TrkInf->maxVol = TempByt;
 			}
 		}
 		else
@@ -989,8 +946,8 @@ static void PreparseGrc(UINT32 GrcLen, const UINT8* GrcData, UINT8* GrcBuf, TRK_
 				break;
 			case 0xF1:	// set Volume
 				TempByt = GrcData[InPos] & 0x7F;
-				if (TrkInf->MaxVol > TempByt)
-					TrkInf->MaxVol = TempByt;
+				if (TrkInf->maxVol > TempByt)
+					TrkInf->maxVol = TempByt;
 				
 				GrcBuf[InPos] |= Mask;
 				InPos ++;
@@ -1053,7 +1010,7 @@ static void PreparseGrc(UINT32 GrcLen, const UINT8* GrcData, UINT8* GrcBuf, TRK_
 				
 				if (GrcBuf[InPos] & Mask)
 				{
-					TrkInf->LoopPos = InPos;
+					TrkInf->loopOfs = InPos;
 					return;
 				}
 				break;
@@ -1083,190 +1040,10 @@ static void PreparseGrc(UINT32 GrcLen, const UINT8* GrcData, UINT8* GrcBuf, TRK_
 	return;
 }
 
-static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf)
-{
-	UINT8 CurTrk;
-	TRK_INFO* TempTInf;
-	UINT32 TrkLen;
-	UINT32 TrkLoopLen;
-	UINT32 MaxTrkLen;
-	
-	MaxTrkLen = 0x00;
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
-	{
-		TempTInf = &TrkInf[CurTrk];
-		if (TempTInf->LoopPos)
-			TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
-		else
-			TrkLoopLen = 0x00;
-		
-		TrkLen = TempTInf->TickCnt + TrkLoopLen * (TempTInf->LoopTimes - 1);
-		if (MaxTrkLen < TrkLen)
-			MaxTrkLen = TrkLen;
-	}
-	
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
-	{
-		TempTInf = &TrkInf[CurTrk];
-		if (TempTInf->LoopPos)
-			TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
-		else
-			TrkLoopLen = 0x00;
-		if (TrkLoopLen < 0x20)
-			continue;
-		
-		TrkLen = TempTInf->TickCnt + TrkLoopLen * (TempTInf->LoopTimes - 1);
-		if (TrkLen * 5 / 4 < MaxTrkLen)
-		{
-			// TrkLen = desired length of the loop
-			TrkLen = MaxTrkLen - TempTInf->LoopTick;
-			
-			TempTInf->LoopTimes = (UINT16)((TrkLen + TrkLoopLen / 3) / TrkLoopLen);
-			printf("\nTrk %u: Extended loop to %u times", CurTrk, TempTInf->LoopTimes);
-		}
-	}
-	
-	return;
-}
-
-/*static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf)
-{
-	UINT8 CurTrk;
-	TRK_INFO* TempTInf;
-	UINT32 TrkLoopLen;
-	UINT32 MaxLoopLen;
-	
-	MaxLoopLen = 0x00;
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
-	{
-		TempTInf = &TrkInf[CurTrk];
-		TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
-		
-		TrkLoopLen *= TempTInf->LoopTimes;
-		if (MaxLoopLen < TrkLoopLen)
-			MaxLoopLen = TrkLoopLen;
-	}
-	
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
-	{
-		TempTInf = &TrkInf[CurTrk];
-		TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
-		if (TrkLoopLen < 0x20)
-			continue;
-		
-		if (TrkLoopLen * TempTInf->LoopTimes * 5 / 4 < MaxLoopLen)
-		{
-			TempTInf->LoopTimes = (MaxLoopLen + TrkLoopLen / 4) / TrkLoopLen;
-		}
-	}
-	
-	return;
-}*/
-
 static UINT16 ReadLE16(const UINT8* Buffer)
 {
 	return	(Buffer[0x01] << 8) |
 			(Buffer[0x00] << 0);
-}
-
-static void WriteBE32(UINT8* Buffer, UINT32 Value)
-{
-	Buffer[0x00] = (Value & 0xFF000000) >> 24;
-	Buffer[0x01] = (Value & 0x00FF0000) >> 16;
-	Buffer[0x02] = (Value & 0x0000FF00) >>  8;
-	Buffer[0x03] = (Value & 0x000000FF) >>  0;
-	
-	return;
-}
-
-static void WriteBE16(UINT8* Buffer, UINT16 Value)
-{
-	Buffer[0x00] = (Value & 0xFF00) >> 8;
-	Buffer[0x01] = (Value & 0x00FF) >> 0;
-	
-	return;
-}
-
-static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UINT8 Val1, UINT8 Val2)
-{
-	WriteMidiValue(Buffer, Pos, *Delay);
-	*Delay = 0;
-	
-	switch(Evt & 0xF0)
-	{
-	case 0x80:
-	case 0x90:
-	case 0xA0:
-	case 0xB0:
-	case 0xE0:
-		Buffer[*Pos + 0x00] = Evt;
-		Buffer[*Pos + 0x01] = Val1;
-		Buffer[*Pos + 0x02] = Val2;
-		*Pos += 0x03;
-		break;
-	case 0xC0:
-	case 0xD0:
-		Buffer[*Pos + 0x00] = Evt;
-		Buffer[*Pos + 0x01] = Val1;
-		*Pos += 0x02;
-		break;
-	case 0xF0:	// for Meta Event: Track End
-		Buffer[*Pos + 0x00] = Evt;
-		Buffer[*Pos + 0x01] = Val1;
-		Buffer[*Pos + 0x02] = Val2;
-		*Pos += 0x03;
-		break;
-	default:
-		break;
-	}
-	
-	return;
-}
-
-static void WriteMetaEvent_Data(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 MetaType, UINT32 DataLen, const UINT8* Data)
-{
-	WriteMidiValue(Buffer, Pos, *Delay);
-	*Delay = 0;
-	
-	Buffer[*Pos + 0x00] = 0xFF;
-	Buffer[*Pos + 0x01] = MetaType;
-	*Pos += 0x02;
-	WriteMidiValue(Buffer, Pos, DataLen);
-	memcpy(Buffer + *Pos, Data, DataLen);
-	*Pos += DataLen;
-	
-	return;
-}
-
-static void WriteMidiValue(UINT8* Buffer, UINT32* Pos, UINT32 Value)
-{
-	UINT8 ValSize;
-	UINT8* ValData;
-	UINT32 TempLng;
-	UINT32 CurPos;
-	
-	ValSize = 0x00;
-	TempLng = Value;
-	do
-	{
-		TempLng >>= 7;
-		ValSize ++;
-	} while(TempLng);
-	
-	ValData = &Buffer[*Pos];
-	CurPos = ValSize;
-	TempLng = Value;
-	do
-	{
-		CurPos --;
-		ValData[CurPos] = 0x80 | (TempLng & 0x7F);
-		TempLng >>= 7;
-	} while(TempLng);
-	ValData[ValSize - 1] &= 0x7F;
-	
-	*Pos += ValSize;
-	
-	return;
 }
 
 static float OPN2DB(UINT8 TL, UINT8 PanMode, bool VolBoost)

@@ -13,27 +13,32 @@
 #include "stdtype.h"
 #include "stdbool.h"
 
+#ifdef _MSC_VER
+#define stricmp	_stricmp
+#else
+#define stricmp	strcasecmp
+#endif
+
+
+#include "midi_funcs.h"
 
 typedef struct _track_info
 {
-	UINT16 StartPos;
-	UINT16 LoopPos;
-	UINT32 TickCnt;
-	UINT32 LoopTick;
-	UINT16 LoopTimes;
-} TRK_INFO;
+	UINT16 startOfs;
+	UINT16 loopOfs;
+	UINT32 tickCnt;
+	UINT32 loopTick;
+	UINT16 loopTimes;
+} TRK_INF;
+
+#define BALANCE_TRACK_TIMES
+#include "midi_utils.h"
 
 
 static UINT16 DetectSongCount(UINT32 DataLen, const UINT8* Data, UINT32 MusBankList, UINT32 MusPtrOfs);
 UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen, UINT8** OutData*/);
-static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_INFO* TrkInf, UINT8 Mode);
-static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf);
+static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_INF* TrkInf, UINT8 Mode);
 static UINT16 ReadLE16(const UINT8* Buffer);
-static void WriteBE32(UINT8* Buffer, UINT32 Value);
-static void WriteBE16(UINT8* Buffer, UINT16 Value);
-static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UINT8 Val1, UINT8 Val2);
-static void WriteMetaEvent_Data(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 MetaType, UINT32 DataLen, const UINT8* Data);
-static void WriteMidiValue(UINT8* Buffer, UINT32* Pos, UINT32 Value);
 static INT8 GetSignMagByte(UINT8 value);
 static INT8 GetTranspByte(UINT8 value);
 static UINT32 TickInc2MidiTempo(UINT8 tickInc);
@@ -55,13 +60,13 @@ static const UINT8 CHN_MASK[0x0A] =
 
 
 
-UINT32 MidLen;
-UINT8* MidData;
-bool HighTickRate;
-UINT16 TickpQrtr;
-UINT16 DefLoopCount;
-bool OptVolWrites;
-bool NoLoopExt;
+static UINT32 MidLen;
+static UINT8* MidData;
+static bool HighTickRate;
+static UINT16 TickpQrtr;
+static UINT16 DefLoopCount;
+static bool OptVolWrites;
+static bool NoLoopExt;
 
 int main(int argc, char* argv[])
 {
@@ -115,17 +120,17 @@ int main(int argc, char* argv[])
 	argbase = 1;
 	while(argbase < argc && argv[argbase][0] == '-')
 	{
-		if (! _stricmp(argv[argbase] + 1, "Mus"))
+		if (! stricmp(argv[argbase] + 1, "Mus"))
 			Mode = MODE_MUS;
-		else if (! _stricmp(argv[argbase] + 1, "DAC"))
+		else if (! stricmp(argv[argbase] + 1, "DAC"))
 			Mode = MODE_DAC;
-		else if (! _stricmp(argv[argbase] + 1, "Ins"))
+		else if (! stricmp(argv[argbase] + 1, "Ins"))
 			Mode = MODE_INS;
-		else if (! _stricmp(argv[argbase] + 1, "OptVol"))
+		else if (! stricmp(argv[argbase] + 1, "OptVol"))
 			OptVolWrites = true;
-		else if (! _stricmp(argv[argbase] + 1, "HTR"))
+		else if (! stricmp(argv[argbase] + 1, "HTR"))
 			HighTickRate = true;
-		else if (! _stricmp(argv[argbase] + 1, "TpQ"))
+		else if (! stricmp(argv[argbase] + 1, "TpQ"))
 		{
 			argbase ++;
 			if (argbase < argc)
@@ -135,7 +140,7 @@ int main(int argc, char* argv[])
 					TickpQrtr = 24;
 			}
 		}
-		else if (! _stricmp(argv[argbase] + 1, "Loops"))
+		else if (! stricmp(argv[argbase] + 1, "Loops"))
 		{
 			argbase ++;
 			if (argbase < argc)
@@ -145,7 +150,7 @@ int main(int argc, char* argv[])
 					DefLoopCount = 2;
 			}
 		}
-		else if (! _stricmp(argv[argbase] + 1, "NoLpExt"))
+		else if (! stricmp(argv[argbase] + 1, "NoLpExt"))
 			NoLoopExt = true;
 		else
 			break;
@@ -276,18 +281,27 @@ static UINT16 DetectSongCount(UINT32 DataLen, const UINT8* Data, UINT32 MusBankL
 	return (UINT16)CurPos;
 }
 
+static void WriteEvent_Chn(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 chn, UINT8 evt, UINT8 val1, UINT8 val2)
+{
+	// write event to the channel specified by the "chn" parameter
+	UINT8 chnBak = MTS->midChn;
+	MTS->midChn = chn;
+	WriteEvent(fInf, MTS, evt, val1, val2);
+	MTS->midChn = chnBak;
+	return;
+}
+
 UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen, UINT8** OutData*/)
 {
 	UINT8* TempBuf;
-	TRK_INFO TrkInf[0x09];
-	TRK_INFO* TempTInf;
+	TRK_INF TrkInf[0x09];
+	TRK_INF* TempTInf;
 	UINT8 TrkCnt;
 	UINT8 CurTrk;
 	UINT16 InPos;
-	UINT32 DstPos;
-	UINT32 TrkBase;
-	UINT8 MidChn;
 	UINT8 ChnMode;
+	FILE_INF midFileInf;
+	MID_TRK_STATE MTS;
 	bool TrkEnd;
 	UINT8 CurCmd;
 	
@@ -296,7 +310,6 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 	UINT16 TempSht;
 	UINT8 TempByt;
 	UINT8 ChnFlags;
-	UINT32 CurDly;
 	UINT8 DelayAdd;
 	UINT8 GraceLen;
 	UINT8 NoteLenFrac;
@@ -329,78 +342,65 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 	INT8 cmdEE_NoteMod;
 	
 	TrkCnt = 0x09;
-	MidLen = 0x20000;	// 128 KB should be enough
-	MidData = (UINT8*)malloc(MidLen);
+	midFileInf.alloc = 0x20000;	// 128 KB should be enough
+	midFileInf.data = (UINT8*)malloc(midFileInf.alloc);
+	midFileInf.pos = 0x00;
 	
-	DstPos = 0x00;
-	WriteBE32(&MidData[DstPos + 0x00], 0x4D546864);	// write 'MThd'
-	WriteBE32(&MidData[DstPos + 0x04], 0x00000006);
-	DstPos += 0x08;
+	WriteMidiHeader(&midFileInf, 0x0001, TrkCnt, TickpQrtr);
 	
-	WriteBE16(&MidData[DstPos + 0x00], 0x0001);		// Format 1
-	WriteBE16(&MidData[DstPos + 0x02], TrkCnt);		// Tracks: TrkCnt
-	WriteBE16(&MidData[DstPos + 0x04], TickpQrtr);	// Ticks per Quarter: 24
-	DstPos += 0x06;
-	
-	/*// write Master Track
-	WriteBE32(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
-	DstPos += 0x08;
-	
-	TrkBase = DstPos;
-	CurDly = 0;
+#if 0
+	// write Master Track
+	WriteMidiTrackStart(&midFileInf, &MTS);
+	MTS.midChn = 0x00;
 	
 	TempLng = TickInc2MidiTempo(0x00);
 	WriteBE32(TempArr, TempLng);
-	WriteMetaEvent_Data(MidData, &DstPos, &CurDly, 0x51, 0x03, &TempArr[0x01]);
+	WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &TempArr[0x01]);
 	
-	WriteEvent(MidData, &DstPos, &CurDly, 0xFF, 0x2F, 0x00);
-	
-	WriteBE32(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length*/
+	WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
+	WriteMidiTrackEnd(&midFileInf, &MTS);
+#endif
 	
 	// Read Header
 	TempBuf = (UINT8*)malloc(KnmLen);
 	InPos = KnmAddr;
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++, InPos += 0x02)
+	for (CurTrk = 0; CurTrk < TrkCnt; CurTrk ++, InPos += 0x02)
 	{
 		TempTInf = &TrkInf[CurTrk];
-		TempTInf->StartPos = ReadLE16(&KnmData[InPos]);
-		TempTInf->TickCnt = 0x00;
-		TempTInf->LoopTimes = DefLoopCount;
-		TempTInf->LoopPos = 0x0000;
-		TempTInf->LoopTick = 0x00;
+		TempTInf->startOfs = ReadLE16(&KnmData[InPos]);
+		TempTInf->loopOfs = 0x0000;
+		TempTInf->tickCnt = 0;
+		TempTInf->loopTick = 0;
 		ChnMode = CHN_MASK[CurTrk] & 0x80;
 		
 		PreparseKnm(KnmLen, KnmData, TempBuf, TempTInf, ChnMode | 0x00);
 		
 		// If there is a loop, parse a second time to get the Loop Tick.
-		if (TempTInf->LoopPos)
+		if (TempTInf->loopOfs)
 			PreparseKnm(KnmLen, KnmData, TempBuf, TempTInf, ChnMode | 0x01);
+		TempTInf->loopTimes = TempTInf->loopOfs ? DefLoopCount : 0;
 	}
 	free(TempBuf);	TempBuf = NULL;
 	
 	if (! NoLoopExt)
-		GuessLoopTimes(TrkCnt, TrkInf);
+		BalanceTrackTimes(TrkCnt, TrkInf, TickpQrtr / 4, 0xFF);
 	
 	// --- Main Conversion ---
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
+	for (CurTrk = 0; CurTrk < TrkCnt; CurTrk ++)
 	{
 		TempTInf = &TrkInf[CurTrk];
 		
-		WriteBE32(&MidData[DstPos + 0x00], 0x4D54726B);	// write 'MTrk'
-		DstPos += 0x08;
-		
-		TrkBase = DstPos;
-		CurDly = 0;
+		WriteMidiTrackStart(&midFileInf, &MTS);
 		
 		TrkEnd = false;
-		InPos = TempTInf->StartPos & 0x7FFF;
+		InPos = TempTInf->startOfs & 0x7FFF;
 		
 		ChnMode = CHN_MASK[CurTrk];
 		if (ChnMode & 0x80)
-			MidChn = 0x0A + (CurTrk - 0x06);
+			MTS.midChn = 0x0A + (CurTrk - 0x06);
 		else
-			MidChn = CurTrk;
-		NoteChn = MidChn;
+			MTS.midChn = CurTrk;
+		NoteChn = MTS.midChn;
 		VolMult = 1;
 		ChnVol = 0x00;
 		NoteVol = 0x00;
@@ -430,11 +430,10 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 		
 		while(! TrkEnd && InPos < KnmLen)
 		{
-			if (MstLoopCnt == 0xFFFF && InPos == TempTInf->LoopPos)
+			if (MstLoopCnt == 0xFFFF && InPos == TempTInf->loopOfs)
 			{
 				MstLoopCnt ++;
-				WriteEvent(MidData, &DstPos, &CurDly,
-							0xB0 | MidChn, 0x6F, (UINT8)MstLoopCnt);
+				WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)MstLoopCnt);
 				MidChnVol |= 0x80;		// set Bit 7 for to force writing it the Volume again
 			}
 			
@@ -459,64 +458,57 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 						printf("\nWarning at 0x%04X: Out-of-range note %u!", InPos - 0x01, CurNote);
 						CurNote = 0x6B;
 					}
-					if (MidChn == 0x09)
+					if (MTS.midChn == 0x09)
 						CurNote += 36;
 					else
 						CurNote += 12;
 				}
 				
-				if (CurNote == 0xFF || MidChn >= 0x09)
+				if (CurNote == 0xFF || MTS.midChn >= 0x09)
 				{
 					// rest: always turn off
 					// drum channels: always retrigger
 					if (PortaActive)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x41, 0x00);	// Portamento Off
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x41, 0x00);	// Portamento Off
 						PortaActive = 0x00;
 					}
 					if (LastNote != 0xFF)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | NoteChn, LastNote, 0x00);
+						WriteEvent_Chn(&midFileInf, &MTS, NoteChn, 0x90, LastNote, 0x00);
 					}
 					if (CurNote != 0xFF)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | MidChn, CurNote, MidNoteVol);
-						NoteChn = MidChn;
+						WriteEvent(&midFileInf, &MTS, 0x90, CurNote, MidNoteVol);
+						NoteChn = MTS.midChn;
 					}
 				}
 				else
 				{
 					if (LastNote == 0xFF)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | MidChn, CurNote, MidNoteVol);
-						NoteChn = MidChn;
+						WriteEvent(&midFileInf, &MTS, 0x90, CurNote, MidNoteVol);
+						NoteChn = MTS.midChn;
 					}
 					else if (LastNote != CurNote)
 					{
 						if (! PortaActive)
 						{
-							WriteEvent(MidData, &DstPos, &CurDly,
-										0xB0 | MidChn, 0x41, 0x7F);	// Portamento On
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x41, 0x7F);	// Portamento On
 							PortaActive = 0x01;
 						}
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | NoteChn, LastNote, 0x00);
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0x90 | MidChn, CurNote, MidNoteVol);
-						NoteChn = MidChn;
+						WriteEvent_Chn(&midFileInf, &MTS, NoteChn, 0x90, LastNote, 0x00);
+						WriteEvent(&midFileInf, &MTS, 0x90, CurNote, MidNoteVol);
+						NoteChn = MTS.midChn;
 					}
 					// else (CurNote != 0xFF && LastNote == CurNote) -> just continue the existing note
 					else
 					{
 						// write informational Portamento Controller (but in a way that doesn't have an audible effect)
 						if (PortaActive)
-							WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x41, 0x41);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x41, 0x41);
 						else
-							WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x41, 0x01);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x41, 0x01);
 					}
 				}
 				LastNote = CurNote;
@@ -556,26 +548,24 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					if (RemTicksEnd == 0)
 						RemTicksEnd = 1;
 					NoteLen = NoteDelay - RemTicksEnd;
-					if (MidChn >= 0x09)
+					if (MTS.midChn >= 0x09)
 						NoteLen = 0;	// don't stop early for drum/PSG
 				}
 				if (NoteLen > 0 && NoteLen < NoteDelay)
 				{
 					// Note: on PSG channels, the "note length" seems to trigger the "release" phase,
 					// but this is often very long, so let's just ignore it in this case.
-					CurDly += NoteLen;
+					MTS.curDly += NoteLen;
 					NoteDelay -= NoteLen;
 					if (PortaActive)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x41, 0x00);	// Portamento Off
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x41, 0x00);	// Portamento Off
 						PortaActive = 0x00;
 					}
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0x90 | NoteChn, LastNote, 0x00);
+					WriteEvent_Chn(&midFileInf, &MTS, NoteChn, 0x90, LastNote, 0x00);
 					LastNote = 0xFF;
 				}
-				CurDly += NoteDelay;
+				MTS.curDly += NoteDelay;
 			}
 			else
 			{
@@ -633,7 +623,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 							TempByt = 0x40;
 							break;
 						}
-						WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0A, TempByt);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, TempByt);
 						
 						TempByt = (TempByt == 0x40) ? 0x00 : 0x01;
 						if (TempByt != PanMode)
@@ -643,15 +633,14 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 							if (TempByt != MidChnVol)
 							{
 								MidChnVol = TempByt;
-								WriteEvent(MidData, &DstPos, &CurDly,
-											0xB0 | MidChn, 0x07, MidChnVol);
+								WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, MidChnVol);
 							}
 						}
 					}
 					else
 					{
 						printf("\nWarning at 0x%04X: Pan Envelope used!", InPos - 0x01);
-						WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0A, 0x3F);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, 0x3F);
 					}
 					break;
 				case 0xDB:	// set Note Length fraction
@@ -660,7 +649,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					break;
 				case 0xDC:	// set SSG-EG
 					InPos += 0x02;
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
 					break;
 				case 0xDD:	// toggle Delay Multiply 3
 					ChnFlags ^= 0x04;
@@ -674,25 +663,25 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 				case 0xE0:	// FM Channel Setup
 					ChnMode &= ~0x10;
 					if (ChnMode & 0x80)
-						MidChn = 0x0A + (CurTrk - 0x06);
+						MTS.midChn = 0x0A + (CurTrk - 0x06);
 					else
-						MidChn = CurTrk;
+						MTS.midChn = CurTrk;
 					
 					// set Tempo
 					TempByt = KnmData[InPos];	InPos ++;
 					TempLng = TickInc2MidiTempo(TempByt);
 					WriteBE32(TempArr, TempLng);
-					WriteMetaEvent_Data(MidData, &DstPos, &CurDly, 0x51, 0x03, &TempArr[0x01]);
+					WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &TempArr[0x01]);
 					
 					if (PanMode & 0x80)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0A, 0x40);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, 0x40);
 						PanMode = 0x00;
 					}
 					
 					// set Instrument
 					ChnIns = KnmData[InPos];	InPos ++;
-					WriteEvent(MidData, &DstPos, &CurDly, 0xC0 | MidChn, ChnIns & 0x7F, 0x00);
+					WriteEvent(&midFileInf, &MTS, 0xC0, ChnIns & 0x7F, 0x00);
 					
 					ChnVol = KnmData[InPos];	InPos ++;
 					if (! (ChnMode & 0x80))
@@ -702,27 +691,26 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					if (! OptVolWrites || TempByt != MidChnVol)
 					{
 						MidChnVol = TempByt;
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x07, MidChnVol);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, MidChnVol);
 					}
 					
 					NoteLenFrac = -KnmData[InPos];	InPos ++;
 					break;
 				case 0xE1:	// Rhythm Channel Setup
 					ChnMode |= 0x10;
-					MidChn = 0x09;
+					MTS.midChn = 0x09;
 					
 					TempByt = KnmData[InPos];	InPos ++;
 					TempLng = TickInc2MidiTempo(TempByt);
 					WriteBE32(TempArr, TempLng);
-					WriteMetaEvent_Data(MidData, &DstPos, &CurDly, 0x51, 0x03, &TempArr[0x01]);
+					WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &TempArr[0x01]);
 					
 					if (PanMode & 0x80)
 					{
-						WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0A, 0x40);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x0A, 0x40);
 						PanMode = 0x00;
 					}
-					WriteEvent(MidData, &DstPos, &CurDly, 0xC0 | MidChn, 0x00, 0x00);	// set Drum Kit
+					WriteEvent(&midFileInf, &MTS, 0xC0, 0x00, 0x00);	// set Drum Kit
 					
 					TempByt = KnmData[InPos];	InPos ++;
 					break;
@@ -730,13 +718,13 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					TempByt = KnmData[InPos];	InPos ++;
 					TempLng = TickInc2MidiTempo(TempByt);
 					WriteBE32(TempArr, TempLng);
-					WriteMetaEvent_Data(MidData, &DstPos, &CurDly, 0x51, 0x03, &TempArr[0x01]);
+					WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &TempArr[0x01]);
 					break;
 				case 0xE3:	// set Instrument
 					if (ChnMode & 0x80)
 						InPos ++;
 					ChnIns = KnmData[InPos];	InPos ++;
-					WriteEvent(MidData, &DstPos, &CurDly, 0xC0 | MidChn, ChnIns & 0x7F, 0x00);
+					WriteEvent(&midFileInf, &MTS, 0xC0, ChnIns & 0x7F, 0x00);
 					break;
 				case 0xE4:	// set Instrument Volume
 					ChnVol = KnmData[InPos];
@@ -749,8 +737,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					if (! OptVolWrites || TempByt != MidChnVol)
 					{
 						MidChnVol = TempByt;
-						WriteEvent(MidData, &DstPos, &CurDly,
-									0xB0 | MidChn, 0x07, MidChnVol);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x07, MidChnVol);
 					}
 					break;
 				case 0xE5:	// Frequency Envelope
@@ -759,23 +746,23 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 						InPos ++;
 					else
 						InPos += 0x02;
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, TempByt & 0x7F);
 					break;
 				case 0xE6:	// ?? Envelope
 					TempByt = KnmData[InPos];
 					InPos ++;
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, TempByt & 0x7F);
 					break;
 				case 0xE7:	// 
 					TempByt = -KnmData[InPos];
 					InPos ++;
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, TempByt & 0x7F);
 					break;
 				case 0xE8:	// enforce note processing
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
 					ChnFlags |= 0x80;
 					break;
 				case 0xE9:	// set LFO Depth
@@ -789,23 +776,23 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					{
 						InPos += 0x02;
 					}
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, TempByt & 0x7F);
 					break;
 				case 0xEA:	// set LFO rate
 					TempByt = KnmData[InPos];
 					if (TempByt)
 						TempByt += 0x07;
 					InPos ++;
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, TempByt & 0x7F);
 					break;
 				case 0xEB:	// Global Transpose
 					TempByt = KnmData[InPos];
 					InPos ++;
 					GblTransp = GetTranspByte(TempByt);
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, TempByt & 0x7F);
 					break;
 				case 0xEC:	// Channel Transpose
 					TempByt = KnmData[InPos];
@@ -817,8 +804,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					TempSht = 0x2000 + GetSignMagByte(TempByt) * 64;
 					InPos ++;
 					
-					WriteEvent(MidData, &DstPos, &CurDly,
-								0xE0 | MidChn, TempSht & 0x7F, (TempSht >> 7) & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xE0, TempSht & 0x7F, (TempSht >> 7) & 0x7F);
 					break;
 				case 0xEE:	// volume/transpose loop
 					if (cmdEE_Cntr == 0)
@@ -844,7 +830,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 								TempByt = DB2Mid(OPN2DB(cmdEE_VolMod, 0x00));
 							else
 								TempByt = DB2Mid(PSG2DB(cmdEE_VolMod));
-							WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0B, TempByt);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x0B, TempByt);
 						}
 					}
 					else
@@ -855,7 +841,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 								TempByt = DB2Mid(OPN2DB(cmdEE_VolMod, 0x00));
 							else
 								TempByt = DB2Mid(PSG2DB(cmdEE_VolMod));
-							WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x0B, TempByt);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x0B, TempByt);
 						}
 						
 						// no parameters
@@ -867,7 +853,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 				case 0xEF:	// set global FM/PSG volume
 					// just ignore for now
 					InPos += 0x02;
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
 					break;
 				case 0xF0:	// set Octave
 				case 0xF1:
@@ -888,11 +874,11 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					TempByt = KnmData[InPos];
 					InPos ++;
 					// set TrkRAM+42
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x70, CurCmd & 0x7F);
-					WriteEvent(MidData, &DstPos, &CurDly, 0xB0 | MidChn, 0x26, TempByt & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x70, CurCmd & 0x7F);
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x26, TempByt & 0x7F);
 					break;
 				case 0xF9:	// GoTo
-					TempSht = ReadLE16(&KnmData[InPos]) ^ (TempTInf->StartPos & 0x8000);
+					TempSht = ReadLE16(&KnmData[InPos]) ^ (TempTInf->startOfs & 0x8000);
 					if (TempSht >= KnmLen)
 					{
 						printf("\nError at 0x%04X, track %u: Event %02X jumps to invalid offset 0x%04X!",
@@ -902,16 +888,15 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					}
 					InPos = TempSht;
 					
-					if (InPos == TempTInf->LoopPos)
+					if (InPos == TempTInf->loopOfs)
 					{
 						if (MstLoopCnt == 0xFFFF)
 							MstLoopCnt = 0;
 						MstLoopCnt ++;
 						if (MstLoopCnt < 0x80)
-							WriteEvent(MidData, &DstPos, &CurDly,
-										0xB0 | MidChn, 0x6F, (UINT8)MstLoopCnt);
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)MstLoopCnt);
 						
-						if (MstLoopCnt >= TempTInf->LoopTimes)
+						if (MstLoopCnt >= TempTInf->loopTimes)
 							TrkEnd = true;
 						
 						MidChnVol |= 0x80;		// set Bit 7 for to force writing it the Volume again
@@ -943,7 +928,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					if (! StackAddr[LpStkIdx])
 					{
 						// GoSub
-						TempSht = ReadLE16(&KnmData[InPos]) ^ (TempTInf->StartPos & 0x8000);
+						TempSht = ReadLE16(&KnmData[InPos]) ^ (TempTInf->startOfs & 0x8000);
 						InPos += 0x02;
 						
 						StackAddr[LpStkIdx] = InPos;
@@ -1008,18 +993,19 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 			}
 		}
 		if (LastNote != 0xFF)
-			WriteEvent(MidData, &DstPos, &CurDly, 0x90 | MidChn, LastNote, 0x00);
+			WriteEvent_Chn(&midFileInf, &MTS, NoteChn, 0x90, LastNote, 0x00);
 		
-		WriteEvent(MidData, &DstPos, &CurDly, 0xFF, 0x2F, 0x00);
+		WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
 		
-		WriteBE32(&MidData[TrkBase - 0x04], DstPos - TrkBase);	// write Track Length
+		WriteMidiTrackEnd(&midFileInf, &MTS);
 	}
-	MidLen = DstPos;
+	MidData = midFileInf.data;
+	MidLen = midFileInf.pos;
 	
 	return 0x00;
 }
 
-static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_INFO* TrkInf, UINT8 Mode)
+static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_INF* TrkInf, UINT8 Mode)
 {
 	// Note: KnmBuf is a temporary buffer with a size of KnmLen bytes.
 	//       It is used to find loops by marking processed bytes.
@@ -1050,11 +1036,11 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 	UINT16 cmdEE_Ptr;
 	
 	if (! Mode)
-		TrkInf->LoopPos = 0x0000;
+		TrkInf->loopOfs = 0x0000;
 	
 	if (! (Mode & 0x01))
 		memset(KnmBuf, 0x00, KnmLen);
-	InPos = TrkInf->StartPos & 0x7FFF;
+	InPos = TrkInf->startOfs & 0x7FFF;
 	ChnFlags = 0x00;
 	DelayAdd = 0;
 	StackPos = 0x00;
@@ -1069,7 +1055,7 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 	
 	while(InPos < KnmLen)
 	{
-		if ((Mode & 0x01) && InPos == TrkInf->LoopPos)
+		if ((Mode & 0x01) && InPos == TrkInf->loopOfs)
 			return;
 		
 		CurCmd = KnmData[InPos];
@@ -1095,9 +1081,9 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 				//TempByt -= TrkRAM3D;
 			}
 			if (! (Mode & 0x01))
-				TrkInf->TickCnt += TempByt;
+				TrkInf->tickCnt += TempByt;
 			else
-				TrkInf->LoopTick += TempByt;
+				TrkInf->loopTick += TempByt;
 		}
 		else
 		{
@@ -1238,7 +1224,7 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 			case 0xF9:	// GoTo
 				if (MaskMaxPos[StackPos] < InPos)
 					MaskMaxPos[StackPos] = InPos;
-				TempSht = ReadLE16(&KnmData[InPos]) ^ (TrkInf->StartPos & 0x8000);
+				TempSht = ReadLE16(&KnmData[InPos]) ^ (TrkInf->startOfs & 0x8000);
 				if (TempSht >= KnmLen)
 					return;
 				InPos = TempSht;
@@ -1248,7 +1234,7 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 				
 				if (! (Mode & 0x01) && (KnmBuf[InPos] & Mask))
 				{
-					TrkInf->LoopPos = InPos;
+					TrkInf->loopOfs = InPos;
 					return;
 				}
 				break;
@@ -1278,7 +1264,7 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 				if (! StackAddr[LpStkIdx])
 				{
 					// GoSub
-					TempSht = ReadLE16(&KnmData[InPos]) ^ (TrkInf->StartPos & 0x8000);
+					TempSht = ReadLE16(&KnmData[InPos]) ^ (TrkInf->startOfs & 0x8000);
 					InPos += 0x02;
 					
 					StackAddr[LpStkIdx] = InPos;
@@ -1353,190 +1339,10 @@ static void PreparseKnm(UINT32 KnmLen, const UINT8* KnmData, UINT8* KnmBuf, TRK_
 	return;
 }
 
-static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf)
-{
-	UINT8 CurTrk;
-	TRK_INFO* TempTInf;
-	UINT32 TrkLen;
-	UINT32 TrkLoopLen;
-	UINT32 MaxTrkLen;
-	
-	MaxTrkLen = 0x00;
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
-	{
-		TempTInf = &TrkInf[CurTrk];
-		if (TempTInf->LoopPos)
-			TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
-		else
-			TrkLoopLen = 0x00;
-		
-		TrkLen = TempTInf->TickCnt + TrkLoopLen * (TempTInf->LoopTimes - 1);
-		if (MaxTrkLen < TrkLen)
-			MaxTrkLen = TrkLen;
-	}
-	
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
-	{
-		TempTInf = &TrkInf[CurTrk];
-		if (TempTInf->LoopPos)
-			TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
-		else
-			TrkLoopLen = 0x00;
-		if (TrkLoopLen < 0x20)
-			continue;
-		
-		TrkLen = TempTInf->TickCnt + TrkLoopLen * (TempTInf->LoopTimes - 1);
-		if (TrkLen * 5 / 4 < MaxTrkLen)
-		{
-			// TrkLen = desired length of the loop
-			TrkLen = MaxTrkLen - TempTInf->LoopTick;
-			
-			TempTInf->LoopTimes = (UINT16)((TrkLen + TrkLoopLen / 3) / TrkLoopLen);
-			printf("\nTrk %u: Extended loop to %u times", CurTrk, TempTInf->LoopTimes);
-		}
-	}
-	
-	return;
-}
-
-/*static void GuessLoopTimes(UINT8 TrkCnt, TRK_INFO* TrkInf)
-{
-	UINT8 CurTrk;
-	TRK_INFO* TempTInf;
-	UINT32 TrkLoopLen;
-	UINT32 MaxLoopLen;
-	
-	MaxLoopLen = 0x00;
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
-	{
-		TempTInf = &TrkInf[CurTrk];
-		TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
-		
-		TrkLoopLen *= TempTInf->LoopTimes;
-		if (MaxLoopLen < TrkLoopLen)
-			MaxLoopLen = TrkLoopLen;
-	}
-	
-	for (CurTrk = 0x00; CurTrk < TrkCnt; CurTrk ++)
-	{
-		TempTInf = &TrkInf[CurTrk];
-		TrkLoopLen = TempTInf->TickCnt - TempTInf->LoopTick;
-		if (TrkLoopLen < 0x20)
-			continue;
-		
-		if (TrkLoopLen * TempTInf->LoopTimes * 5 / 4 < MaxLoopLen)
-		{
-			TempTInf->LoopTimes = (MaxLoopLen + TrkLoopLen / 4) / TrkLoopLen;
-		}
-	}
-	
-	return;
-}*/
-
 static UINT16 ReadLE16(const UINT8* Buffer)
 {
 	return	(Buffer[0x01] << 8) |
 			(Buffer[0x00] << 0);
-}
-
-static void WriteBE32(UINT8* Buffer, UINT32 Value)
-{
-	Buffer[0x00] = (Value & 0xFF000000) >> 24;
-	Buffer[0x01] = (Value & 0x00FF0000) >> 16;
-	Buffer[0x02] = (Value & 0x0000FF00) >>  8;
-	Buffer[0x03] = (Value & 0x000000FF) >>  0;
-	
-	return;
-}
-
-static void WriteBE16(UINT8* Buffer, UINT16 Value)
-{
-	Buffer[0x00] = (Value & 0xFF00) >> 8;
-	Buffer[0x01] = (Value & 0x00FF) >> 0;
-	
-	return;
-}
-
-static void WriteEvent(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 Evt, UINT8 Val1, UINT8 Val2)
-{
-	WriteMidiValue(Buffer, Pos, *Delay);
-	*Delay = 0;
-	
-	switch(Evt & 0xF0)
-	{
-	case 0x80:
-	case 0x90:
-	case 0xA0:
-	case 0xB0:
-	case 0xE0:
-		Buffer[*Pos + 0x00] = Evt;
-		Buffer[*Pos + 0x01] = Val1;
-		Buffer[*Pos + 0x02] = Val2;
-		*Pos += 0x03;
-		break;
-	case 0xC0:
-	case 0xD0:
-		Buffer[*Pos + 0x00] = Evt;
-		Buffer[*Pos + 0x01] = Val1;
-		*Pos += 0x02;
-		break;
-	case 0xF0:	// for Meta Event: Track End
-		Buffer[*Pos + 0x00] = Evt;
-		Buffer[*Pos + 0x01] = Val1;
-		Buffer[*Pos + 0x02] = Val2;
-		*Pos += 0x03;
-		break;
-	default:
-		break;
-	}
-	
-	return;
-}
-
-static void WriteMetaEvent_Data(UINT8* Buffer, UINT32* Pos, UINT32* Delay, UINT8 MetaType, UINT32 DataLen, const UINT8* Data)
-{
-	WriteMidiValue(Buffer, Pos, *Delay);
-	*Delay = 0;
-	
-	Buffer[*Pos + 0x00] = 0xFF;
-	Buffer[*Pos + 0x01] = MetaType;
-	*Pos += 0x02;
-	WriteMidiValue(Buffer, Pos, DataLen);
-	memcpy(Buffer + *Pos, Data, DataLen);
-	*Pos += DataLen;
-	
-	return;
-}
-
-static void WriteMidiValue(UINT8* Buffer, UINT32* Pos, UINT32 Value)
-{
-	UINT8 ValSize;
-	UINT8* ValData;
-	UINT32 TempLng;
-	UINT32 CurPos;
-	
-	ValSize = 0x00;
-	TempLng = Value;
-	do
-	{
-		TempLng >>= 7;
-		ValSize ++;
-	} while(TempLng);
-	
-	ValData = &Buffer[*Pos];
-	CurPos = ValSize;
-	TempLng = Value;
-	do
-	{
-		CurPos --;
-		ValData[CurPos] = 0x80 | (TempLng & 0x7F);
-		TempLng >>= 7;
-	} while(TempLng);
-	ValData[ValSize - 1] &= 0x7F;
-	
-	*Pos += ValSize;
-	
-	return;
 }
 
 // read byte in Sign-Magnitude format

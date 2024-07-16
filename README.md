@@ -88,6 +88,8 @@ For sequence data, the tool tries to detect the pointer format, which is differe
 
 The GEMS sound driver is commonly found in MegaDrive games developed in the U.S.
 
+**Note:** The tool requires pre-extracted GEMS data files. (sequences, instruments, etc.) It does not work on raw MegaDrive ROMs.
+
 ## gmd2mid
 This tool converts songs from PC-98 games that use the GMD format to MIDI.
 
@@ -103,6 +105,16 @@ This tool converts songs from MegaDrive games that use the GRC sound driver to M
 
 Initially I wrote this tool to get MIDIs from songs of Decap Attack, which only used FM channels. The current version supports FM, PSG and DAC channels.  
 The tool is written based on a sound driver disassembly of Decap Attack and Socket.
+
+Example calls:
+
+```
+grc2mid -mus "Decap Attack (UE) [!].bin" 039000
+grc2mid -ins "Decap Attack (UE) [!].bin" 0384C6
+
+grc2mid -mus "Socket (W) [!].bin" 03392A
+grc2mid -ins "Socket (W) [!].bin" 033214
+```
 
 ## HMI2MID
 This is a quick and dirty Visual Basic 6 tool to convert HMI files to standard MIDIs.
@@ -137,6 +149,17 @@ This tool converts songs from MegaDrive Konami games to MIDI.
 The tool can export MIDIs and dump instruments to GYB files.  
 It was written based on a sound driver disassembly of TMNT: Hyperstone Heist.
 It was verified to work with Rocket Knight Adventures as well.
+
+Example calls:
+
+```
+konamimd2mid -mus "Teenage Mutant Ninja Turtles - Return of the Shredder (J).bin" 0D3746 0F82D8
+konamimd2mid -mus "Teenage Mutant Ninja Turtles - The Hyperstone Heist (U) [!].bin" 0D37A4 0F82D8
+konamimd2mid -ins "Teenage Mutant Ninja Turtles - The Hyperstone Heist (U) [!].bin" 0D0348 x
+
+konamimd2mid -mus -htr "Rocket Knight Adventures (U) [!].bin" 0D02F8 0F9A51
+konamimd2mid -ins "Rocket Knight Adventures (U) [!].bin" 0D2448 x
+```
 
 ## Lem3DMid
 This converts songs from Lemmings 3D to MIDI.
@@ -192,7 +215,7 @@ M.M.D. is Masahiro Kajihara's MIDI driver.
 The music from Studio Twinkle's "Mime" was enough of a reason for researching the format.
 
 As it turned out, MMD is basically a size-optimized version of the RCP format.
-And so both, the disassembling the MMD driver and writing the converter tool was done pretty quickly.
+And so both, disassembling the MMD driver and writing the converter tool was done pretty quickly.
 
 ## mmu2mid
 This tool converts Wolfteam MMU music files to standard MIDIs.
