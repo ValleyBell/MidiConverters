@@ -77,6 +77,11 @@ static void WriteEventOpt(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT8 v
 	case 0xA0:
 	case 0xB0:
 	case 0xE0:
+#ifdef _DEBUG
+		if ((val1 & 0x80) || (val2 & 0x80))
+			printf("Warning: Pos 0x%04X, event %02X %02X %02X: Values out-of-range!\n",
+				fInf->pos, chnEvt, val1, val2);
+#endif
 		if (MTS->runStat != chnEvt)
 		{
 			MTS->runStat = chnEvt;
@@ -89,6 +94,11 @@ static void WriteEventOpt(FILE_INF* fInf, MID_TRK_STATE* MTS, UINT8 evt, UINT8 v
 		break;
 	case 0xC0:
 	case 0xD0:
+#ifdef _DEBUG
+		if (val1 & 0x80)
+			printf("Warning: Pos 0x%04X, event %02X %02X: Values out-of-range!\n",
+				fInf->pos, chnEvt, val1);
+#endif
 		if (MTS->runStat != chnEvt)
 		{
 			MTS->runStat = chnEvt;

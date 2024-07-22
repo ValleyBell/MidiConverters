@@ -551,7 +551,7 @@ UINT8 Konami2Mid(UINT32 KnmLen, UINT8* KnmData, UINT16 KnmAddr/*, UINT32* OutLen
 					if (MTS.midChn >= 0x09)
 						NoteLen = 0;	// don't stop early for drum/PSG
 				}
-				if (NoteLen > 0 && NoteLen < NoteDelay)
+				if (NoteLen > 0 && NoteLen < NoteDelay && LastNote != 0xFF)
 				{
 					// Note: on PSG channels, the "note length" seems to trigger the "release" phase,
 					// but this is often very long, so let's just ignore it in this case.
