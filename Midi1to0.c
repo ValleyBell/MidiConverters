@@ -1,8 +1,8 @@
 // MIDI 1 to 0 C++ source file
 
 #include <stdio.h>
-#include <malloc.h>
-#include <memory.h>
+#include <stdlib.h>
+#include <string.h>
 #include "stdbool.h"
 
 const unsigned long int FCC_MTHD = 0x6468544D;
@@ -26,6 +26,7 @@ static unsigned char CopyMIDIEvent(unsigned char* SrcData, unsigned char* DstDat
 								   MIDITRK_INF* TrkSrc, MIDITRK_INF* TrkDst);
 static unsigned long int LittleBigEndianCnvL(unsigned long int Value);
 static unsigned short int LittleBigEndianCnvS(unsigned short int Value);
+int main(int argc, char* argv[]);
 
 unsigned char MIDI1to0(unsigned long int SrcLen, unsigned char* SrcData,
 						unsigned long int* RetDstLen, unsigned char** RetDstData)
@@ -366,4 +367,53 @@ static unsigned short int LittleBigEndianCnvS(unsigned short int Value)
 {
 	return ((Value & 0xFF00) >> 8) |
 			((Value & 0x00FF) << 8);
+}
+
+int main(int argc, char* argv[]) 
+{
+    if(argc < 3) {
+        printf("Usage: %s <input.mid> <output.mid>\n", argv[0]);
+        return 1;
+    }
+
+    FILE* fin = fopen(argv[1], "rb");
+    if(!fin) {
+        printf("Error opening input file!\n");
+        return 2;
+    }
+    
+    fseek(fin, 0, SEEK_END);
+    unsigned long src_len = ftell(fin);
+    fseek(fin, 0, SEEK_SET);
+    
+    unsigned char* src_data = (unsigned char*)malloc(src_len);
+    fread(src_data, 1, src_len, fin);
+    fclose(fin);
+
+    unsigned long dst_len;
+    unsigned char* dst_data;
+    unsigned char result = MIDI1to0(src_len, src_data, &dst_len, &dst_data);
+
+    if(result != 0) {
+        printf("Conversion failed with error: 0x%02X\n", result);
+        free(src_data);
+        return 3;
+    }
+
+    FILE* fout = fopen(argv[2], "wb");
+    if(!fout) {
+        printf("Error creating output file!\n");
+        free(src_data);
+        free(dst_data);
+        return 4;
+    }
+    
+    fwrite(dst_data, 1, dst_len, fout);
+    fclose(fout);
+
+    free(src_data);
+    free(dst_data);
+
+    printf("Conversion successful!\n");
+    return 0;
 }
