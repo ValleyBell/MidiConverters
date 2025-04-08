@@ -11,6 +11,7 @@
 
 
 #include "midi_funcs.h"
+#define SONG_OFFSET 0x7FF8
 
 static UINT8 ConvertSong(UINT32);
 static void GetSongTable(UINT32);
