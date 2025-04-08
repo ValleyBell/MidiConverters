@@ -261,7 +261,7 @@ int main(int argc, char* argv[])
 			return 2;
 		}
 		
-		LoadROMsMerged(argc - (argbase + 2), &argv[argbase + 2], &SmpROM.Size, &SmpROM.Data);
+		LoadROMsMerged(argc - (argbase + 2), (const char**)&argv[argbase + 2], &SmpROM.Size, &SmpROM.Data);
 	}
 	
 	if (ReadBE16(&ROMData[0x04]) == 0x6000)
