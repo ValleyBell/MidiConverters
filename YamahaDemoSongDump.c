@@ -137,7 +137,7 @@ int main(int argc, char* argv[])
 	free(srcData);	srcData = NULL;
 	free(dstData);	dstData = NULL;
 	
-	return;
+	return 0;
 }
 
 static UINT16 DetectTrackCount(UINT32 ptrListOfs)
