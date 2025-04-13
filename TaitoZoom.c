@@ -46,8 +46,7 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 	
-	fseek(hFile, 0, SEEK_SET);
-	srcSize = ROM_SIZE - SONG_OFFSET;
+	srcSize = ROM_SIZE;
 	srcData = (UINT8*)malloc(srcSize);
 	fread(srcData, 1, srcSize, hFile);
 	
