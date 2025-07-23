@@ -1,0 +1,46 @@
+M2system sequencer-2 Format
+===========================
+
+Header
+------
+2 bytes - Tempo in BPM
+2 bytes - start offset of track 1
+2 bytes - start offset of track 2
+...
+2 bytes - 00 00 (terminator pointer)
+
+Values are stored in Big Endian format.
+
+Track Data
+----------
+The first byte in the track specifies the MIDI channel. (00 = channel 1, 0F = channel 16)
+After that follows a stream of commands.
+
+Commands:
+00..7F vv l1 [l2] - Note On, pitch ##, velocity vv, length l1 or l1l2 (no waiting)
+	l1 < 80h - only l1 is present
+	l1 >= 80h - l1 and l2 is present, the actual note length is then (l1l2 & 7FFFh) ticks
+80..8F dd - wait for #dd ticks
+	"80 dd" waits "dd" ticks, "81 dd" waits "100h+dd" ticks, ... "8F dd" waits "0F00h+dd" ticks
+90 aa bb - jump (used for master loop)
+	This jumps to offset (aabb+1), relative to the "90" byte.
+91 aa bb tt - loop back tt times
+	This jumps to offset (aabb+1), relative to the "91" byte.
+	Notes:
+		- Loops can be nested and "Thunder Blade" makes use of this.
+		- The sound driver uses the address of the loop command to detect whether or not loops are nested.
+		  (command offset == same address as top of the loop stack -> same loop)
+92..9D - invalid (same effect as Track End command)
+9E aa bb - set new tempo to aabb BPM
+9F - Track End
+A0..AF - invalid (same effect as Track End command)
+B0..BF cc vv - MIDI control change, controller cc, data dd
+C0..CF dd - MIDI patch change, data dd
+D0..DF - invalid (same effect as Track End command)
+E0..EF ll mm - MIDI pitch bend, ll = LSB, mm = MSB
+F0..FF ll [data] - SysEx command
+	This is sent as "F0 [data] F7".
+	Unlike the note length, the length byte here is not variable-sized, limiting the maximum SysEx size to 0FFh bytes.
+
+Note: Commands B0/C0/E0/F0 ignore the low nibble.
+Notes and channel-specific MIDI events are always assigned to the channel specified at the beginning of the track.

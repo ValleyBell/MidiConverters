@@ -185,6 +185,19 @@ Notes:
 
 **Compilation note:** Needs to be linked to Soundfont.c.
 
+## m2seq22mid
+This tool converts songs used by the X68000 "M2system sequencer-2" sound engine to MIDI.
+
+It works with songs for both, FM and MIDI devices.
+Games that use the respective sound format can usually be identified by `SEQ2.X` being present in the game's folder or subfolders.
+
+The following games are known work:
+
+- Final Fight (songs are packed inside `BGM.SLD` and `BGM_MIDI.SLD`)
+- Pro Tennis World Court (songs are packed inside `MUSIC.WC`)
+- Syvalion (`.SQ2` files)
+- Thunder Blade (`.SQ2` files)
+
 ## mdc2mid
 This tool converts MCDRV songs to MIDI.
 
