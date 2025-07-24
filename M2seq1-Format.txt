@@ -1,0 +1,108 @@
+M2system sequencer-1 Format (M2S)
+===========================
+
+Header
+------
+2 bytes - number of tracks
+2 bytes - start offset of track 1
+2 bytes - start offset of track 2
+...
+
+Values are stored in Big Endian format.
+
+Track Data
+----------
+The first byte in the track specifies the channel.
+The low nibble is the MIDI channel. (00h = channel 1, 0Fh = channel 16)
+TODO: What does the high nibble do?
+
+After that follows a stream of commands.
+
+Commands: ($39884)
+00 aa - $3988e - rest, delay aa ticks
+01..7F [...] aa [FE] - play note ##, delay aa ticks
+	There may be 1..8 bytes before the "aa" parameter, depending on the current "chord size". (set by commands 81..88)
+	Note length calculation:
+		if the next byte is "FE" ->
+			skip the "FE" byte
+			turn "tie mode" on (set [trkRAM+00 bit 0])
+			note length = infinite (100h ticks)
+		else [trkRAM+00 bit 2] clear ->
+			[trkRAM+05] >= 10h -> note length = aa
+			[trkRAM+05] < 10h ->
+				note length = (aa * [trkRAM+05] + 8) / 10h
+				if note length == 0 then note length = 1
+		else [trkRAM+00 bit 2] set ->
+			note length = min(aa, [trkRAM+05])
+81..88 - set chord size to (## & 0Fh)
+89..BF - $399f0 - invalid
+C0 - Track End
+C3 aa bb - jump to aabb, relative to the byte after bb
+C4 aa bb - Subroutine Call 1 to aabb, relative to the byte after bb
+C5 aa bb - Subroutine Call 2 to aabb, relative to the byte after bb
+C6 - Subroutine Return 1
+C7 - Subroutine Return 2
+C8 aa - Loop Start 1
+C9 - Loop End 1
+CA aa - Loop Start 2
+CB - Loop End 2
+CC aa - Loop Start 3
+CD - Loop End 3
+D0 aa bb - set Tempo to aabb BPM
+	Note: The sound driver enforces an upper limit of 312 BPM.
+D1 aa - $39a46 + 0120 - write aa to [trkRAM+05], clear [trkRAM+00 bit 2]
+D2 aa - $39a46 + 0144 - write aa to [trkRAM+05], set [trkRAM+00 bit 2]
+D4 aa - sets track transposition to aa (value gets added to note pitch)
+D5 aa - add aa to track transposition 
+E0 aa - set MIDI channel to (aa & 0Fh)
+E1 aa - set note velocity to (aa & 7Fh)
+E2 aa - set channel volume, MIDI bytes "B0 07 aa"
+E3 aa bb - control change, MIDI bytes "B0 aa bb"
+E4 aa - instrument change, MIDI bytes "C0 aa"
+E5 aa - pitch bend, MIDI bytes "E0 00 aa"
+FE - note "tie" (prevents Note Off until the next note/delay command)
+
+Undefined commands have the same effect as "Track End".
+
+
+Sound RAM layout
+----------------
+Track RAM:
+00	flags (default: 00h)
+	Bit 0 (01): "tie" mode (set = prevent Note Off)
+	Bit 1 (02): "note playing" state (set = playing, clear = not playing)
+	Bit 2 (04): note length modification mode
+		bit clear: note length = ([delay] * [note len modification] + 8) / 10h
+		bit set: note length = min([delay], [note len modification])
+	Bit 3 (08):
+01	MIDI channel (default: depends on track)
+02	note velocity (default: 64)
+03	(unused)
+04/05	note length modifier (default: 0Fh)
+06	track transposition, this value gets added to the note pitch (default: 0)
+07	remaining ticks until next event (default: 1)
+08	remaining ticks until note off (default: 1)
+09	(unused)
+0A/0B	chord size (default: 1) (copied to "note list size" when new notes are read)
+0C/0D	note list size
+0E..15	note list
+16..19	sequence data pointer (default: depends on track)
+1A..1D	subroutine 1 return address (default: 0)
+1E..21	subroutine 2 return address (default: 0)
+22	loop 1: remaining loops
+23	loop 2: remaining loops
+24	loop 3: remaining loops
+26..29	loop 1: loop start address
+2A..2D	loop 2: loop start address
+2E..31	loop 3: loop start address
+-> 32h bytes
+
+
+M2system sequencer-1 SysEx Format (M2X)
+=================================
+[loop]
+  2 bytes - length of SysEx data ll
+  ll bytes - SysEx data (without F0/F7 event bytes)
+[loop end]
+
+The data is sent as: F0 [data] F7

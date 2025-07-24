@@ -186,6 +186,19 @@ Notes:
 **Compilation note:** Needs to be linked to Soundfont.c.
 
 ## m2seq22mid
+This tool converts songs used by the X68000 "M2system sequencer" v1 sound engine to MIDI.
+
+It works with songs for both, FM and MIDI devices.
+Games that use the respective sound format can usually be identified by `M2SEQ.X` being present in the game's folder or subfolders.
+
+The following games are known work:
+
+- Ajax (songs are packed inside `MUSICS.AJX`)
+- Super Hang-On (`.M2S` files)
+
+For whatever reason, the format is more complicated and has more features than the M2Seq v2 format.
+
+## m2seq22mid
 This tool converts songs used by the X68000 "M2system sequencer-2" sound engine to MIDI.
 
 It works with songs for both, FM and MIDI devices.
