@@ -5,8 +5,6 @@
 // This converter works with songs for "M2system sequencer-1" (M2SEQ.X).
 // known supported games:
 //	- Ajax
-//	#- Marchen Maze
-//	#- Pro Yakyuu World Stadium
 //	- Super Hang-On
 
 #include <stdlib.h>
@@ -71,6 +69,7 @@ static UINT8* MidData;
 static UINT16 MIDI_RES = 24;
 static UINT16 NUM_LOOPS = 2;
 static UINT8 NO_LOOP_EXT = 0;
+static UINT8 DRV_BUGS = 0;
 
 int main(int argc, char* argv[])
 {
@@ -89,6 +88,7 @@ int main(int argc, char* argv[])
 		printf("    -NoLpExt    No Loop Extension\n");
 		printf("                Do not fill short tracks to the length of longer ones.\n");
 		printf("    -TpQ n      Sets the number of Ticks per Quarter to n. (default: %u)\n", MIDI_RES);
+		printf("    -Bugs       Replicate sound driver bugs. (hanging note in SPHBGM3.M2S)\n");
 		return 0;
 	}
 	
@@ -117,6 +117,8 @@ int main(int argc, char* argv[])
 					MIDI_RES = 24;
 			}
 		}
+		else if (! stricmp(argv[argbase] + 1, "Bugs"))
+			DRV_BUGS = 1;
 		else
 			break;
 		argbase ++;
@@ -146,7 +148,7 @@ int main(int argc, char* argv[])
 	fclose(hFile);
 	
 	mode = MODE_MID;
-	{
+	{	// format detection
 		UINT16 trkCnt = ReadBE16(&ROMData[0x00]);	// M2S: track count, M2X: size of following data
 		UINT16 ptr1 = ReadBE16(&ROMData[0x02]);
 		UINT16 ptr2 = ReadBE16(&ROMData[0x04]);
@@ -271,10 +273,12 @@ UINT8 M2sys2Mid(UINT32 songLen, const UINT8* songData)
 				UINT8 curNote;
 				inPos --;
 				
+				if (! (trkFlags & 0x01) && noteListLen > 0)
+					printf("Warning: Hanging note detected at 0x%04X\n", inPos);
+				
 				oldNtCnt = 0;
 				if (trkFlags & 0x01)
 				{
-					// 398a6
 					oldNtCnt = noteListLen;
 					for (curNote = 0; curNote < noteListLen; curNote ++)
 						oldNotes[curNote] = noteList[curNote];
@@ -287,7 +291,6 @@ UINT8 M2sys2Mid(UINT32 songLen, const UINT8* songData)
 				noteListLen = chordSize;
 				if (! (trkFlags & 0x01))
 				{
-					// 398E2
 					for (curNote = 0; curNote < noteListLen; curNote ++)
 						WriteEvent(&midFileInf, &MTS, 0x90, noteList[curNote], curNoteVel);
 					trkFlags |= 0x02;
@@ -299,7 +302,6 @@ UINT8 M2sys2Mid(UINT32 songLen, const UINT8* songData)
 					UINT8 newNotes[8];
 					
 					trkFlags &= ~0x01;
-					// 39918
 					// based on the "old notes" and "new notes" lists, create lists of:
 					//  - old notes not in the new list (by removing new notes from the old list)
 					//  - new notes not in the old list (by taking note of new notes not found in the old list)
@@ -334,15 +336,16 @@ UINT8 M2sys2Mid(UINT32 songLen, const UINT8* songData)
 					}
 					for (curNote = 0; curNote < newNtCnt; curNote ++)
 						WriteEvent(&midFileInf, &MTS, 0x90, newNotes[curNote], curNoteVel);
+					if (! DRV_BUGS)
+						trkFlags |= 0x02;	// BUGFIX: prevents hanging note in SPHBGM3.M2S
 				}
 				
-				// 399A0
 				cmdDelay = songData[inPos];	inPos ++;
 				if (songData[inPos] == 0xFE)
 				{
 					inPos ++;
 					trkFlags |= 0x01;
-					noteLen = 0x100;
+					noteLen = 0xFFFF;
 				}
 				else
 				{
@@ -360,12 +363,13 @@ UINT8 M2sys2Mid(UINT32 songLen, const UINT8* songData)
 						if (noteLen == 0)
 							noteLen = 1;
 					}
+					if (noteLen == 0)
+						noteLen = 0xFFFF;	// in the original driver, a length of 0 is infinite
 				}
 			}
 			else if (curCmd >= 0x81 && curCmd <= 0x88)	// chord size
 			{
-				printf("Event %02X at %06X\n", curCmd, inPos);
-				WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
+				// not used by any known game
 				chordSize = curCmd & 0x0F;
 			}
 			else switch(curCmd)
@@ -444,33 +448,28 @@ UINT8 M2sys2Mid(UINT32 songLen, const UINT8* songData)
 			case 0xD0:	// Tempo Change
 			{
 				UINT16 newTempo = ReadBE16(&songData[inPos]);	inPos += 0x02;
-				//if (newTempo > 312)
-				//	newTempo = 312;	// That's what the driver does.
+				if (DRV_BUGS && newTempo > 312)
+					newTempo = 312;	// That's what the driver does.
 				WriteBE32(tempArr, Tempo2Mid(newTempo));
 				WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
 				break;
 			}
-			case 0xD1:	// note length mode 1
-				WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
+			case 0xD1:	// note length modification: fraction of 10h
 				noteLenMod = songData[inPos];	inPos ++;
 				trkFlags &= ~0x04;
 				break;
-			case 0xD2:	// note length mode 2
-				printf("Event %02X %02X at %06X\n", curCmd, songData[inPos], inPos);
-				WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
+			case 0xD2:	// note length modification: limit length
+				// not used by any known game
 				noteLenMod = songData[inPos];	inPos ++;
 				trkFlags |= 0x04;
 				break;
 			case 0xD4:	// set track transposition
-				WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
 				notePitchMod = songData[inPos];	inPos ++;
 				break;
 			case 0xD5:	// add to track transposition
-				WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
 				notePitchMod += songData[inPos];	inPos ++;
 				break;
 			case 0xE0:	// set MIDI channel
-				WriteEvent(&midFileInf, &MTS, 0xB0, 0x6E, curCmd & 0x7F);
 				MTS.midChn = songData[inPos] & 0x0F;	inPos ++;
 				break;
 			case 0xE1:	// set note velocity
@@ -500,22 +499,29 @@ UINT8 M2sys2Mid(UINT32 songLen, const UINT8* songData)
 				trkEnd = 1;
 				break;
 			}
-			if (noteListLen > 0 && noteLen <= cmdDelay)
+			if ((trkFlags & 0x02) && noteLen <= cmdDelay)
 			{
-				// 3984E
-				if (trkFlags & 0x02)
-				{
-					UINT8 curNote;
-					MTS.curDly += noteLen;
-					cmdDelay -= noteLen;
-					for (curNote = 0; curNote < noteListLen; curNote ++)
-						WriteEvent(&midFileInf, &MTS, 0x90, noteList[curNote], 0x00);
-					trkFlags &= ~0x02;
-				}
+				UINT8 curNote;
+				MTS.curDly += noteLen;
+				cmdDelay -= noteLen;
+				for (curNote = 0; curNote < noteListLen; curNote ++)
+					WriteEvent(&midFileInf, &MTS, 0x90, noteList[curNote], 0x00);
+				noteListLen = 0;
+				noteLen = 0;
+				trkFlags &= ~0x02;
 			}
 			MTS.curDly += cmdDelay;
 		}
 		
+		if (trkFlags & 0x02)
+		{
+			UINT8 curNote;
+			if (noteLen > 0x100)
+				noteLen = 0x100;	// prevent excessive delays for notes hanging at the end
+			MTS.curDly += noteLen;
+			for (curNote = 0; curNote < noteListLen; curNote ++)
+				WriteEvent(&midFileInf, &MTS, 0x90, noteList[curNote], 0x00);
+		}
 		WriteEvent(&midFileInf, &MTS, 0xFF, 0x2F, 0x00);
 		WriteMidiTrackEnd(&midFileInf, &MTS);
 	}
@@ -584,8 +590,9 @@ static void PreparseM2sys(UINT32 songLen, const UINT8* songData, TRK_INF* trkInf
 		{
 		case 0xC3:	// Jump (for looping)
 		{
+			UINT16 newPos;
 			INT16 destOfs = ReadBE16(&songData[inPos]);	inPos += 0x02;
-			UINT16 newPos = inPos + destOfs;
+			newPos = inPos + destOfs;
 			// slightly complicated loop detection, due to shared data
 			if (newPos < basePos)
 			{
@@ -656,8 +663,8 @@ static void PreparseM2sys(UINT32 songLen, const UINT8* songData, TRK_INF* trkInf
 		case 0xE3:	// Control Change
 			inPos += 0x02;
 			break;
-		case 0xD1:
-		case 0xD2:
+		case 0xD1:	// note length modification: fraction of 10h
+		case 0xD2:	// note length modification: limit length
 		case 0xD4:	// set track transposition
 		case 0xD5:	// add to track transposition
 		case 0xE0:	// set MIDI channel
