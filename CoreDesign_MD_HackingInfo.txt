@@ -1,0 +1,287 @@
+Core Design (MegaDrive) Hacking Info
+====================================
+
+The Core Design sound driver is a tracker playback routine for the YM2612, fully running on the MegaDrive's Z80 sound processor.
+There are two versions:
+	- an early version (called v1 here), used by "Asterix and the Great Rescue"
+	- a later version (called v2 here), used by all other games
+
+Pointers and locations
+----------------------
+	Asterix and the Great Rescue (driver v1)
+Z80 Driver:		006D5C
+Song Offset List:	006BD0 (2 bytes per offset, 13h songs)
+Current Order ID:	0006 (2 bytes)
+Song Data Pointer:	001A (pointer to data stream that covers all channels)
+Song Data Bank:		001C (relative to bank 3Dh)
+FM Track RAM:		06F6 (20h bytes per track, 6 tracks)
+Sound Driver Main Data:	07B6
+Instrument Table:	07C6
+Music Pattern Table:	17C6
+SFX Pattern Table:	1A81
+Pattern Data Base:	1E8000 (ROM bank stored at Z80/0040 = 3Dh)
+Z80 Driver loader:	006BF6
+
+	Asterix and the Power of The Gods (driver v2)
+Z80 Driver:		01E3C42
+Song Offset List:	006BD0 (2 bytes per offset, 13h songs)
+Current Order ID:	0006 (2 bytes)
+Song Data Pointer:	001A (pointer to data stream that covers all channels)
+Song Data Bank:		001C (relative to bank 3Dh)
+FM Track RAM:		0708 (20h bytes per track, 6 tracks)
+Sound Driver Main Data:	0800
+Instrument Table:	0810
+Music Pattern Table:	1810
+SFX Pattern Table:	1BF4
+Pattern Data Base:	1E8000 (ROM bank stored at Z80/0040 = 3Dh)
+Z80 Driver loader:	011D2E
+
+(Note: 4-digit offsets refer to locations in Z80 RAM. 6-digit offsets refer to ROM addresses.)
+
+
+"Sound Driver Main Data" is where the main data section of the sound driver starts.
+It has the following layout:
+
+10h bytes - data header
+	2 bytes - offset of music pattern table
+	2 bytes - offset of sound effect pattern table
+	1 byte  - YM2612 LFO setting (register 22h, set at boot time)
+	0Dh bytes - padding
+1000h bytes - instrument data (80h instruments, 20h bytes each)
+?? bytes - music pattern pointer table
+	Each entry consists of 3 bytes.
+	1 byte  - ROM bank where the pattern data is stored in (relative to "Pattern Data Base")
+	2 bytes - Z80 pointer to the pattern data inside the ROM bank
+?? bytes - sound effect pattern pointer table
+	same format as music pattern pointer table
+
+
+Sequence Format
+---------------
+This is the format used by the sequence data for the patterns.
+
+00 - sequence end (stops all channels)
+01..BF [code@030Ch] - command or note
+	channel = (## & 0E0h) / 20h
+	ChnRAM+0Bh = (## & 1Eh) -> some command ID?
+		executes additional code based on pointer table at 044D
+	(## & 01h) = note flag
+		0 - continue as usual
+		1 - This is directly followed by "instrument/note" parameters. (i.e. the "aa [bb]" part of command 00)
+	
+	00 aa [bb] - set instrument, play note
+		When (aa & 01h) == 1:
+			- copy (aa & 0FEh) to ChnRAM+0Ch -> instrument ID * 2
+			- HL = 07C6h + (aa & 0FEh) * 10h -> HL = &insTable[insID * 20h]
+			- note = bb
+		When (aa & 01h) == 0:
+			- note = aa
+		- copy note to ChnRAM+08h
+		- look up note frequency (table @ 0632h, 2-byte Big Endian, YM2612 F-Num values, 0248h..3CD9h)
+	-- v1 music commands --
+	[code@047D] 02 ba - arpeggio, cycles between [note], [note+a], [note+b] (ChnRAM+09h = a * 2, ChnRAM+0Ah =  b * 2)
+	[code@04A1] 04 aa - pitch upwards, aa = pitch steps per frame (ChnRAM+06h/07h = (uint16)aa, ChnRAM+04h/05h = 3CD9h)
+	[code@04BB] 06 aa - pitch downwards, aa = pitch steps per frame (ChnRAM+06h/07h = 0-(uint16)aa, ChnRAM+04h/05h = 0248h)
+	[code@04A1] 08 aa - pitch to new note, aa = pitch steps per frame
+		A note should directly follow this command, else it won't work.
+		With this command, it keeps the frequency of the last note played and gradually pitches to the frequency of the next note to-be-played. (The code decides whether this needs to be upward/downward.)
+	[code@0528] 0A - pattern break
+		Loads the next pattern based on Pattern Order (increases the word at 0006 by 1 and loads the new pattern), then waits for 1 row.
+	[code@04FA] 0C aa - jump to order
+		destination order ID = ((##-0Ch) / 2) * 100h + aa
+		This loads the pattern referenced by the ID in the order list and then waits for 1 row.
+	[code@04FA] 0E - same as 0C (used to allow for 512 order indices)
+	[code@04E5] 10 vv - set row speed (vv copied to 002A/002B)
+		The sequence data is processed for 1 row every (vv+1) frames.
+	[code@0610] 12 - Note Off
+	[code@0477] 14 aa - ?? (sets 0045h = aa)
+	
+	-- v1 SFX commands --
+	[code@048F] 02 aa - ?? (ChnRAM+1Bh = (aa & 0Fh) * 2, ChnRAM+1Ch = (aa & 0F0h) / 8)
+	[code@04AE] 04 aa - ?? (ChnRAM+18h/19h = (uint16)aa, ChnRAM+04h/05h = 3CD9h)
+	[code@04D0] 06 aa - ?? (ChnRAM+18h/19h = 0-(uint16)aa, ChnRAM+04h/05h = 0248h)
+	[code@04AE] 08 aa - same as 04
+	[code@0501] 0A - ?? (pitch related?, reads ChnRAM+10h, writes to ChnRAM+0Fh and +13h)
+	[code@04F7] 0C - ?? (pitch related?)
+	[code@04F7] 0E - same as 0C
+	[code@04EE] 10 aa - ?? (ChnRAM+0Dh = aa, ChnRAM+0Eh = aa)
+	[code@0615] 12 - Note Off (enforced, ignores "allow retrigger" flag)
+	[code@0477] 14 aa - same as music command 14
+
+	-- v2 music commands --
+	[code@0624] 02 - Note Off
+	[code@04C9] 04 ba - arpeggio, cycles between [note], [note+a], [note+b] (ChnRAM+09h = a * 2, ChnRAM+0Ah =  b * 2)
+	[code@04EA] 06 aa - pitch upwards, aa = pitch steps per frame (ChnRAM+06h/07h = (uint16)aa, ChnRAM+04h/05h = 3CD9h)
+	[code@0504] 08 aa - pitch downwards, aa = pitch steps per frame (ChnRAM+06h/07h = 0-(uint16)aa, ChnRAM+04h/05h = 0248h)
+	[code@04EA] 0A aa - pitch to new note, aa = pitch steps per frame
+	[code@0498] 0C ab - vibrato, a = depth, b = speed (ChnRAM+09h = b * 4, ChnRAM+0Ah = (a / 2) + 1), ChnRAM+06h = 00h
+	[code@056F] 0E - pattern break
+	[code@0543] 10 aa - jump to order
+		destination order ID = ((##-10h) / 2) * 100h + aa
+		This loads the pattern referenced by the ID in the order list and then waits for 1 row.
+	[code@0543] 12 - same as 0C (used to allow for 512 order indices)
+	[code@052E] 14 vv - set row speed (vv copied to 002A/002B)
+		The sequence data is processed for 1 row every (vv+1) frames.
+	[code@04C3] 16 aa - ?? (sets 0045h = aa)
+
+C0..FF [code@038Fh] - delay (copied to 001Dh)
+	This waits for (##+1) rows. (i.e. a delay of 0 waits until the next "row")
+
+
+Instrument Table
+----------------
+- The first 1Eh bytes are sent to the YM2612 as-is. Register order:
+  30 34 38 3C 40 44 48 4C 50 54 58 5C 60 64 68 6C 70 74 78 7C 80 84 88 8C 90 94 98 9C B0 B4
+  The last 2 bytes are unused.
+
+
+Triggering music and sound effects
+----------------------------------
+Stop BGM:
+	Z80/0043 = 0
+Stop SFX:
+	Z80/0044 = 0
+Play BGM:
+	Z80/0046 = aa (song offset, low)
+	Z80/0047 = bb (song offset, high)
+	Z80/0041 = 1 ("play BGM" trigger)
+Play "Pause Music":
+	Z80/0042 = 1
+Resume Level BGM:
+	Z80/0042 = 80
+Pause Music:
+	Z80/0043 = 00
+Resume Music:
+	Z80/0043 = FF
+Play SFX:
+	Z80/004A = aa (SFX ID, 00 = first sound effect)
+	Z80/0044 = 1 ("play SFX" trigger)
+
+Example for starting the title song (Asterix and the Great Rescue):
+	main CPU: set Z80/0046 = 02 (song index, low)
+	main CPU: set Z80/0047 = 01 (song index, high)
+	main CPU: set Z80/0041 = 1 (play song)
+	
+	Z80: w@0006 = 0102h
+	HL = 0102h * 2 + 8000h = 8204h -> address
+	-> HL = (*8204h) = 0216h
+	DE = (*07B6h) = 1010h
+	HL += DE -> HL = 1226h
+	HL += 07B6h -> HL = 19DCh
+	b@001C = (*19DCh) = 02h
+	w@001A = (*19DDh) = 899Bh
+
+
+Driver State RAM layout
+-----------------------
+0006/07	[music] current pattern order ID
+001A/1B	[music] data pointer
+001C	[music] data bank
+001D	[music] remainings row wait counter (parse next sequence data when it underflows from 0 to 0FFh)
+001E	temporary YM2612 frequency storage
+002A	[music] rows speed (reset value)
+002B	[music] rows speed counter, counts down by 1 every frame, when it underflows from 0 to 0FFh, it is reset to the value from 002A
+002C/2D	backup of 0006/07 for when pause music is playing
+002E	backup of 002A for when pause music is playing
+002F	arpeggio frame counter, counts up by 1 every frame, counts 0, 1, 2, 0, 1, 2, 0, ...
+0040	ID of first Z80 ROM bank with pattern data
+0041	trigger new song
+0042	music mode
+	00 = normal
+	01 = start pause music (all values 01..7F work)
+	80 = stop pause music, resume original BGM (even values 80..FE work)
+0043	music paused (00 = paused, FFh = running)
+0044	sound effect enable (01 = enabled, 00 = disabled)
+0046/47	new song pattern order ID
+0048/49	"pause music" pattern order ID
+004A-4F	sound effect IDs, 004A - ID for channel FM 1, 004F - ID for channel FM 6
+0050	?? (sound effect related)
+
+Channel RAM layout
+------------------
++00	YM2612 port
+	00h = address 4000h, FM channels 1..3
+	02h = address 4002h, FM channels 4..6
++01	YM2612 register base
+	30h = FM channel 1/4
+	31h = FM channel 2/5
+	32h = FM channel 3/6
++02/03	current YM2612 frequency
++04/05	pitching destination YM2612 frequency
++06/07	[pitch up/down] pitching YM2612 frequency delta
++06	[vibrato] speed counter (signed 8-bit)
++08	current note pitch
++09	[arpeggio] arpeggio offset A
++09	[vibrato] vibrato speed
++0A	[arpeggio] arpeggio offset B
++0A	[vibrato] vibrato strength
+		Note that this value contains a "bit-shift to the right" counter.
+		1 = don't shift (/1), 2 = shift once (/2), 3 = shift twice (/4), etc.
++0B	last command
+	This is the last non-note command that was processed in this channel.
+	Special values:
+		v1: 02, v2: 04 (arpeggio) - activates arpeggio effect
+			This applies the following effect each frame:
+				if (global arpeggio counter == 0)
+				{
+					arpeggio note = current note pitch
+				}
+				else if (global arpeggio counter == 1)
+				{
+					arpeggio note = current note pitch + arpeggio offset A
+				}
+				else if (global arpeggio counter == 0)
+				{
+					arpeggio note = current note pitch + arpeggio offset B
+				}
+				calculate YM2612 frequency from (arpeggio note)
+				send frequency to YM2612
+			Note: This uses the raw note value as a base and ignores any other pitch modifications.
+		v1: 04/06/08, v2: 06/08/0A (pitch upwards/downwards/to note - actvates pitch effect
+			This applies the following effect each frame:
+				current frequency += delta
+				if ((current frequency & 7FFh) <= 247h)
+				{
+					if ((current frequency & 3800h) == 0)
+						disable pitch effect
+					else
+						current frequency = current frequency - 800h + 244h
+				}
+				else if ((current frequency & 7FFh) >= 4D0h)
+				{
+					if ((current frequency & 3800h) == 3800h)
+						disable pitch effect
+					else
+						current frequency = current frequency + 800h - 268h
+				}
+				
+				if (delta >= 0)
+				{
+					if (current frequency > destination frequency)
+					{
+						current frequency = destination frequency
+						disable pitch effect
+					}
+				}
+				else if (delta < 0)
+				{
+					if (current frequency <= destination frequency)
+					{
+						current frequency = destination frequency
+						disable pitch effect
+					}
+				}
+				send (current frequency) to YM2612
+			
+		v2: 0C (vibrato) - activates vibrato effect
+			This applies the following effect each frame:
+				speed counter += vibrato speed
+				delta = ( abs(speed counter) - 0x40 ) >> (vibrato strength - 1)
+				send (current frequency + delta) to YM2612
+			Note: The modified frequency is NOT stored back.
++0C	current FM instrument
++0D	flags
+	Bit 7 (80h): allow note retrigger (0 = prevent Note on/off, prevent setting freq.)
++10..1F	used by sound effects
+
+The sound driver runs with a frame rate of 60.53 Hz. (YM2612 Timer B = 0C9h)

@@ -19,10 +19,65 @@ This is a small tool that I used to extract PSX AKAO files from uncompressed PSF
 
 I used the tool to get AKAO files for AKAO2MID. It uses hardocded paths, so you need to use it from the VB6 IDE directly.
 
+## cdmd2mid
+This tool converts songs from MegaDrive games developed by Core Design to MIDI.
+
+It supports the following games:
+- Asterix and the Great Rescue
+- Asterix and the Power of the Gods
+- B.C. Racers
+- Bubba 'n Stix\*
+- Skeleton Krew
+- Soulstar X\* (unreleased)
+
+The sound code is tracker-based with effects like arpeggio and portamento. (Effect order even matched MOD/XM files.) All effects are accurately converted to MIDI.
+
+There are various options, e.g. for tempo conversion or instrument ID filters.
+
+I wrote the tool to be able convert the songs from "Asterix and the Great Rescue" to MIDI.
+When I thought I could also test the tool with the other games, ... I noticed that AGR uses an earlier version of the sound driver and all other games use a later version with changed command IDs. (vibrato support was added, the Note Off command was moved)
+So this converter took longer to finish than I originally thought.
+
+Known bugs:
+- The first track in "Asterix and the Power of the Gods" lacks a command to set the tempo, thus the converted tempo is wrong. (The game has special code to set the "row speed" before starting the song.)
+
+Example calls:
+
+```
+cdmd2mid -ins "Asterix and the Great Rescue (E).bin" "agr.gyb"
+cdmd2mid -mus -InsMode 2 -RpB 4 "Asterix and the Great Rescue (E).bin" "agr.mid" 0x006BD0
+cdmd2mid -mus -RpB 4 "Asterix and the Great Rescue (U).bin" "agr.mid" 0x006C9A
+cdmd2mid -mus -RpB 4 "Asterix and the Power of The Gods (E) (M5) (prototype)" "agr.mid" 0x009578
+
+cdmd2mid -mus -ModCC -RpB 8 "Asterix and the Power of The Gods (E) (M4).bin" "apg.mid" 0x004C10
+
+cdmd2mid -mus -RpB 8 "Skeleton Krew (E).bin" "sk.mid" 0x1E99AA
+cdmd2mid -mus -RpB 8 "Skeleton Krew (U).bin" "sk.mid" 0x1E997E
+
+cdmd2mid -mus -RpB 8 -Z80Dump "Bubba N Stix Z80.bin" "Bubba N Stix (E).bin" "bns.mid" 0x02E0E6
+cdmd2mid -mus -RpB 8 -Z80Dump "Bubba N Stix Z80.bin" "Bubba N Stix (U).bin" "bns.mid" 0x02E1CA
+cdmd2mid -mus -RpB 8 -Z80Dump "Bubba N Stix Z80.bin" "Bubba N Stix (Beta).bin" "bns.mid" 0x02E0DE
+
+cdmd2mid -mus -RpB 16 "BC Racers 32X (W).bin" "bcr.mid" 0x010EB4
+
+cdmd2mid -mus -RpB 8 -Z80Dump "Soul Star X Z80.bin" "Soulstar X (32X) (prototype).bin" "ssx_01.mid" 0x02D
+```
+
+Notes:
+- The converter automatically scans the game ROMs for various required data. However there are two games (marked with \* in the game list) that require a separate Z80 memory dump to be supplied.
+  I included these dumps in the `data` folder.
+- The prototype of "Asterix and the Power of The Gods" still uses the sound driver and music from "Asterix and the Great Rescue".
+- "Asterix and the Great Rescue" has some very weird instruments that reverse the meaning of "note off", e.g. with bass and bells:  
+  *Decay/sustain* properties are fast, so the tone fades quicky when it is held. However the *release phase* triggered by "note off" is slow, resulting in a held note.
+- "Soul Star X" lacks a BGM test and thus also a song list in the game that the converter could use.
+  However each song can be converted separately by specifying the order ID where the song starts.  
+  Order ID list of songs used by the game: `0x000`, `0x02D`, `0x041`, `0x05A`, `0x06B`, `0x07B`, `0x093`, `0x0A9`, `0x0C1`, `0x0D6`, `0x0EA`, `0x101`, `0x11A`
+- None of the games uses the arpeggio effect. (at least not in its songs) In order to verify the conversion, I patched a song in "Asterix and the Power of The Gods" to replace vibrato with arpeggio.
+
 ## cotton2mid
 This tool converts songs from the game "Cotton: Fantastic Night Dreams" for Sega System 16B to MIDI.
 
-It extracts and converts the songs from the sound ROM, usually called opr-13893.a11.
+It extracts and converts the songs from the sound ROM, usually called `opr-13893.a11`.
 
 ## de2mid
 This tool converts songs from MegaDrive games developed by Data East to MIDI.
@@ -199,7 +254,7 @@ The following games are known work:
 For whatever reason, the format is more complicated and has more features than the M2Seq v2 format.
 
 The two games that use the format only use a subset of the features of the M2Seq v1 format.
-I included a test file `ATEST.M2S` that makes use of the otherwise unused commands and features.
+I included a test file `data/ATEST.M2S` that makes use of the otherwise unused commands and features.
 
 ## m2seq22mid
 This tool converts songs used by the X68000 "M2system sequencer-2" sound engine to MIDI.
