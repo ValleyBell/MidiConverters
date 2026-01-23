@@ -45,7 +45,7 @@ Example calls:
 
 ```
 cdmd2mid -ins "Asterix and the Great Rescue (E).bin" "agr.gyb"
-cdmd2mid -mus -InsMode 2 -RpB 4 "Asterix and the Great Rescue (E).bin" "agr.mid" 0x006BD0
+cdmd2mid -mus -InsMode 2 -InsAnalyse -RpB 4 "Asterix and the Great Rescue (E).bin" "agr.mid" 0x006BD0
 cdmd2mid -mus -RpB 4 "Asterix and the Great Rescue (U).bin" "agr.mid" 0x006C9A
 cdmd2mid -mus -RpB 4 "Asterix and the Power of The Gods (E) (M5) (prototype)" "agr.mid" 0x009578
 
@@ -64,11 +64,14 @@ cdmd2mid -mus -RpB 8 -Z80Dump "Soul Star X Z80.bin" "Soulstar X (32X) (prototype
 ```
 
 Notes:
+- By default, the tool converts all frequency effects to Pitch Bend events. This results in a very accurate recreation of the pitch, but may be not optimal for remixing or other editing.
+  The options `-ModCC` and `-PortaCC` can be used to create MIDIs that are easier to edit.
 - The converter automatically scans the game ROMs for various required data. However there are two games (marked with \* in the game list) that require a separate Z80 memory dump to be supplied.
   I included these dumps in the `data` folder.
 - The prototype of "Asterix and the Power of The Gods" still uses the sound driver and music from "Asterix and the Great Rescue".
 - "Asterix and the Great Rescue" has some very weird instruments that reverse the meaning of "note off", e.g. with bass and bells:  
-  *Decay/sustain* properties are fast, so the tone fades quicky when it is held. However the *release phase* triggered by "note off" is slow, resulting in a held note.
+  *Decay/sustain* properties are fast, so the tone fades quicky when it is held. However the *release phase* triggered by "note off" is slow, resulting in a held note.  
+  Use the `-InsAnalyse` option to counter this. The tool will then analyse the instrument's envelope and try to estimate the correct note lengths.
 - "Soul Star X" lacks a BGM test and thus also a song list in the game that the converter could use.
   However each song can be converted separately by specifying the order ID where the song starts.  
   Order ID list of songs used by the game: `0x000`, `0x02D`, `0x041`, `0x05A`, `0x06B`, `0x07B`, `0x093`, `0x0A9`, `0x0C1`, `0x0D6`, `0x0EA`, `0x101`, `0x11A`

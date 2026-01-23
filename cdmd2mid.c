@@ -1,14 +1,16 @@
 // Core Design MegaDrive -> Midi Converter
 // ---------------------------------------
-// Written by Valley Bell, October 2025
-// TODO:
-//	- "instrument analyze" mode that can calculate a fixed Key Off timeout + ignore Release
+// Written by Valley Bell, October 2025, last update: 21 January 2026
 
+#define _USE_MATH_DEFINES
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 #include <math.h>
+#ifndef M_LN2
+#define M_LN2	0.693147180559945309417
+#endif
 
 #include "stdtype.h"
 
@@ -38,12 +40,16 @@ typedef struct _channel_info
 	// bit 1 (02) - pitch effect (effect 1/2)
 	// bit 2 (04) - pitch to next note (effect 3)
 	// bit 3 (08) - vibrato (effect 4)
+	// bit 7 (40) - portamento CC active (effect 3)
 	// bit 8 (80) - vibrato trigger [for Modulation CC] (effect 4)
 	UINT8 flags;
 	UINT8 lastNote;
+	UINT8 lastVel;		// velocity of last written note
+	UINT8 lastPNote;	// portamento note
 	UINT8 pan2Side;
 	UINT8 pan;
 	UINT8 vol;
+	UINT8 ins;
 	UINT8 pbRange;
 	UINT8 pitchOct;		// YM2612 octave for current pitch (required for proper pitch frequency calculation)
 	UINT16 pitchBase;	// pitch of the current MIDI note, 8.8 fixed point (for pitch bend calculation)
@@ -56,6 +62,11 @@ typedef struct _channel_info
 	UINT8 vibSpeed;
 	UINT8 vibDepth;
 	UINT8 arpNotes[2];	// arpeggio note offsets
+	UINT8 keyOnState;	// 0 = off, 1 = on, 2 = off by sequence but on in export
+	UINT8 keyOffRev;	// 0 = normal key on/off behaviour, 1 = reversed behaviour ("off" by timeout, sequence KeyOff holds note)
+	UINT32 keyOffTicksD;	// [decay phase] ticks (frames) after which the note should be forced off (-1 = don't force off)
+	UINT32 keyOffTicksR;	// [release phase] ticks (frames) after which the note should be forced off (-1 = don't force off)
+	UINT32 keyOffTRem;	// remaining ticks (frames) after which the note is forced off
 } CHN_INF;
 typedef struct _sound_state
 {
@@ -67,6 +78,7 @@ typedef struct _sound_state
 } SOUND_STATE;
 
 
+static void CalcFMEnvelopeRates(void);
 static INT8 CompareFMIns(const UINT8* insA, const UINT8* insB);
 static void CreateInstrumentMap(UINT32 romLen, const UINT8* romData, UINT32 startOfs);
 static UINT32 GetPatternDataPos(UINT16 orderId, UINT16* patternId);
@@ -76,6 +88,8 @@ static UINT8 Note2Octave(UINT8 note);
 static UINT16 NotePitch2YMFreq(UINT16 pitch, UINT8 preferredOct);
 static UINT16 YMFreq2NotePitch(UINT16 ymFreq);
 static void ApplyYMDeltaToPitch(UINT16* pitch, UINT8* oct, INT16 delta);
+static float CalcPortaTime(UINT16 srcPitch, UINT8 srcOctave, UINT16 dstPitch, INT16 delta);
+static UINT8 PortaTime2Midi(float time, int semitones);
 static UINT8 ReadFileData(const char* fileName, UINT32* retSize, UINT8** retData, UINT32 maxFileSize);
 static UINT8 WriteFileData(const char* fileName, UINT32 dataLen, const UINT8* data);
 static void EnsurePBRange(FILE_INF* fInf, MID_TRK_STATE* MTS, CHN_INF* ci, INT16 pitchDiff);
@@ -113,7 +127,7 @@ static const UINT16 OPN_Freqs[14] = {
 #define PITCH_WRAP_LOW	0x248	// in-octave frequency below which the next lower octave will be used
 #define PITCH_WRAP_HIGH	0x4D0	// in-octave frequency above which the next higher octave will be used
 #define PITCH_WRAP_INC	0x244	// when jumping to lower octave, increase f-num by this amount
-#define PITCH_WRAP_DEC	0x268	// when jumping to lower octave, decrease f-num by this amount
+#define PITCH_WRAP_DEC	0x268	// when jumping to higher octave, decrease f-num by this amount
 
 static const UINT8 ALGO_TL_MASKS[8] = {0x08, 0x08, 0x08, 0x08, 0x0C, 0x0E, 0x0E, 0x0F};
 
@@ -147,6 +161,37 @@ static const char SEQ_COMMANDS_V2[] = {
 };
 
 
+// OPN series (YM2203/YM2608/YM2610/YM2612) Enevelope Generator rate table
+static const UINT8 OPN_EG_RATE_TBL[64][2] = {
+	// {envelope increment (in 1/8 steps), EG rate shift divider}
+	{ 0, 11}, { 0, 11}, { 6, 11}, { 7, 11},	//  0 ..  3
+	{ 4, 10}, { 5, 10}, { 6, 10}, { 7, 10},	//  4 ..  7
+	{ 4,  9}, { 5,  9}, { 6,  9}, { 7,  9},	//  8 .. 11
+	{ 4,  8}, { 5,  8}, { 6,  8}, { 7,  8},	// 12 .. 15
+	{ 4,  7}, { 5,  7}, { 6,  7}, { 7,  7},	// 16 .. 19
+	{ 4,  6}, { 5,  6}, { 6,  6}, { 7,  6},	// 20 .. 23
+	{ 4,  5}, { 5,  5}, { 6,  5}, { 7,  5},	// 24 .. 27
+	{ 4,  4}, { 5,  4}, { 6,  4}, { 7,  4},	// 28 .. 31
+	{ 4,  3}, { 5,  3}, { 6,  3}, { 7,  3},	// 32 .. 35
+	{ 4,  2}, { 5,  2}, { 6,  2}, { 7,  2},	// 36 .. 39
+	{ 4,  1}, { 5,  1}, { 6,  1}, { 7,  1},	// 40 .. 43
+	{ 4,  0}, { 5,  0}, { 6,  0}, { 7,  0},	// 44 .. 47
+	{ 8,  0}, {10,  0}, {12,  0}, {14,  0},	// 48 .. 51
+	{16,  0}, {20,  0}, {24,  0}, {28,  0},	// 52 .. 55
+	{32,  0}, {40,  0}, {48,  0}, {56,  0},	// 56 .. 59
+	{64,  0}, {64,  0}, {64,  0}, {64,  0},	// 60 .. 63
+};
+// F-Num to Keyscale Code
+static const UINT8 OPN_FN2KC[0x10] = {
+	0, 0, 0, 0, 0, 0, 0, 1,	//  0 ..  7
+	2, 3, 3, 3, 3, 3, 3, 3,	//  8 .. 15
+};
+
+#define MD_CLOCK_NTSC 	(53693175 / 7.0)	// YM2612 clock (NTSC): 7670453.57
+#define MD_CLOCK_PAL	(53203424 / 7.0)	// YM2612 clock (PAL):  7600489.14
+#define OPN2_EG_RATE	((FM_CLOCK) / 144 / 3)	// envelope generator: tick rate
+
+
 #define MODE_MUS	0x00
 #define MODE_INS	0x01
 
@@ -174,8 +219,11 @@ static UINT16 NUM_LOOPS = 2;
 static UINT8 TICK_TEMPO = TMODE_TPQ;
 static UINT8 INS_MODE = INSMODE_CLEAN;
 static INT8 NOTE_VELO = 0;
+static UINT8 INS_ANALYSE = 0;
 static UINT8 MOD_CC = 0;
+static UINT8 PORTA_CC = 0;
 static UINT8 DEBUG_CC = 0;
+static UINT8 MAX_PB_RANGE = 24;
 
 static UINT32 z80DrvPos = 0x006D5C;
 static UINT16 z80BaseBank = 0x3D;
@@ -192,6 +240,11 @@ static const UINT8* SndDataPtr;	// pointer to sound data (points to &ROMData[z80
 // This table remaps instruments so that there are only "unique" instruments.
 // i.e. when multiple instruments match aside from panning and volume, they will get the same ID
 static UINT8 insTableMap[0x80];
+
+static double FM_CLOCK = MD_CLOCK_PAL;
+static double FM_ATK_TIMES[64];
+static double FM_REL_TIMES[64];
+static double FM_REL_TIMES_SSG[64];
 
 int main(int argc, char* argv[])
 {
@@ -224,11 +277,15 @@ int main(int argc, char* argv[])
 		printf("    -Velo n     convert with fixed note velocity of n (for use with GYB file with \"raw\" InsMode)\n");
 		printf("                Values <0 result in velocity |n| with pan-law compensation enabled.\n");
 		printf("    -ModCC      convert Vibrato effect to Modulation CCs instead of Pitch Bends\n");
+		printf("    -PortaCC    convert Portamento effect to Portamento CCs instead of Pitch Bends\n");
+		printf("    -MaxPBR n   maximum Pitch Bend Range in semitones (1..127, default: %u)\n", MAX_PB_RANGE);
+		printf("                Pitch slides may cause retriggers of notes when exceeding the range.\n");
+		printf("    -InsAnalyse analyse instruments to (a) detect reversed Key Off and (b) improve Key Off times\n");
 		printf("    -DebugCC    include MIDI CCs for effect commands (for debugging)\n");
 		printf("OrderValue parameter:\n");
 		printf("        This number has a different effect depending on its value.\n");
 		printf("    0x000 .. 0x1FF      dump single song: order ID where the song starts\n");
-		printf("    0x200 or larger     dump all songs: ROM offset where the BGM test song list is stored\n");
+		printf("    0x200 or larger     dump all songs: ROM offset where the BGM test's song list is stored\n");
 		printf("                        (This is a list of 2-byte Big Endian order IDs.)\n");
 		//printf("Recommended settings: -RpB 8\n");
 		return 0;
@@ -311,6 +368,26 @@ int main(int argc, char* argv[])
 		{
 			MOD_CC = 1;
 		}
+		else if (! stricmp(argv[argbase] + 1, "PortaCC"))
+		{
+			PORTA_CC = 1;
+		}
+		else if (! stricmp(argv[argbase] + 1, "MaxPBR"))
+		{
+			argbase ++;
+			if (argbase < argc)
+			{
+				MAX_PB_RANGE = (UINT8)strtoul(argv[argbase], NULL, 0);
+				if (MAX_PB_RANGE < 1)
+					MAX_PB_RANGE = 1;
+				else if (MAX_PB_RANGE > 0x7F)
+					MAX_PB_RANGE = 0x7F;
+			}
+		}
+		else if (! stricmp(argv[argbase] + 1, "InsAnalyse"))
+		{
+			INS_ANALYSE = 1;
+		}
 		else if (! stricmp(argv[argbase] + 1, "DebugCC"))
 		{
 			DEBUG_CC = 1;
@@ -374,6 +451,7 @@ int main(int argc, char* argv[])
 	SndDataLen = ROMLen - (z80BaseBank << 15);
 	SndDataPtr = &ROMData[z80BaseBank << 15];
 	
+	CalcFMEnvelopeRates();
 	CreateInstrumentMap(Z80DataLen, Z80DataPtr, z80InsTblPos);
 	
 	result = 0;
@@ -474,6 +552,35 @@ int main(int argc, char* argv[])
 	return 0;
 }
 
+static void CalcFMEnvelopeRates(void)
+{
+	UINT8 rate;
+	
+	for (rate = 0; rate < 64; rate ++)
+	{
+		if (OPN_EG_RATE_TBL[rate][0] == 0)	// check for "infinite duration"
+		{
+			FM_ATK_TIMES[rate] = 999.9;
+			FM_REL_TIMES[rate] = 999.9;
+			FM_REL_TIMES_SSG[rate] = 999.9;
+		}
+		else
+		{
+			double stepInc = OPN_EG_RATE_TBL[rate][0] / 8.0;
+			double updateRate = (1 << OPN_EG_RATE_TBL[rate][1]) / OPN2_EG_RATE;
+			
+			if (rate >= 62)
+				FM_ATK_TIMES[rate] = 0.0;	// rates 62/63 are instant
+			else
+				FM_ATK_TIMES[rate]	= ceil(  73.0 / stepInc) * updateRate;	// 0x3FF to 0, but in a logarithmic way
+			FM_REL_TIMES[rate]		= ceil(1008.0 / stepInc) * updateRate;	// sustain/release end at 0x3F0
+			FM_REL_TIMES_SSG[rate]	= ceil( 512.0 / (stepInc * 4)) * updateRate;	// SSG-EG is 4x as fast and ends at 0x200
+		}
+	}
+	
+	return;
+}
+
 static INT8 CompareFMIns(const UINT8* insA, const UINT8* insB)
 {
 	UINT8 compareMask[0x20];
@@ -556,6 +663,250 @@ static void CreateInstrumentMap(UINT32 romLen, const UINT8* romData, UINT32 star
 	return;
 }
 
+static UINT8 OPNEnv2Rate(UINT8 envVal, UINT8 ksRate)
+{
+	UINT16 rate;
+	if (envVal == 0)
+		return 0;
+	rate = (envVal * 2) + ksRate;
+	if (rate > 0x3F)
+		return 0x3F;
+	else
+		return (UINT8)rate;
+}
+
+static UINT16 OPNSusLevel2Env(UINT8 susLvl)
+{
+	if (susLvl == 0x0F)
+		susLvl = 0x1F;
+	return susLvl * 0x20;
+}
+
+static void CalcInsEGTimes(const UINT8* insData, UINT8 insOp, UINT16 ymFreq, UINT16 susEndLevel, double retTimes[4])
+{
+	UINT8 keyOct = (ymFreq >> 11) & 0x07;
+	UINT8 ksCode = (keyOct << 2) | OPN_FN2KC[(ymFreq >> 7) & 0x0F];
+	UINT8 rateScale = (~insData[0x08 + insOp] >> 6) & 0x03;
+	UINT8 atkRate = insData[0x08 + insOp] & 0x1F;
+	UINT8 decRate = insData[0x0C + insOp] & 0x1F;
+	UINT8 susRate = insData[0x10 + insOp] & 0x1F;
+	UINT16 susLvl = OPNSusLevel2Env(insData[0x14 + insOp] >> 4);
+	UINT8 relRate = 1 + (insData[0x14 + insOp] & 0x0F) * 2;
+	UINT8 ssgEgMode = insData[0x18 + insOp] & 0x0F;
+	UINT8 ksRate = ksCode >> rateScale;
+	UINT8 phaseRate;
+	UINT16 susEnvEnd;
+	double atkTime;
+	double decTime;
+	double susTime;
+	double relTime;
+	
+	phaseRate = OPNEnv2Rate(atkRate, ksRate);
+	atkTime = FM_ATK_TIMES[phaseRate];
+	
+	if (ssgEgMode & 0x08)
+	{
+		susEnvEnd = 0x200;
+		if (! (ssgEgMode == 0x09 || ssgEgMode == 0x0F))
+		{
+			// Modes 09 and 0F are the only modes that end with silence.
+			// Modes 0B and 0D end with static "full volume".
+			// All other modes end up repeating the Attack and Decay/Sustain phases.
+			// So for all modes *but* 09/0F we assume an infinite decay and sustain time.
+			decTime = FM_REL_TIMES_SSG[0];
+			susTime = 0.0;
+		}
+		else if (susLvl >= 0x200)
+		{
+			// in SSG-EG mode, any attenuation level quieter than 0x200 means "phase end"
+			// (silence or loop back to attack phase)
+			phaseRate = OPNEnv2Rate(decRate, ksRate);
+			decTime = FM_REL_TIMES_SSG[phaseRate];
+			susTime = 0.0;
+		}
+		else
+		{
+			phaseRate = OPNEnv2Rate(decRate, ksRate);
+			decTime = FM_REL_TIMES_SSG[phaseRate] * (susLvl / (double)0x200);
+			
+			phaseRate = OPNEnv2Rate(susRate, ksRate);
+			susTime = FM_REL_TIMES_SSG[phaseRate] * (1.0 - susLvl / (double)0x200);
+		}
+		
+		phaseRate = OPNEnv2Rate(relRate, ksRate);
+		relTime = FM_REL_TIMES_SSG[phaseRate];
+	}
+	else
+	{
+		susEnvEnd = 0x3F0;
+		phaseRate = OPNEnv2Rate(decRate, ksRate);
+		decTime = FM_REL_TIMES[phaseRate] * (susLvl / (double)0x3F0);
+		
+		phaseRate = OPNEnv2Rate(susRate, ksRate);
+		susTime = FM_REL_TIMES[phaseRate] * (1.0 - susLvl / (double)0x3F0);
+		
+		phaseRate = OPNEnv2Rate(relRate, ksRate);
+		relTime = FM_REL_TIMES[phaseRate];
+	}
+	if (susEndLevel < susEnvEnd)
+	{
+		if (susEndLevel <= susLvl)
+		{
+			// susEnvEnd inside (or at end of) Decay phase
+			decTime = decTime * (double)susEndLevel / (double)susLvl;
+			susTime = 0.0;
+		}
+		else
+		{
+			// susEnvEnd inside Sustain phase
+			susTime = susTime * (double)(susEndLevel - susLvl) / (double)(susEnvEnd - susLvl);
+		}
+	}
+	
+	retTimes[0] = atkTime;
+	retTimes[1] = decTime;
+	retTimes[2] = susTime;
+	retTimes[3] = relTime;
+	return;
+}
+
+static void DetermineKeyHacks(CHN_INF* ci, const UINT8* insData)
+{
+	/* General logic:
+	Determine most important operator:
+		for all operators:
+			attLevel = Total Level
+			if (ssgEgMode)
+			{
+				if (! (ssgEgMode == 0x09 || ssgEgMode == 0x0F))
+					susLvl = 0
+				attLevel += interpolate(decRate, susRate)[weighed by susLevel]
+			}
+			else
+			{
+				attLevel += interpolate(decRate, susRate)[weighed by susLevel]
+			}
+		use operator with min(attLevel)
+	
+	Note time calculation logic:
+		if (ssgEgMode)
+		{
+			if (ssgEgMode == 0x09 || ssgEgMode == 0x0F)
+				enforce Note Off after ATK+DEC+SUS phase (SSG-EG forces OFF after SUS end)
+			else
+				keep running (repeating envelope pattern)
+		}
+		else
+		{
+			keep running by default (assume slow DEC/SUS phases)
+			if (SusLvl >= 0x06*0x20)
+			{
+				(the sustain level is so low that we can treat is as "silence")
+				if (Decay Rate >= 0x0F)
+					enforce Note Off after ATK phase
+				else
+					enforce Note Off after ATK+DEC phase
+			}
+			else
+			{
+				if (Sustain Rate >= 0x0C)
+					enforce Note Off after ATK+DEC phases
+			}
+		}
+		if (Release Rate >= 0x0D)	// 1+0x06*2
+			stop note at Release just as normal
+		else
+			keep Note On when triggering Key Off
+	*/
+	
+	UINT8 tlMask = ALGO_TL_MASKS[insData[0x1C] & 0x07];
+	UINT8 minOp;
+	UINT16 minAttLvl;
+	UINT8 insOp;
+	
+	minAttLvl = 0xFFF;
+	minOp = 3;
+	for (insOp = 0; insOp < 4; insOp ++)
+	{
+		UINT8 opTL = insData[0x04 + insOp] & 0x7F;
+		UINT8 decRate = insData[0x0C + insOp] & 0x1F;
+		UINT8 susRate = insData[0x10 + minOp] & 0x1F;
+		UINT16 susLvl = OPNSusLevel2Env(insData[0x14 + insOp] >> 4);
+		UINT8 ssgEgMode = insData[0x18 + insOp] & 0x0F;
+		UINT16 attLevel;
+		
+		if (! (tlMask & (1 << insOp)))
+			continue;	// ignore operators that are not part of the "output"
+		
+		attLevel = opTL;
+		if (ssgEgMode & 0x08)
+		{
+			if (! (ssgEgMode == 0x09 || ssgEgMode == 0x0F))
+				attLevel += 0;	// these SSG-EG envelopes loop
+			else
+				attLevel += (decRate * susLvl) / 0x3F0 + (susRate * (0x3F0 - susLvl)) / 0x3F0;
+		}
+		else
+		{
+			attLevel += (decRate * susLvl) / 0x3F0 + (susRate * (0x3F0 - susLvl)) / 0x3F0;
+		}
+		if (minAttLvl >= attLevel)
+		{
+			minAttLvl = attLevel;
+			minOp = insOp;
+		}
+	}
+	
+	{
+		// Note that we need the YM2612 frequency for precise envelope time calculations.
+		UINT16 ymFreq = NotePitch2YMFreq(ci->curPitch, ci->pitchOct);
+		UINT8 relRate = 1 + (insData[0x14 + minOp] & 0x0F) * 2;
+		UINT8 ssgEgMode = insData[0x18 + minOp] & 0x0F;
+		double egTimes[4];
+		double tOffDec = 999.9;
+		double tOffRel = 999.9;
+		
+		CalcInsEGTimes(insData, minOp, ymFreq, 0x100, egTimes);	// susEndLevel is arbitrary, but "feels" good
+		if (ssgEgMode & 0x08)
+		{
+			if (ssgEgMode == 0x09 || ssgEgMode == 0x0F)
+				tOffDec = egTimes[0] + egTimes[1] + egTimes[2];	// off after ATK+DEC+SUS
+		}
+		else
+		{
+#if 0	// first attempt, using susEndLevel == 0x3F0
+			UINT8 decRate = insData[0x0C + minOp] & 0x1F;
+			UINT8 susRate = insData[0x10 + minOp] & 0x1F;
+			UINT16 susLvl = OPNSusLevel2Env(insData[0x14 + minOp] >> 4);
+			if (susLvl >= 0x06*0x20)
+			{
+				if (decRate >= 0x0F)
+					tOffDec = egTimes[0] + egTimes[1] / 2.0;	// off after ATK phase + half DEC phase
+				else
+					tOffDec = egTimes[0] + egTimes[1];	// off after ATK+DEC phase
+			}
+			else
+			{
+				if (susRate >= 0x0C)
+					tOffDec = egTimes[0] + egTimes[1];	// off after ATK+DEC phase
+			}
+#else	// second attempt, using susEndLevel == 0x100 (0x08 * 0x20)
+			tOffDec = egTimes[0] + egTimes[1] + egTimes[2];	// off after ATK+DEC+SUS
+#endif
+		}
+		tOffRel = egTimes[3];	// off after REL phase is finished
+		
+		if (relRate < 0x0D)	// 1+0x06*2
+			ci->keyOffRev = 1;	// keep Note On when triggering Key Off
+		else
+			ci->keyOffRev = 0;	// Key Off -> Note Off as usual
+		ci->keyOffTicksD = (tOffDec < 999.9) ? (UINT32)(tOffDec * 60.0 * 256 + 0.5) : (UINT32)-1;
+		ci->keyOffTicksR = (tOffRel < 999.9) ? (UINT32)(tOffRel * 60.0 * 256 + 0.5) : (UINT32)-1;
+	}
+	
+	return;
+}
+
 static UINT32 GetPatternDataPos(UINT16 orderId, UINT16* patternId)
 {
 	UINT16 patternOfs = ReadLE16(&SndDataPtr[orderId * 0x02]);
@@ -568,20 +919,30 @@ static UINT32 GetPatternDataPos(UINT16 orderId, UINT16* patternId)
 	return (patternBank << 15) | (patternPos & 0x7FFF);
 }
 
+static int note_off_sort(const void* ptrA, const void* ptrB)
+{
+	return *(UINT32*)ptrA > *(UINT32*)ptrB;
+}
+
 static void ProcessDriverTicks(FILE_INF* fInf, MID_TRK_STATE* MTS, SOUND_STATE* sndState, UINT16 rows)
 {
+	UINT32 noteOffList[8];
+	
 	for (; rows > 0; rows --)
 	{
 		UINT16 frm;
 		for (frm = 0; frm < sndState->rowTicks; frm ++)
 		{
+			UINT8 noteOffCnt = 0;
 			UINT8 curChn;
+			UINT32 frmTicks;
 			for (curChn = 0; curChn < sndState->chnCnt; curChn ++)
 			{
 				CHN_INF* ci = &sndState->chnInf[curChn];
 				if (ci->pitchBase == 0xFFFF)
 					continue;	// prevent processing before the first note
 				MTS->midChn = curChn;
+				
 				// *Note:* We must apply pitch effects even after Key Off.
 				// In "Asterix and the Great Rescue", some instruments (e.g. the bass)
 				// have a slow Release phase and the songs apply pitch effects during that phase.
@@ -619,21 +980,70 @@ static void ProcessDriverTicks(FILE_INF* fInf, MID_TRK_STATE* MTS, SOUND_STATE* 
 					WriteNotePitch(fInf, MTS, ci, YMFreq2NotePitch(ymFreq), 0);
 					// The vibrato frequency is applied only temporarily and not saved back.
 				}
-			}
+				
+				// do Key Off when caused by the instrument
+				if (ci->keyOffTRem > 0)
+				{
+					if (ci->keyOffTRem > 0x100)
+					{
+						ci->keyOffTRem -= 0x100;
+					}
+					else
+					{
+						noteOffList[noteOffCnt] = (ci->keyOffTRem << 8) | (curChn << 0);
+						noteOffCnt ++;
+						ci->keyOffTRem = 0;
+					}
+				}
+			}	// for (curChn)
+			
+			// advance MIDI time by 1 frame
 			if (TICK_TEMPO == TMODE_TPQ)
 			{
-				MTS->curDly += 1;
+				frmTicks = 1;
 			}
 			else if (TICK_TEMPO == TMODE_RPB)
 			{
 				UINT32 tick0 = (frm + 0) * BEAT_TICKS * RPB_TICK_MULT / (BEAT_ROWS * sndState->rowTicks);
 				UINT32 tick1 = (frm + 1) * BEAT_TICKS * RPB_TICK_MULT / (BEAT_ROWS * sndState->rowTicks);
-				MTS->curDly += (tick1 - tick0);
+				frmTicks = tick1 - tick0;
 			}
+			if (noteOffCnt == 0)
+			{
+				MTS->curDly += frmTicks;
+			}
+			else
+			{
+				UINT32 lastTick = 0;
+				UINT8 noIdx;
+				if (noteOffCnt > 1)
+					qsort(noteOffList, noteOffCnt, sizeof(UINT32), note_off_sort);
+				for (noIdx = 0; noIdx < noteOffCnt; noIdx ++)
+				{
+					UINT8 curChn = noteOffList[noIdx] & 0x0F;
+					UINT32 offTime = noteOffList[noIdx] >> 8;
+					CHN_INF* ci = &sndState->chnInf[curChn];
+					
+					ci->keyOnState = 0;
+					if (ci->lastNote != 0xFF)
+					{
+						UINT32 offTick = (frmTicks * offTime + 0x80) >> 8;	// convert frames [offTime] -> MIDI ticks [offTick]
+						MTS->curDly += (offTick - lastTick);
+						lastTick = offTick;
+						
+						MTS->midChn = curChn;
+						WriteEvent(fInf, MTS, 0x90, ci->lastNote, 0x00);
+						ci->lastNote = 0xFF;
+					}
+				}
+				MTS->curDly += (frmTicks - lastTick);
+			}
+			
+			// count arpeggio tick
 			sndState->arpTick ++;
 			sndState->arpTick %= 3;
-		}
-	}
+		}	// for (frm)
+	}	// for (rows)
 	return;
 }
 
@@ -687,13 +1097,20 @@ UINT8 CoreDesign2Mid(UINT32 songLen, const UINT8* songData, UINT16 orderId)
 		CHN_INF* ci = &sndState.chnInf[curChn];
 		ci->flags = 0x00;
 		ci->lastNote = 0xFF;
+		ci->lastPNote = 0xFF;
 		ci->pitchBase = 0xFFFF;
+		ci->ins = 0xFF;
 		ci->vol = 0x7F;
 		ci->pan = 0xFF;	// "uninitalized"
 		ci->pan2Side = 0;
 		ci->pbRange = 0;
 		ci->lastPB = 0xFFFF;
 		ci->lastMod = 0xFF;
+		ci->keyOnState = 0;
+		ci->keyOffRev = 0;
+		ci->keyOffTicksD = (UINT32)-1;
+		ci->keyOffTicksR = (UINT32)-1;
+		ci->keyOffTRem = 0;
 	}
 	
 	mstLoopCnt = 0;
@@ -852,10 +1269,22 @@ UINT8 CoreDesign2Mid(UINT32 songLen, const UINT8* songData, UINT16 orderId)
 				}
 				break;
 			case '=':	// Note Off
-				if (ci->lastNote != 0xFF)
+				if (ci->keyOffRev)
 				{
-					WriteEvent(&midFileInf, &MTS, 0x90, ci->lastNote, 0x00);
-					ci->lastNote = 0xFF;
+					if (ci->keyOnState == 1)
+					{
+						ci->keyOnState = 2;
+						ci->keyOffTRem = ci->keyOffTicksR;
+					}
+				}
+				else
+				{
+					ci->keyOnState = 0;
+					if (ci->lastNote != 0xFF)
+					{
+						WriteEvent(&midFileInf, &MTS, 0x90, ci->lastNote, 0x00);
+						ci->lastNote = 0xFF;
+					}
 				}
 				break;
 			case 'E':	// set game callback variable
@@ -878,6 +1307,12 @@ UINT8 CoreDesign2Mid(UINT32 songLen, const UINT8* songData, UINT16 orderId)
 				if (ci->lastNote != 0xFF)
 					WriteEvent(&midFileInf, &MTS, 0x90, ci->lastNote, 0x00);
 				
+				// handle Portamento CC
+				if ((ci->flags & 0x44) == 0x40)	// portamento was triggered - turn it off
+				{
+					WriteEvent(&midFileInf, &MTS, 0xB0, 0x41, 0x00);
+					ci->flags &= ~0x40;
+				}
 				// handle Modulation CC
 				if ((ci->flags & 0x88) == 0x80)	// vibrato was triggered last time - turn it off now
 				{
@@ -891,14 +1326,14 @@ UINT8 CoreDesign2Mid(UINT32 songLen, const UINT8* songData, UINT16 orderId)
 				
 				if (note & 0x01)
 				{
-					UINT8 ins = note >> 1;	// offset -> index
+					ci->ins = note >> 1;	// offset -> index
 					if (INS_MODE == INSMODE_RAW)
-						WriteEvent(&midFileInf, &MTS, 0xC0, ins, 0x00);	// raw instrument ID
+						WriteEvent(&midFileInf, &MTS, 0xC0, ci->ins, 0x00);	// raw instrument ID
 					else
-						WriteEvent(&midFileInf, &MTS, 0xC0, insTableMap[ins], 0x00);	// remapped instrument
+						WriteEvent(&midFileInf, &MTS, 0xC0, insTableMap[ci->ins], 0x00);	// remapped instrument
 					if (z80InsTblPos != 0)	// only available when Z80 driver info is present
 					{
-						const UINT8* insDataPtr = &Z80DataPtr[z80InsTblPos + ins * 0x20];
+						const UINT8* insDataPtr = &Z80DataPtr[z80InsTblPos + ci->ins * 0x20];
 						UINT8 midPan = StereoMask2Pan(insDataPtr[0x1D] & 0xC0, &ci->pan2Side);
 						if (midPan != ci->pan)
 						{
@@ -934,8 +1369,39 @@ UINT8 CoreDesign2Mid(UINT32 songLen, const UINT8* songData, UINT16 orderId)
 					ci->pitchEnd = ci->pitchBase;
 					if (ci->curPitch > ci->pitchEnd)
 						ci->pitchStep *= -1;
-					MinimizePBRange(&midFileInf, &MTS, ci, ci->curPitch - ci->pitchBase);
-					WriteNotePitch(&midFileInf, &MTS, ci, ci->curPitch, 0);
+					if (PORTA_CC)
+					{
+						float ptTimeSec;
+						UINT8 ptTimeVal;
+						UINT8 ptNote = (UINT8)((ci->curPitch + 0x80) >> 8);
+						INT16 ptDiff = ci->pitchEnd - ci->curPitch;
+						UINT16 absPDiff = (ptDiff < 0) ? -ptDiff : ptDiff;
+						
+						WriteNotePitch(&midFileInf, &MTS, ci, ci->pitchEnd, 1);	// reset PB to 0 (no redundant writes)
+						if (ptNote != ci->lastPNote)
+						{
+							// write dummy note to set portamento start note
+							WriteEvent(&midFileInf, &MTS, 0x90, ptNote, 0x01);
+							WriteEvent(&midFileInf, &MTS, 0x90, ptNote, 0x00);
+						}
+						ptTimeSec = CalcPortaTime(ci->curPitch, ci->pitchOct, ci->pitchEnd, ci->pitchStep);
+						ptTimeVal = PortaTime2Midi(ptTimeSec, absPDiff >> 8);
+						WriteEvent(&midFileInf, &MTS, 0xB0, 0x05, ptTimeVal);
+						if (!(ci->flags & 0x40))
+						{
+							WriteEvent(&midFileInf, &MTS, 0xB0, 0x41, 0x7F);
+							ci->flags |= 0x40;
+						}
+						
+						ci->flags &= ~0x02;	// don't do pitch bend portamento
+						ci->curPitch = ci->pitchEnd;
+						ci->pitchOct = Note2Octave((UINT8)(ci->curPitch >> 8));
+					}
+					else
+					{
+						MinimizePBRange(&midFileInf, &MTS, ci, ci->curPitch - ci->pitchBase);
+						WriteNotePitch(&midFileInf, &MTS, ci, ci->curPitch, 0);
+					}
 				}
 				else
 				{
@@ -944,13 +1410,22 @@ UINT8 CoreDesign2Mid(UINT32 songLen, const UINT8* songData, UINT16 orderId)
 					WriteNotePitch(&midFileInf, &MTS, ci, ci->curPitch, 1);	// reset PB to 0 (no redundant writes)
 					MinimizePBRange(&midFileInf, &MTS, ci, 0);
 				}
+				if (INS_ANALYSE && ci->ins < 0x80 && z80InsTblPos != 0)	// only available when Z80 driver info is present
+				{
+					const UINT8* insDataPtr = &Z80DataPtr[z80InsTblPos + ci->ins * 0x20];
+					DetermineKeyHacks(ci, insDataPtr);
+				}
 				if (NOTE_VELO == 0)
-					WriteEvent(&midFileInf, &MTS, 0x90, note, ci->vol);
+					ci->lastVel = ci->vol;
 				else if (NOTE_VELO > 0)
-					WriteEvent(&midFileInf, &MTS, 0x90, note, (UINT8)NOTE_VELO);
+					ci->lastVel = (UINT8)NOTE_VELO;
 				else if (NOTE_VELO < 0)
-					WriteEvent(&midFileInf, &MTS, 0x90, note, NoteVelWithPan((UINT8)(-NOTE_VELO), ci->pan2Side));
+					ci->lastVel = NoteVelWithPan((UINT8)(-NOTE_VELO), ci->pan2Side);
+				WriteEvent(&midFileInf, &MTS, 0x90, note, ci->lastVel);
 				ci->lastNote = note;
+				ci->lastPNote = note;
+				ci->keyOffTRem = ci->keyOffTicksD;
+				ci->keyOnState = 1;
 			}
 			if ((ci->flags & 0x88) == 0x88)	// handle Modulation CC - vibrato was triggered with this command
 				ci->flags &= ~0x08;	// remove "trigger" flag
@@ -1168,7 +1643,7 @@ static UINT16 YMFreq2NotePitch(UINT16 ymFreq)
 		UINT16 noteFreqDiff = OPN_Freqs[note + 1] - OPN_Freqs[note];
 		UINT16 freqDiff = ymFreq - OPN_Freqs[note];
 		double freqFrac = (double)freqDiff / (double)noteFreqDiff;
-		double dFrac = log(1.0 + freqFrac) / 0.693147180559945309417 * 0x100;
+		double dFrac = log(1.0 + freqFrac) / M_LN2 * 0x100;
 		if (dFrac < 0)
 			dFrac = 0;
 		else if (dFrac > 255)
@@ -1213,6 +1688,71 @@ static void ApplyYMDeltaToPitch(UINT16* pitch, UINT8* oct, INT16 delta)
 	
 	*pitch = YMFreq2NotePitch(ymFreq);
 	return;
+}
+
+static float CalcPortaTime(UINT16 srcPitch, UINT8 srcOctave, UINT16 dstPitch, INT16 delta)
+{
+	UINT16 curFreq = NotePitch2YMFreq(srcPitch, srcOctave);
+	UINT16 dstFreq = NotePitch2YMFreq(dstPitch, 0xFF);
+	UINT8 curOct = (curFreq / 0x800) & 0x07;
+	UINT8 dstOct = (dstFreq / 0x800) & 0x07;
+	int totalSteps = 0;
+	int steps;
+	
+	if (delta > 0)
+	{
+		curFreq &= 0x7FF;
+		dstFreq &= 0x7FF;
+		while(curOct < dstOct)
+		{
+			steps = (PITCH_WRAP_HIGH - curFreq + delta - 1) / delta;
+			totalSteps += steps;
+			curFreq += delta * steps;
+			
+			curFreq -= PITCH_WRAP_DEC;
+			curOct ++;
+		}
+		steps = (dstFreq - curFreq + delta - 1) / delta;
+		if (steps < 0)
+			steps = 0;
+		totalSteps += steps;
+	}
+	else if (delta < 0)
+	{
+		delta *= -1;
+		curFreq &= 0x7FF;
+		dstFreq &= 0x7FF;
+		while(curOct > dstOct)
+		{
+			// Note: use (PITCH_WRAP_LOW - 1), because the the octave wraps around at < instead of <=
+			steps = (curFreq - (PITCH_WRAP_LOW - 1) + delta - 1) / delta;
+			totalSteps += steps;
+			curFreq -= delta * steps;
+			
+			curFreq += PITCH_WRAP_INC;
+			curOct --;
+		}
+		steps = (curFreq - dstFreq + delta - 1) / delta;
+		if (steps < 0)
+			steps = 0;
+		totalSteps += steps;
+	}
+	
+	return totalSteps / 60.0f;	// 1 step every 1/60s
+}
+
+static UINT8 PortaTime2Midi(float time, int semitones)
+{
+	// formula used by Roland SC-88:
+	//  portaTime values 12..112:
+	//      duration [sec] = 0.0034 * distance [semitones] * 2 ^ (portaTime_value / 128 * 8)
+	//      portaTime_value = log2(duration [sec] / distance [semitones] / 0.0034) / 8 * 128
+	float ptVal = (float)(log(time / semitones / 0.0034) / 8 * 128);
+	if (ptVal < 0.0f)
+		ptVal = 0.0f;
+	else if (ptVal > 127.0f)
+		ptVal = 127.0f;
+	return (UINT8)(ptVal + 0.5f);
 }
 
 static UINT8 ReadFileData(const char* fileName, UINT32* retSize, UINT8** retData, UINT32 maxFileSize)
@@ -1279,6 +1819,13 @@ static void EnsurePBRange(FILE_INF* fInf, MID_TRK_STATE* MTS, CHN_INF* ci, INT16
 		minRange = 96;
 	else
 		minRange = 127;
+	if (minRange > MAX_PB_RANGE)
+	{
+		minRange = MAX_PB_RANGE;
+		if (minRange <= ci->pbRange)
+			return;
+	}
+	
 	WriteEvent(fInf, MTS, 0xB0, 0x65, 0x00);
 	WriteEvent(fInf, MTS, 0xB0, 0x64, 0x00);
 	WriteEvent(fInf, MTS, 0xB0, 0x06, minRange);
@@ -1302,14 +1849,38 @@ static void MinimizePBRange(FILE_INF* fInf, MID_TRK_STATE* MTS, CHN_INF* ci, INT
 static void WriteNotePitch(FILE_INF* fInf, MID_TRK_STATE* MTS, CHN_INF* ci, UINT16 notePitch, UINT8 optional)
 {
 	INT16 pitchDiff = notePitch - ci->pitchBase;
+	UINT16 absPDiff;
 	INT32 pbVal;
 	UINT16 midPB;
+	UINT8 restartNote = 0;
 	
 	if (optional && pitchDiff == 0 && ci->pbRange == 0)
 		return;
 	EnsurePBRange(fInf, MTS, ci, pitchDiff);
 	
-	pbVal = pitchDiff * 8192 / ci->pbRange / 256;
+	// handle going outside of the available pitch bend range
+	absPDiff = (pitchDiff < 0) ? -pitchDiff : pitchDiff;
+	if (absPDiff > (ci->pbRange << 8))
+	{
+		// distance > range -> stop note, move base, restart note
+		INT16 newBase;
+		if (pitchDiff >= 0)	// slide upwards
+			newBase = ((notePitch + 0x00) >> 8) + ci->pbRange;	// current pitch -> at low end
+		else				// slide downwards
+			newBase = ((notePitch + 0xFF) >> 8) - ci->pbRange;	// current pitch -> at high end
+		if (newBase < 0x00)
+			newBase = 0x00;
+		else if (newBase > 0x7F)
+			newBase = 0x7F;
+		ci->pitchBase = (UINT16)newBase << 8;
+		pitchDiff = notePitch - ci->pitchBase;
+			
+		restartNote = 1;
+		if (ci->lastNote != 0xFF)
+			WriteEvent(fInf, MTS, 0x90, ci->lastNote, 0x00);
+	}
+	
+	pbVal = (INT32)pitchDiff * 8192 / ci->pbRange / 256;
 	if (pbVal < -0x2000)
 		pbVal = -0x2000;
 	else if (pbVal > +0x1FFF)
@@ -1319,6 +1890,14 @@ static void WriteNotePitch(FILE_INF* fInf, MID_TRK_STATE* MTS, CHN_INF* ci, UINT
 		return;
 	WriteEvent(fInf, MTS, 0xE0, (midPB >> 0) & 0x7F, (midPB >> 7) & 0x7F);
 	ci->lastPB = midPB;
+	
+	if (restartNote && ci->lastNote != 0xFF)
+	{
+		UINT8 note = (UINT8)(ci->pitchBase >> 8);
+		WriteEvent(fInf, MTS, 0x90, note, ci->lastVel);
+		ci->lastNote = note;
+		ci->lastPNote = note;
+	}
 	
 	return;
 }
@@ -1366,8 +1945,7 @@ static float OPNInsVol2DB(UINT8 algo, const UINT8* tls, UINT8 panMode)
 			if (tlMask & (1 << tlIdx))
 				volume += pow(2.0, tls[tlIdx] / -8.0);
 		}
-		//logVol = log(volume) / log(2.0);
-		logVol = log(volume) * 0.693147180559945309417;
+		logVol = log(volume) * M_LN2;
 	}
 	if (panMode & 0x01)
 		logVol -= 0.5;	// panned to the side - dampen volume a bit
