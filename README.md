@@ -1,5 +1,15 @@
 # MIDI Converters
-various <game format> to MIDI converters I wrote over the years.
+various \<game format\> to MIDI converters I wrote over the years.
+
+## acl2mid
+This tool converts songs from Accolade's MUS format to MIDI.
+
+This sequence format was developed by Russell Shiffer for use with sound drivers in Accolade-developed games on various platforms.
+
+It is known to work with the following games:
+- Bubsy in Claws Encounters of the Furred Kind (Sega MegaDrive)
+
+I wrote this tool on request by Infomaniac95.
 
 ## AKAO2MID
 This tool converts PSX AKAO v1 and v2 to MIDI. It is based on the information [here](http://wiki.qhimm.com/view/FF7/PSX/Sound/AKAO_frames), but I did a lot of additional reverse engineering.

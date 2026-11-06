@@ -292,6 +292,7 @@ int main(int argc, char* argv[])
 	}
 	
 	argbase = 1;
+	convMode = MODE_MUS;
 	z80DumpFileName = NULL;
 	while(argbase < argc && argv[argbase][0] == '-')
 	{
