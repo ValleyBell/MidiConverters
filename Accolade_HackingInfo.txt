@@ -1,0 +1,229 @@
+Sequence Format
+===============
+2-byte values inside the sequence are generally Little Endian.
+The sequence data pointer really is only 1 byte large in all headers.
+
+Header v1
+---------
+known to be used by:
+- Accolade's Mid2Mus tool [MS-DOS] in "old .GMS version" mode
+- Elvira: Mistress of the Dark [MS-DOS]
+- Hardball! [Sega MegaDrive]
+
+Pos	Len	Description
+00	02	length of sequence data (excludes this value)
+
+There is no extra data, the sequence data follows the size.
+
+The ticks/second speed is 146 (MS-DOS) / 60 (Sega MegaDrive).
+
+Header v2
+---------
+known to be used by:
+- Elvira II: The Jaws of Cerberus [MS-DOS]
+
+Pos	Len	Description
+02	01	signature 1, always FCh
+03	01	signature 2, always 04h
+04	01	sequence data pointer? (relative to beginning of the file) (always 06h)
+05	01	?? (always 06h)
+
+There is no extra data, the sequence data follows the size.
+
+The ticks/second speed is 146 (MS-DOS).
+
+Header v3
+---------
+known to be used by:
+- HardBall III [Sega MegaDrive]
+- Simon the Sorcerer (Demo) [MS-DOS]
+- WaxWorks [MS-DOS]
+
+Pos	Len	Description
+00	02	length of sequence data (excludes this value)
+02	01	signature 1, always FCh
+03	01	signature 2, always 29h
+04	01	sequence data pointer (relative to beginning of the file)
+05	01	?? (usually 1)
+06	01	?? (usually 0 or 1)
+07	01	?? (usually 0) !! exists only in MegaDrive games (8 bytes header), value is missing in MS-DOS games (7 bytes header)
+
+The ticks/second speed is 146 (MS-DOS) / 300 (Sega MegaDrive).
+
+Header v4
+---------
+known to be used by:
+- Bubsy in Claws Encounters of the Furred Kind [Sega MegaDrive]
+- Speed Racer: The Challenge of Racer X [MS-DOS]
+
+Pos	Len	Description
+00	02	length of sequence data (excludes this value)
+02	01	signature 1, always FCh
+03	01	signature 2, always 34h
+04	01	sequence data pointer (relative to beginning of the file)
+05	01	?? (usually 0 in MegaDrive games, usually 2 in MS-DOS games)
+06	01	?? (usually 0)
+07	02	ticks per second
+09	02	song tempo BPM (usually 120)
+0B	02	?? (usually 0)
+0D	02	pointer to instrument list (relative to beginning of the file)
+		The sound driver doesn't seem to use the instrument list.
+0F	01	length of instrument list
+
+Header v5
+---------
+This version is written by Accolade's Mid2Mus tool.
+
+known to be used by:
+- Accolade's Mid2Mus tool [MS-DOS] in "version 2.0 .MUS file" mode
+- Barkley Shut Up and Jam! 2 [Sega MegaDrive]
+
+Pos	Len	Description
+00	02	length of sequence data (excludes this value)
+02	01	signature 1, always FCh
+03	01	signature 2, always 38h
+04	01	sequence data pointer (relative to beginning of the file)
+05	01	?? (usually 0)
+06	01	?? (usually 0)
+07	02	ticks per second
+		default value:
+		- platform 0 (PC): 146
+		- platform 1 (SNES): 100
+		- platform 2 (Sega MegaDrive): 300
+		- platform 3 (Sega MegaDrive, old): 60
+		- platform 4 (Sega MegaDrive, old, PAL mode): 50
+09	02	song tempo BPM (usually 120)
+0B	02	?? (usually 0)
+0D	02	pointer to instrument list (relative to beginning of the file)
+		The sound driver doesn't seem to use the instrument list.
+0F	01	length of instrument list
+
+Sequence Data
+-------------
+This is a MIDI-like format.
+The general structure is:
+[command] [optional delay] [command] [optional delay] ...
+
+The first byte of a command consists of the following parts:
+- bits 0-3 (mask 0Fh) - channel
+- bits 4-6 (mask 70h) - actual command byte
+- bits  7  (mask 80h) - followed by delay value (set = yes, unset = no delay value, process next command instantly)
+
+0n/8n pp - stop note on channel n, pitch pp
+1n/9n pp vv - play note on channel n, pitch pp, velocity vv
+	vv == 0 results in a "note off"
+2n/An vv - loop marker
+	vv = 0 -> loop start
+	vv >= 1 -> loop end (jumps back to loop start)
+	Notes:
+	- The sequences usually set "vv = 127", indicating that this is the intended loop point. (127 = infinite)
+	  However the sound driver has no loop counter and loop infinitely regardless.
+	- In theory, the sequence can continue after this command with vv >= 1, so it is followed by valid data.
+	  (usually a single "FC" byte to stop the sequence)
+3n/Bn - no effect
+3n/Bn aa bb - ?? (variant used in "Barkley Shut Up and Jam! 2")
+4n/Cn ii - set channel n instrument to ii
+5n/Dn - ?? (does something depending on the channel number)
+6n/En pp - pitch bend
+	00h = maximum down, 80h = centre, FFh = maximum up
+	The pitch bend range appears to be 12 semitones up and down. (e.g. in "Barkley Shut Up and Jam! 2")
+7n/Fn - track end (sequences usually use byte FCh for this)
+
+The "delay value" is a variable-length value with up to 2 bytes.
+Format: aa [bb]
+	aa = 00h..7Fh - delay by 00h..7Fh ticks
+	aa = 80h..FFh - delay by (bb * 80h) + (aa & 7Fh) ticks
+
+Channel assignment (Sega MegaDrive):
+- channels 0..5: FM channels
+- channels 6..8: PSG channels (apparently without envelope?)
+- channel 9: drum channel, features hardcoded drum note assignments for notes 24h, 26h, 2Ah and 2Ch.
+- channels 10..15: FM channels
+
+
+Instrument Format
+=================
+Sega MegaDrive
+--------------
+The instrument "file" begins with "SGAINSTR" and ends with "INSTREND" in most cases.
+However this is not the case for all games.
+The "SGAINSTR" header is skipped/ignored by the sound driver and the instrument data is assumed to start right after it.
+
+Instruments are 20h bytes long.
+
+FM register order:
+30 40 50 60 70 80 90 34 44 54 64 74 84 94 38 48 58 68 78 88 98 3C 4C 5C 6C 7C 8C 9C A4 A0 B0 B4
+
+
+Hacking Info
+============
+HardBall!
+---------
+Z80 Sound Driver Data:	0A0000 (written to Z80 RAM 0000)
+FM instruments:		0A0561 (no header, part of sound driver)
+Music Pointers:		002DF4 (4-byte Big Endian pointers) [uses Header v1]
+
+Note:
+The game has 2 songs: The "title" song and a "countdown" song.
+The latter song, however, seems to use an older sequence format with a different command:
+  1n/9n pp - play note on channel n, pitch pp, default velocity
+This makes the song unplayable by the sound driver.
+
+
+HardBall III
+------------
+Z80 Sound Driver Data:	0446CC (compressed, the "SEGASND.TSK" archive is decompressed to "SEGASND.PTS" at 68k RAM 45AC, then parts are copied to Z80 RAM)
+FM instruments:		--- (compressed, part of sound driver, Z80 RAM 15D9)
+Music Pointers:		--- (part of compressed data) [uses Header v3]
+Play BGM:		0158D2 (song ID in on stack, first song is 01)
+
+
+Barkley Shut Up and Jam! 2
+--------------------------
+Z80 FM/PCM Driver Data:	01691C
+FM instruments:		1C94D5 ("SGAINSTR" header is skipped)
+Music Pointers:		00AD28 (4-byte Big Endian pointers) [uses Header v5]
+Play BGM:		019DA2 (song ID in on stack, first song is 01)
+SFX Pointers:		00ADD0 (4-byte Big Endian pointers)
+
+Note: This game does heavy PCM work, so they run the main sound driver on the 68000. All earlier games run sound entirely on the Z80.
+
+
+Bubsy in Claws Encounters of the Furred Kind (Sega MegaDrive)
+--------------------------------------------
+Load Sound Driver:	150CDA
+Stop All Sound:		151036 (writes something to Z80 RAM 0100)
+Set BGM Pointer List:	150C0A (address of first pointer in register A0)
+Play BGM:		150BAA (song ID in register D0, first song is 01)
+Play Sound Effect:	150B0E (S.E. ID in register D0)
+??			150C0A
+Z80 Sound Driver Data:	15115E (written to Z80 RAM 0000)
+FM instruments:		151E44 ("SGAINSTR" header is skipped, the rest is written to Z80 RAM 1100)
+Music Pointers:		1509A2 (4-byte Big Endian pointers) [uses Header v4]
+SFX Pointers:		150892 (4-byte Big Endian pointers)
+SFX Playlist:		00244C
+
+Z80 memory layout:
+0070 - pause mode (00 = paused, 01..FFh = running)
+0071 - number of ticks to advance in per frame
+	05 (NTSC mode) / 06 (PAL mode)
+0072 - master volume (00 = silent, 7Fh = maximum)
+00C0 - enable drums (00 = disabled, 01..FFh = enabled)
+00E0..00FF - sequence state during processing (temporary copy of 0100..017F)
+  00E0 - active (01 = yes, others = no)
+  00E1 - track volume
+  00E3 = last command byte
+  00E6..F5 - current instruments (1 for each MIDI channel)
+  00F6/F7 - remaining ticks until next event
+  00F8/F9 - sequence data pointer (current)
+  00FA/FB - sequence data pointer (loop start)
+  00FC/FD - Z80 ROM bank of sequence data (current) (00FC bit 7 = lowest bank bit, 00FD bits 0..7 = higher bank bits)
+  00FE/FF - Z80 ROM bank of sequence data (loop start)
+0100..017F - sequence state, keeps track of 4 sequence states of 20h bytes each
+
+0346 - current channel
+0348 - note velocity
+034A - followed by delay
+034B - last command byte
+034C - note pitch
+034D - current channel

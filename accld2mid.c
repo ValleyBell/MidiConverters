@@ -1,6 +1,7 @@
-// Accolade MegaDrive -> Midi Converter
-// ------------------------------------
+// Accolade -> Midi Converter
+// --------------------------
 // Written by Valley Bell, 6 November 2026
+// Last update: 15 November 2026
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -29,10 +30,10 @@
 
 
 UINT8 Accolade2Mid(UINT32 songLen, const UINT8* songData);
-UINT8 Accolade_InsDump(UINT32 insLen, const UINT8* insData);
+UINT8 AccoladeMD_InsDump(UINT32 insLen, const UINT8* insData);
 static UINT8 ReadFileData(const char* fileName, UINT32* retSize, UINT8** retData, UINT32 maxFileSize);
 static UINT8 WriteFileData(const char* fileName, UINT32 dataLen, const UINT8* data);
-INLINE UINT32 Tempo2Mid(UINT16 bpm);
+INLINE UINT32 Tempo2Mid(void);
 INLINE UINT16 ReadLE16(const UINT8* data);
 INLINE UINT32 ReadBE32(const UINT8* data);
 static const char* GetLastDirSepPos(const char* fileName);
@@ -47,7 +48,10 @@ static UINT8* ROMData;
 static UINT32 MidLen;
 static UINT8* MidData;
 
-static UINT16 MIDI_RES = 120;
+static UINT16 MIDI_RES = 0;
+static UINT16 MIDI_RES_ORG = 0;
+static UINT16 OPT_TPQ = 0;
+static UINT16 OPT_TPS = 0;
 static UINT16 NUM_LOOPS = 2;
 
 int main(int argc, char* argv[])
@@ -63,17 +67,23 @@ int main(int argc, char* argv[])
 	printf("Accolade -> Midi Converter\n--------------------------\n");
 	if (argc < 3)
 	{
-		printf("Usage, dump single song:    %s -mus [options] rom.bin output.mid songOffset\n", argv[0]);
-		printf("Usage, dump songs:          %s -mus [options] rom.bin output.mid songListOffset songCount\n", argv[0]);
-		printf("Usage, dump instruments:    %s -ins [options] rom.bin output.gyb insDataOffset\n", argv[0]);
+		printf("Usage, single song:	%s -mus [options] song.mus output.mid\n", argv[0]);
+		printf("Usage, songs:       %s -mus [options] rom.bin output.mid songListOffset [songCount]\n", argv[0]);
+		printf("Usage, instruments: %s -ins [options] rom.bin output.gyb insDataOffset\n", argv[0]);
 		printf("Modes:\n");
 		printf("    -mus        Music Mode (convert sequences to MID)\n");
-		printf("                In song list mode, the tool will add the song number to the file name.\n");
-		printf("                Use 0 as songCount to auto-detect the number of songs.\n");
-		printf("    -ins        Instrument Mode (dump instruments to GYB)\n");
+		printf("                Omit the offset for stand-alone MUS files (e.g. from MS-DOS games)\n");
+		printf("                In song list mode, the tool will add the song number\n");
+		printf("                to the file name.\n");
+		printf("                Omit songCount to auto-detect the number of songs.\n");
+		printf("    -ins        Instrument Mode (dump MegaDrive instruments to GYB)\n");
 		printf("Options:\n");
 		printf("    -Loops n    Loop each track at least n times. (default: %u)\n", NUM_LOOPS);
-		printf("    -TpQ n      Sets the number of Ticks per Quarter to n. (default: %u)\n", MIDI_RES);
+		printf("    -TpQ n      Sets the number of Ticks per Quarter to n.\n");
+		printf("                default: TpS / 2\n");
+		printf("    -TpS n      Override the number of Ticks per Second. (affects tempo!)\n");
+		printf("                default: 120 (old format), 150 (MS-DOS), 120 (MegaDrive)\n");
+		printf("                Use 60 with early MegaDrive games.\n");
 		return 0;
 	}
 	
@@ -104,19 +114,25 @@ int main(int argc, char* argv[])
 			argbase ++;
 			if (argbase < argc)
 			{
-				MIDI_RES = (UINT16)strtoul(argv[argbase], NULL, 0);
-				if (! MIDI_RES)
-					MIDI_RES = 120;
+				OPT_TPQ = (UINT16)strtoul(argv[argbase], NULL, 0);
+			}
+		}
+		else if (! stricmp(argv[argbase] + 1, "TpS"))
+		{
+			argbase ++;
+			if (argbase < argc)
+			{
+				OPT_TPS = (UINT16)strtoul(argv[argbase], NULL, 0);
 			}
 		}
 		else
 			break;
 		argbase ++;
 	}
-	if (argc < argbase + 3)
+	if (argc < argbase + 2)
 	{
 		printf("Not enough arguments.\n");
-		return 0;
+		return 1;
 	}
 	
 	romFileName = argv[argbase + 0];
@@ -130,24 +146,28 @@ int main(int argc, char* argv[])
 	switch(convMode)
 	{
 	case MODE_MUS:
-		dataPos = (UINT32)strtoul(argv[argbase + 2], NULL, 0);
-		if (argc <= argbase + 3)
+		if (argc <= argbase + 2)
 		{
-			UINT32 songPos = dataPos;
 			UINT16 songLen;
-			if (songPos + 0x10 > ROMLen)
+			if (ROMLen < 0x04)
 			{
-				printf("Invalid ROM offset\n");
+				printf("Bad file.\n");
 				result = 1;
 				break;
 			}
 			
-			songLen = ReadLE16(&ROMData[songPos]);
-			retVal = Accolade2Mid(songLen, &ROMData[songPos]);
+			songLen = ReadLE16(&ROMData[0x00]);
+			if (songLen > ROMLen)
+			{
+				printf("Bad file: Song size > actual file size\n");
+				result = 1;
+				break;
+			}
+			retVal = Accolade2Mid(songLen, &ROMData[0x00]);
 			if (retVal)
 			{
-				result = retVal;
 				printf("Conversion error\n");
+				result = retVal;
 				break;
 			}
 			
@@ -172,46 +192,58 @@ int main(int argc, char* argv[])
 			strcpy(outName, outFileName);
 			outExt = outName + (fileExt - outFileName);
 			
-			songListPos = dataPos;
+			songListPos = dataPos = (UINT32)strtoul(argv[argbase + 2], NULL, 0);
 			if (dataPos + 0x04 > ROMLen)
 			{
-				printf("Bad offset!\n");
 				result = 1;
+				printf("Bad offset!\n");
 				break;
 			}
 			//printf("Song list offset: 0x%06X\n", songListPos);
 			
 			// detect number of songs
-			fileCnt = (UINT16)strtoul(argv[argbase + 3], NULL, 0);
-			if (fileCnt == 0)
+			if (argc > argbase + 3)
 			{
+				fileCnt = (UINT16)strtoul(argv[argbase + 3], NULL, 0);
+			}
+			else
+			{
+				UINT32 lastAddr = 0;
 				for (fileCnt = 0; fileCnt < 0x100; fileCnt ++)
 				{
 					UINT32 songPos = ReadBE32(&ROMData[songListPos + fileCnt * 0x04]);
+					int addrDiff;
+					
 					if (songPos + 0x10 > ROMLen)
 						break;
-					if (ROMData[songPos + 0x02] != 0xFC)
-						break;
+					//if (ROMData[songPos + 0x02] != 0xFC)	// the check fails with "Hardball"
+					//	break;
+					if (lastAddr == 0)
+						lastAddr = songPos;
+					addrDiff = songPos - lastAddr;
+					if (!(addrDiff >= -0x40000 && addrDiff <= +0x40000))
+						break;	// We assume that all songs are stored close to each other. (within 256 KB)
 				}
+				printf("Songs detected: %u\n", fileCnt);
 			}
 			
 			for (curFile = 0; curFile < fileCnt; curFile ++)
 			{
 				UINT32 songPos = ReadBE32(&ROMData[songListPos + curFile * 0x04]);
 				UINT16 songLen;
-				printf("File %u / %u (ofs 0x%06X) ...", 1 + curFile, fileCnt, songPos);
+				printf("File %u / %u (ofs 0x%06X) ...  ", 1 + curFile, fileCnt, songPos);
 				
 				if (songPos + 0x10 > ROMLen)
 				{
-					printf("  invalid ROM offset\n");
+					printf("invalid ROM offset\n");
 					continue;
 				}
 				songLen = ReadLE16(&ROMData[songPos]);
 				retVal = Accolade2Mid(songLen, &ROMData[songPos]);
 				if (retVal)
 				{
+					printf("conversion error\n");
 					result = retVal;
-					printf("  conversion error\n");
 					continue;
 				}
 				
@@ -224,12 +256,17 @@ int main(int argc, char* argv[])
 						result = 1;
 				}
 				free(MidData);	MidData = NULL;
-				printf("\n");
 			}
 		}
 		printf("Done.\n");
 		break;
 	case MODE_INS:
+		if (argc < argbase + 3)
+		{
+			printf("Not enough arguments.\n");
+			result = 1;
+			break;
+		}
 		dataPos = (UINT32)strtoul(argv[argbase + 2], NULL, 0);
 		if (dataPos + 0x20 > ROMLen)
 		{
@@ -237,7 +274,7 @@ int main(int argc, char* argv[])
 			result = 1;
 			break;
 		}
-		retVal = Accolade_InsDump(ROMLen - dataPos, &ROMData[dataPos]);
+		retVal = AccoladeMD_InsDump(ROMLen - dataPos, &ROMData[dataPos]);
 		if (retVal)
 		{
 			result = retVal;
@@ -270,24 +307,106 @@ UINT8 Accolade2Mid(UINT32 songLen, const UINT8* songData)
 	UINT8 trkEnd;
 	UINT8 tempArr[0x04];
 	UINT16 mstLoopCnt;
+	UINT8 pbRange[0x10];
 	
 	midFileInf.alloc = 0x20000;	// 128 KB should be enough
 	midFileInf.data = (UINT8*)malloc(midFileInf.alloc);
 	midFileInf.pos = 0x00;
 	
-	inPos = ReadLE16(&songData[0x04]);
+	if (songData[0x02] == 0xFC)
+	{
+		/* Header:
+		2 bytes - length of following data (excludes this value)
+		1 byte  - value 0xFC
+		1 byte  - music type
+		? bytes - version-specific header
+		*/
+		if (songData[0x03] == 0x04)
+		{
+			/* header:
+			1 bytes - sequence data pointer (absolute)
+			1 byte  - ?? (usually 6)
+			*/
+			printf("Header v2\n");
+			inPos = songData[0x04];
+			MIDI_RES_ORG = 146;
+		}
+		else if (songData[0x03] == 0x29)
+		{
+			/* header:
+			1 bytes - sequence data pointer (absolute)
+			1 byte  - ?? (usually 1)
+			1 byte  - ?? (usually 0 or 1)
+			1 byte  - ?? (usually 0), missing in some games
+			*/
+			printf("Header v3\n");
+			inPos = songData[0x04];
+			MIDI_RES_ORG = 146;
+		}
+		else if (songData[0x03] == 0x34 || songData[0x03] == 0x38)
+		{
+			/* header:
+			1 bytes - sequence data pointer (absolute)
+			1 byte  - ?? (usually 0)
+			1 byte  - ?? (usually 0)
+			2 bytes - ticks per second
+			2 bytes - song tempo
+			2 bytes - ?? (usually 0)
+			2 bytes - pointer to instrument list (absolute)
+			1 byte  - length of instrument list
+			*/
+			inPos = songData[0x04];
+			MIDI_RES_ORG = ReadLE16(&songData[0x07]);
+			if (songData[0x03] == 0x34)
+				printf("Header v4, %u ticks/second\n", MIDI_RES_ORG);
+			else if (songData[0x03] == 0x38)
+				printf("Header v5, %u ticks/second\n", MIDI_RES_ORG);
+		}
+		else
+		{
+			printf("Unknown Accolade music type: 0x%02X\n", songData[0x03]);
+			return 0x01;
+		}
+	}
+	else if (songData[0x02] >= 0x40 && songData[0x02] <= 0x4F)	// heuristic: assume that the song begins with setting instruments
+	{
+		// "old GMS version", used by "Elvira: Mistress of the Dark" and "Hardball!"
+		printf("Header v1\n");
+		inPos = 0x02;
+		MIDI_RES_ORG = 146;	// default value for "Platform: PC" in Accolade's Mid2Mus
+	}
+	else
+	{
+		printf("Not an Accolade music file!\n");
+		return 0x01;
+	}
+	
+	if (OPT_TPS)
+		MIDI_RES_ORG = OPT_TPS;
+	if (OPT_TPQ)
+	{
+		MIDI_RES = OPT_TPQ;
+	}
+	else
+	{
+		if ((MIDI_RES_ORG % 2) == 0)
+			MIDI_RES = MIDI_RES_ORG / 2;	// default to 120 BPM
+		else
+			MIDI_RES = MIDI_RES_ORG;	// use 60 BPM when we can't divide the resolution by 2
+	}
 	
 	WriteMidiHeader(&midFileInf, 0x0000, 1, MIDI_RES);
 	
 	WriteMidiTrackStart(&midFileInf, &MTS);
 	
 	MTS.midChn = 0x00;
-	WriteBE32(tempArr, Tempo2Mid(150));
+	WriteBE32(tempArr, Tempo2Mid());
 	WriteMetaEvent(&midFileInf, &MTS, 0x51, 0x03, &tempArr[0x01]);
 	
 	mstLoopCnt = 0;
 	loopPos = 0x00;
 	loopHasDelay = 0x00;
+	memset(pbRange, 0, 0x10);
 	trkEnd = 0;
 	while(inPos < songLen && ! trkEnd)
 	{
@@ -304,8 +423,14 @@ UINT8 Accolade2Mid(UINT32 songLen, const UINT8* songData)
 			inPos += 0x01;
 			break;
 		case 0x90:	// Note On
+#if 1
 			WriteEvent(&midFileInf, &MTS, curCmd, songData[inPos + 0x00], songData[inPos + 0x01]);
 			inPos += 0x02;
+#else
+			// apparently an older command set? (used by the second song in "HardBall!")
+			WriteEvent(&midFileInf, &MTS, curCmd, songData[inPos + 0x00], 0x7F);
+			inPos += 0x01;
+#endif
 			break;
 		case 0xA0:	// Loop Marker
 		{
@@ -329,26 +454,50 @@ UINT8 Accolade2Mid(UINT32 songLen, const UINT8* songData)
 					hasDelay = loopHasDelay;	// important! (else Bubsy song 1 breaks)
 				}
 			}
-			WriteEvent(&midFileInf, &MTS, 0xB0, 0x6F, (UINT8)mstLoopCnt);
+			WriteEvent(&midFileInf, &MTS, 0xB0 | (curCmd & 0x0F), 0x6F, (UINT8)mstLoopCnt);
 		}
 			break;
-		case 0xB0:	// unused
+		case 0xB0:	// unknown
 			printf("Unknown event %02X at offset %04X\n", curCmd, inPos - 0x01);
-			WriteEvent(&midFileInf, &MTS, curCmd, 0x10, 0x00);
-			//inPos += 0x00;
+#if 1
+			// used after instrument setup in WaxWorld
+			WriteEvent(&midFileInf, &MTS, 0xA0 | (curCmd & 0x0F), 0x00, (curCmd >> 4) & 0x07);
+			inPos += 0x00;
+#else
+			// seems to be used with a different command size in "Barkley Shut Up and Jam! 2"
+			WriteEvent(&midFileInf, &MTS, curCmd, songData[inPos + 0x00], songData[inPos + 0x01]);
+			inPos += 0x02;
+#endif
 			break;
 		case 0xC0:	// set instrument
 			WriteEvent(&midFileInf, &MTS, curCmd, songData[inPos + 0x00], 0x00);
 			inPos += 0x01;
 			break;
-		case 0xD0:	// ??
+		case 0xD0:	// unknown (used during long notes in WaxWorld)
 			printf("Unknown event %02X at offset %04X\n", curCmd, inPos - 0x01);
-			WriteEvent(&midFileInf, &MTS, curCmd, 0x00, 0x00);
+#if 1
+			WriteEvent(&midFileInf, &MTS, 0xA0 | (curCmd & 0x0F), 0x00, (curCmd >> 4) & 0x07);
 			//inPos += 0x00;
-			break;
-		case 0xE0:	// Pitch Bend? (unused)
-			printf("Unknown event %02X at offset %04X\n", curCmd, inPos - 0x01);
+#else
+			// different command size in "HardBall III"
 			WriteEvent(&midFileInf, &MTS, curCmd, songData[inPos + 0x00], 0x00);
+			inPos += 0x01;
+#endif
+			break;
+		case 0xE0:	// Pitch Bend
+			{
+				UINT8 chn = curCmd & 0x0F;
+				UINT16 pbVal = songData[inPos + 0x00] << 6;
+				if (pbRange[chn] == 0)
+				{
+					// initialize Pitch Bend range
+					pbRange[chn] = 12;	// that's what "Barkley Shut Up and Jam! 2" uses
+					WriteEvent(&midFileInf, &MTS, 0xB0 | chn, 0x65, 0x00);
+					WriteEvent(&midFileInf, &MTS, 0xB0 | chn, 0x64, 0x00);
+					WriteEvent(&midFileInf, &MTS, 0xB0 | chn, 0x06, pbRange[chn]);
+				}
+				WriteEvent(&midFileInf, &MTS, curCmd, (pbVal >> 0) & 0x7F, (pbVal >> 7) & 0x7F);
+			}
 			inPos += 0x01;
 			break;
 		case 0xF0:	// Track End
@@ -417,13 +566,13 @@ static UINT8 WriteFileData(const char* fileName, UINT32 dataLen, const UINT8* da
 	return 0x00;
 }
 
-INLINE UINT32 Tempo2Mid(UINT16 bpm)
+INLINE UINT32 Tempo2Mid(void)
 {
-	// formula: (60 000 000 / bpm) * (MIDI_RES / 120)
-	return 500000 * MIDI_RES / bpm;
+	// formula: (1 000 000 / bpm) * (MIDI_RES / MIDI_RES_ORG)
+	return 1000000 * MIDI_RES / MIDI_RES_ORG;
 }
 
-UINT8 Accolade_InsDump(UINT32 insLen, const UINT8* insData)
+UINT8 AccoladeMD_InsDump(UINT32 insLen, const UINT8* insData)
 {
 	// GYB order is: 30..3C, 40..4C, ... , 90..9C, B0, B4, transposition, padding
 	// Accolade order is: 30, 40, 50, 60, 70, 80, 90, 34, 44, ..., 8C, 9C, A4, A0, B0, B4
@@ -446,25 +595,34 @@ UINT8 Accolade_InsDump(UINT32 insLen, const UINT8* insData)
 	UINT32 gybPos;
 	
 	insPos = 0x00;
-	if (memcmp((const char*)&insData[0x00], "SGAINSTR", 8))
+	if (! memcmp((const char*)&insData[0x00], "SGAINSTR", 8))
+	{
+		printf("SGAINSTR found.\n");
+		insPos += 0x08;
+		
+		// Note: "Bubsy 1" always copies 0xF00 bytes. (0x78 instruments)
+		for (insCnt = 0; insCnt < 0x1000/0x20; insCnt ++)
+		{
+			const UINT8* insPtr = &insData[insPos + insCnt * 0x20];
+			if (! memcmp((const char*)&insPtr[0x00], "INSTREND", 8))
+			{
+				printf("INSTREND found.\n");
+				break;	// stop on end signature
+			}
+		}
+		printf("Instruments counted: 0x%02X\n", insCnt);
+	}
+	// Old sound drivers don't have a signature, so we do a heuristic check on settings for YM2612 registers 30, 90, B4
+	else if (insData[0x00] != 0x00 && (insData[0x06] & 0xF0) == 0x00 && (insData[0x1F] & 0xC0) != 0x00)
+	{
+		printf("Assuming raw data without signature\n");
+		insCnt = 0x1000/0x20;	// assume 0x80 instruments here
+	}
+	else
 	{
 		printf("Bad instrument data offset: Signature missing\n");
 		return 0x80;
 	}
-	insPos += 0x08;
-	
-#if 0
-	for (insCnt = 0; insCnt < 0xF00/0x20; insCnt ++)
-	{
-		const UINT8* insPtr = &insData[insCnt * 0x20];
-		if ((insPtr[0x1F] & 0xC0) == 0x00)	// 
-			break;
-	}
-	printf("Instruments counted: 0x%02X\n", insCnt);
-#else
-	// "Bubsy" always copies 0xF00 bytes, so let's just be sure for now.
-	insCnt = 0xF00/0x20;
-#endif
 	
 	// required space: 0x06 + 0x100 + 0x80*[insDataLen==0x20 + 0x01 + nameMax==0x32] + 0x04 = 0x2A8A
 	gybAlloc = 0x4000;	// This is be more than enough space

@@ -1,15 +1,42 @@
 # MIDI Converters
 various \<game format\> to MIDI converters I wrote over the years.
 
-## acl2mid
+## accld2mid
 This tool converts songs from Accolade's MUS format to MIDI.
 
 This sequence format was developed by Russell Shiffer for use with sound drivers in Accolade-developed games on various platforms.
 
 It is known to work with the following games:
 - Bubsy in Claws Encounters of the Furred Kind (Sega MegaDrive)
+- Elvira: Mistress of the Dark (MS-DOS)
+- Elvira II: The Jaws of Cerberus (MS-DOS)
+- Hardball! (Sega MegaDrive)
+- Simon the Sorcerer Demo (MS-DOS)
+- WaxWorks (MS-DOS)
 
-I wrote this tool on request by Infomaniac95.
+There are also a few games that use a few changed commands. The source code has patches for them annotated:
+- Barkley Shut Up and Jam! 2 (Sega MegaDrive)
+- HardBall III (Sega MegaDrive)
+
+I wrote this tool on request by Infomaniac95, who asked for conversions of the songs from Bubsy 1 (MegaDrive).
+
+The tool accepts raw MUS files (as used by MS-DOS games) and game ROMs (e.g. Sega MegaDrive).
+In case of ROMs, you have to specify the music pointer list and the tool will convert all songs specified in that list.
+With MegaDrive ROMs you can also convert the instruments to GYB files.  
+The MUS format has a fixed tempo, but you can try to use the `-TpQ` option to set different tick resolutions that fit the original tempo better.
+
+Many of the MS-DOS games seem to use an MT-32 style instrument set.
+
+Example calls:
+
+```
+acl2mid -mus mod1.mus mod1.mid
+acl2mid -mus "Barkley Shut Up and Jam! 2.bin" BSUaJ2_.mid 0x00AD28
+acl2mid -mus -TpQ 225 "Bubsy.bin" Bubsy_.mid 0x1509A2
+acl2mid -ins "Bubsy.bin" Bubsy.gyb 0x151E44
+acl2mid -mus -TpS 60 "HardBall!.bin" "HB1_.mid" 0x002DF4 1
+acl2mid -ins "HardBall!.bin" HB.gyb 0x0A0561
+```
 
 ## AKAO2MID
 This tool converts PSX AKAO v1 and v2 to MIDI. It is based on the information [here](http://wiki.qhimm.com/view/FF7/PSX/Sound/AKAO_frames), but I did a lot of additional reverse engineering.
